@@ -1,0 +1,29 @@
+{
+  "name": "isobot",
+  "version": "0.1.0",
+  "description": "Discord bot for the isolated.tech server: turns Discord messages into GitHub issues via Claude.",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc && node -e \"require('node:fs').mkdirSync('dist/config',{recursive:true});require('node:fs').copyFileSync('src/config/repos.json','dist/config/repos.json')\"",
+    "typecheck": "tsc --noEmit",
+    "webhooks:register": "tsx src/webhooks/register.ts"
+  },
+  "dependencies": {
+    "@octokit/rest": "^21.0.2",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.7",
+    "openai": "^6.35.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
