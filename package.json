@@ -1,7 +1,7 @@
 {
   "name": "isobot",
   "version": "0.1.0",
-  "description": "Discord bot for the isolated.tech server: turns Discord messages into GitHub issues via Claude.",
+  "description": "Discord bot for the isolated.tech server: turns Discord messages into GitHub issues via OpenAI gpt-5-mini.",
   "private": true,
   "type": "module",
   "main": "dist/index.js",

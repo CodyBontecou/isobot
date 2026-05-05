@@ -1,5 +1,5 @@
-import { Events, type Client, type Message } from "discord.js";
-import { fetchReplyContext } from "../lib/context.js";
+import { Events, type AnyThreadChannel, type Client, type Message } from "discord.js";
+import { fetchReplyContext, fetchThreadStarterContext, type ReplyContext } from "../lib/context.js";
 import { channelToRepo, listMappedKeys } from "../config/repos.js";
 import { runAgent } from "../agent/runAgent.js";
 import { isAllowed } from "../auth.js";
@@ -44,17 +44,23 @@ export function registerTicketMention(client: Client): void {
         return;
       }
 
-      if (!message.reference?.messageId) {
+      const inThread = message.channel.isThread();
+      const thread = inThread ? (message.channel as AnyThreadChannel) : null;
+
+      if (!inThread && !message.reference?.messageId) {
         await message.reply({
           content:
-            "Reply to the comment you want to turn into a ticket, then mention me in your reply.",
+            "Reply to the comment you want to turn into a ticket, then mention me in your reply. Or open a thread on the comment and mention me there.",
           allowedMentions: { repliedUser: false },
         });
         return;
       }
 
-      const channelName =
-        "name" in message.channel && typeof message.channel.name === "string"
+      const channelName = thread
+        ? thread.parent && "name" in thread.parent && typeof thread.parent.name === "string"
+          ? thread.parent.name
+          : null
+        : "name" in message.channel && typeof message.channel.name === "string"
           ? message.channel.name
           : null;
       if (!channelName) {
@@ -65,8 +71,11 @@ export function registerTicketMention(client: Client): void {
         return;
       }
 
-      const categoryName =
-        "parent" in message.channel && message.channel.parent?.name
+      const categoryName = thread
+        ? thread.parent && "parent" in thread.parent && thread.parent.parent?.name
+          ? thread.parent.parent.name
+          : null
+        : "parent" in message.channel && message.channel.parent?.name
           ? message.channel.parent.name
           : null;
 
@@ -81,13 +90,26 @@ export function registerTicketMention(client: Client): void {
         return;
       }
 
-      const replyContext = await fetchReplyContext(message);
-      if (!replyContext) {
-        await message.reply({
-          content: "I couldn't fetch the parent message. Try again, or check my permissions.",
-          allowedMentions: { repliedUser: false },
-        });
-        return;
+      let replyContext: ReplyContext | null;
+      if (thread && !message.reference?.messageId) {
+        replyContext = await fetchThreadStarterContext(message, thread);
+        if (!replyContext) {
+          await message.reply({
+            content:
+              "I couldn't find a message to ticketize in this thread. Reply to a specific message and mention me, or open the thread directly on the comment you want to capture.",
+            allowedMentions: { repliedUser: false },
+          });
+          return;
+        }
+      } else {
+        replyContext = await fetchReplyContext(message);
+        if (!replyContext) {
+          await message.reply({
+            content: "I couldn't fetch the parent message. Try again, or check my permissions.",
+            allowedMentions: { repliedUser: false },
+          });
+          return;
+        }
       }
 
       await message.react(WORKING).catch(() => {});
