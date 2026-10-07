@@ -1,20 +1,6 @@
 import type { AnyThreadChannel, Message, TextBasedChannel } from "discord.js";
-
-export interface MessageSnapshot {
-  authorTag: string;
-  authorId: string;
-  content: string;
-  jumpUrl: string;
-  createdAt: string;
-}
-
-export interface ReplyContext {
-  trigger: MessageSnapshot;
-  parent: MessageSnapshot;
-  recent: MessageSnapshot[];
-  channelName: string;
-  guildName: string;
-}
+import type { MessageSnapshot, ReplyContext } from "../agent/types.js";
+export type { MessageSnapshot, ReplyContext } from "../agent/types.js";
 
 function snapshot(message: Message): MessageSnapshot {
   return {

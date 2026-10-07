@@ -25,7 +25,10 @@ function shouldReplyDenial(userId: string): boolean {
 }
 
 export function registerTicketMention(client: Client): void {
+  const inFlight = new Set<string>();
   client.on(Events.MessageCreate, async (message: Message) => {
+    if (inFlight.has(message.id)) return;
+    inFlight.add(message.id);
     try {
       if (message.author.bot) return;
       if (!client.user) return;
@@ -147,6 +150,8 @@ export function registerTicketMention(client: Client): void {
       }
     } catch (outer) {
       console.error("[isobot] handler crashed:", outer);
+    } finally {
+      inFlight.delete(message.id);
     }
   });
 }

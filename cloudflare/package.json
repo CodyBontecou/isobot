@@ -1,0 +1,29 @@
+{
+  "name": "isobot-pi-durable",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "logs": "wrangler tail isobot-pi --format pretty",
+    "types": "wrangler types"
+  },
+  "dependencies": {
+    "agents": "0.26.0",
+    "@earendil-works/pi-ai": "1.0.4",
+    "@earendil-works/pi-durable": "1.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2",
+    "wrangler": "4.148.0",
+    "esbuild": "0.28.2",
+    "miniflare": "5.20261006.0-alpha"
+  },
+  "overrides": {
+    "@modelcontextprotocol/client": "2.2.0",
+    "@modelcontextprotocol/sdk": "1.31.0",
+    "sharp": "0.35.5"
+  }
+}

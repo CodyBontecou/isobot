@@ -6,6 +6,7 @@ import { registerForumPostCreated } from "./handlers/forumPostCreated.js";
 import { registerThreadCommentSync } from "./handlers/threadCommentSync.js";
 import { startWebhookServer } from "./webhooks/server.js";
 import { initAllowlist, describeAllowlist } from "./auth.js";
+import { registerAgentRecovery } from "./agent/recovery.js";
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -18,7 +19,8 @@ function requireEnv(name: string): string {
 
 async function main(): Promise<void> {
   const token = requireEnv("DISCORD_BOT_TOKEN");
-  requireEnv("OPENAI_API_KEY");
+  requireEnv("ISOBOT_AGENT_URL");
+  requireEnv("ISOBOT_API_TOKEN");
   requireEnv("GITHUB_TOKEN");
 
   const client = createClient();
@@ -40,6 +42,7 @@ async function main(): Promise<void> {
   registerTicketMention(client);
   registerForumPostCreated(client);
   registerThreadCommentSync(client);
+  const stopRecovery = registerAgentRecovery(client);
 
   const webhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
   const port = Number(process.env.PORT ?? 8080);
@@ -51,6 +54,7 @@ async function main(): Promise<void> {
 
   const shutdown = async (signal: string) => {
     console.log(`[isobot] received ${signal}, shutting down`);
+    stopRecovery();
     try {
       await client.destroy();
     } finally {

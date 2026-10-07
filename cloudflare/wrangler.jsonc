@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "isobot-pi",
+  "main": "src/index.ts",
+  "account_id": "e4265f322e6380ee832b83ad45e3e8c0",
+  "compatibility_date": "2026-10-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI" },
+  "vars": { "PI_MODEL": "@cf/moonshotai/kimi-k2.7-code" },
+  "durable_objects": {
+    "bindings": [
+      { "name": "Assistant", "class_name": "Assistant" },
+      { "name": "Isobot", "class_name": "Isobot" },
+      { "name": "DeliveryInbox", "class_name": "DeliveryInbox" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Assistant"] },
+    { "tag": "v2", "new_sqlite_classes": ["Isobot"] },
+    { "tag": "v3", "new_sqlite_classes": ["DeliveryInbox"] }
+  ],
+  "observability": { "enabled": true }
+}

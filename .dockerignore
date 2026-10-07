@@ -2,9 +2,14 @@ node_modules
 dist
 .env
 .env.local
+.env.prompt
 .env.*.local
 *.log
 .DS_Store
 .git
 .gitignore
 fly.toml
+
+cloudflare
+docs
+.pi

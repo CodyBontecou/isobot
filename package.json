@@ -1,7 +1,7 @@
 {
   "name": "isobot",
   "version": "0.1.0",
-  "description": "Discord bot for the isolated.tech server: turns Discord messages into GitHub issues via OpenAI gpt-5-mini.",
+  "description": "Discord isobot for isolated.tech with a Cloudflare Pi Durable agent and bidirectional GitHub issue sync.",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -10,13 +10,17 @@
     "start": "node dist/index.js",
     "build": "tsc && node -e \"require('node:fs').mkdirSync('dist/config',{recursive:true});require('node:fs').copyFileSync('src/config/repos.json','dist/config/repos.json')\"",
     "typecheck": "tsc --noEmit",
-    "webhooks:register": "tsx src/webhooks/register.ts"
+    "webhooks:register": "tsx src/webhooks/register.ts",
+    "agent:dev": "npm --prefix cloudflare run dev",
+    "agent:deploy": "npm --prefix cloudflare run deploy",
+    "agent:typecheck": "npm --prefix cloudflare run typecheck",
+    "agent:logs": "npm --prefix cloudflare run logs",
+    "test": "node --import tsx --test src/agent/*.test.ts cloudflare/src/*.test.ts"
   },
   "dependencies": {
     "@octokit/rest": "^21.0.2",
     "discord.js": "^14.16.3",
-    "dotenv": "^16.4.7",
-    "openai": "^6.35.0"
+    "dotenv": "^16.4.7"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
