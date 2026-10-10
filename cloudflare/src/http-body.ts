@@ -1,5 +1,5 @@
 /** Read bounded JSON before passing user content into a Durable Object. */
-export async function readJson(request: Request, maxBytes = 256_000): Promise<unknown> {
+export async function readJson(request: Pick<Request, "body">, maxBytes = 256_000): Promise<unknown> {
   const reader = request.body?.getReader();
   if (!reader) throw new Error("Missing request body");
   const chunks: Uint8Array[] = [];

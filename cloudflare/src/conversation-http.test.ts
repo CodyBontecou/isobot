@@ -14,7 +14,9 @@ test("conversation viewer protects transcripts and provides a credential-free br
       contents: `import worker from './index.ts';
         export default { async fetch(request, env) {
           const calls = [];
-          const bindings = { ...env, Assistant: { getByName(name) {
+          const bindings = { ...env, ASSETS: { async fetch() {
+            return new Response('/* public console asset */', {headers:{'Content-Type':'text/javascript'}});
+          } }, Assistant: { getByName(name) {
             calls.push({ name });
             return { async conversationSnapshot(options) {
               calls.push({ options });
@@ -53,12 +55,25 @@ test("conversation viewer protects transcripts and provides a credential-free br
       assert.equal(response.headers.get("X-Content-Type-Options"), "nosniff");
       assert.match(response.headers.get("Content-Security-Policy")!, /connect-src 'self'/);
       const html = await response.text();
-      assert.match(html, /type="password"/);
+      assert.match(html, /id="root"/);
+      assert.match(html, /src="\/console-assets\/app\.js"/);
+      assert.match(html, /href="\/console-assets\/app\.css"/);
       assert.doesNotMatch(html, /test-service-token|test-viewer-token|localStorage|sessionStorage/);
       assert.deepEqual(calls(response), []);
       const method = await request("/console", null, "POST");
       assert.equal(method.status, 405);
       assert.equal(method.headers.get("Allow"), "GET");
+    });
+    await t.test("console assets are public while only GET and HEAD can reach the asset binding", async () => {
+      for (const method of ["GET", "HEAD"]) {
+        const response = await request("/console-assets/app.js", null, method);
+        assert.equal(response.status, 200);
+        assert.equal(response.headers.get("Content-Type"), "text/javascript");
+        assert.deepEqual(calls(response), []);
+      }
+      const mutation = await request("/console-assets/app.js", null, "POST");
+      assert.equal(mutation.status, 405);
+      assert.equal(mutation.headers.get("Allow"), "GET, HEAD");
     });
     await t.test("invalid credentials cannot look up or read an agent", async () => {
       for (const token of [null, "incorrect"]) {

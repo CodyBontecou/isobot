@@ -6,18 +6,44 @@
   "compatibility_date": "2026-10-07",
   "compatibility_flags": ["nodejs_compat"],
   "ai": { "binding": "AI" },
-  "vars": { "PI_MODEL": "@cf/moonshotai/kimi-k2.7-code" },
+  "vars": {
+    "SUPPORT_GITHUB_REPOSITORY": "CodyBontecou/myself.md",
+    "SUPPORT_GITHUB_REF": "main",
+    "PI_MODEL": "@cf/moonshotai/kimi-k2.7-code",
+    "AUTH_ORIGIN": "https://isobot-pi.costream.workers.dev",
+    "GITHUB_OAUTH_ALLOWED_IDS": "20440899",
+  },
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+  },
   "durable_objects": {
     "bindings": [
       { "name": "Assistant", "class_name": "Assistant" },
       { "name": "Isobot", "class_name": "Isobot" },
-      { "name": "DeliveryInbox", "class_name": "DeliveryInbox" }
-    ]
+      { "name": "DeliveryInbox", "class_name": "DeliveryInbox" },
+      { "name": "ChatGPTAuth", "class_name": "ChatGPTAuth" },
+      { "name": "AccountAuth", "class_name": "AccountAuth" },
+      { "name": "SupportAccount", "class_name": "SupportAccount" },
+      { "name": "SupportDirectory", "class_name": "SupportDirectory" },
+      { "name": "SupportTurn", "class_name": "SupportTurn" },
+    ],
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Assistant"] },
     { "tag": "v2", "new_sqlite_classes": ["Isobot"] },
-    { "tag": "v3", "new_sqlite_classes": ["DeliveryInbox"] }
+    { "tag": "v3", "new_sqlite_classes": ["DeliveryInbox"] },
+    { "tag": "v4", "new_sqlite_classes": ["ChatGPTAuth"] },
+    { "tag": "v5", "new_sqlite_classes": ["AccountAuth"] },
+    {
+      "tag": "v6",
+      "new_sqlite_classes": [
+        "SupportAccount",
+        "SupportDirectory",
+        "SupportTurn",
+      ],
+    },
   ],
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
 }

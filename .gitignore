@@ -9,3 +9,5 @@ dist
 .dev.vars.*
 *.cpuprofile
 .env.prompt
+
+cloudflare/public/

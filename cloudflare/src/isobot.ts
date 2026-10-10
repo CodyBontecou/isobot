@@ -1,6 +1,5 @@
 import { Agent } from "agents";
 import { Type } from "@earendil-works/pi-ai";
-import { createModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, Harness, type ToolRegistration } from "@earendil-works/pi-durable";
 import { PiHarness } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
@@ -8,6 +7,7 @@ import type { TicketOperation, TicketRequest } from "../../src/agent/types.js";
 import { createTicketIssue } from "./github.js";
 import { ticketPrompt } from "./protocol.js";
 import type { Bindings } from "./index.js";
+import { PiModelSelection, piModels } from "./chatgpt-provider.js";
 
 interface TicketState {
   input: TicketRequest | null;
@@ -80,8 +80,7 @@ export class Isobot extends Agent<Bindings, TicketState> {
         sections: [{ key: "preamble", render: () => PREAMBLE, tag: false }],
         tools: [issueTool, replyTool],
       });
-      const models = createModels();
-      models.setProvider(this.ai.provider);
+      const models = piModels(this.ai.provider, this.env.ChatGPTAuth.getByName("primary"));
       return Harness.open(storage, {
         models, registry: this.registry,
         settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1000 }, toolExecution: "sequential" },
@@ -90,6 +89,7 @@ export class Isobot extends Agent<Bindings, TicketState> {
     },
     defaults: { model: this.ai(this.env.PI_MODEL), thinkingLevel: "low" },
   });
+  modelSelection = new PiModelSelection(this.harness, this.env.ChatGPTAuth.getByName("primary"), this.ai(this.env.PI_MODEL), this.ctx.storage);
 
   constructor(ctx: DurableObjectState, env: Bindings) {
     super(ctx, env);
@@ -99,6 +99,7 @@ export class Isobot extends Agent<Bindings, TicketState> {
   async submitTicket(input: TicketRequest) {
     if (!this.state.input) this.setState({ ...this.state, input });
     if (this.state.input!.eventId !== input.eventId) throw new Error("Ticket event mismatch");
+    await this.modelSelection.sync();
     const receipt = await this.harness.submit(ticketPrompt(this.state.input!), { operationId: input.eventId });
     return { operationId: receipt.operationId, accepted: receipt.accepted };
   }
@@ -107,6 +108,7 @@ export class Isobot extends Agent<Bindings, TicketState> {
     const input = this.state.input;
     if (!input || input.eventId !== eventId) return null;
     // Repair an eviction between storing the input and submitting to Pi.
+    await this.modelSelection.sync();
     await this.harness.submit(ticketPrompt(input), { operationId: eventId });
     const pending = (await this.harness.pending()).find(operation => operation.operationId === eventId);
     if (pending) return { operationId: eventId, status: pending.status };
