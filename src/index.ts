@@ -1,3 +1,4 @@
+import { registerSupportBridge } from "./handlers/supportBridge.js";
 import "dotenv/config";
 import { Events } from "discord.js";
 import { createClient } from "./client.js";
@@ -43,6 +44,7 @@ async function main(): Promise<void> {
   registerForumPostCreated(client);
   registerThreadCommentSync(client);
   const stopRecovery = registerAgentRecovery(client);
+  const stopSupport = registerSupportBridge(client);
 
   const webhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
   const port = Number(process.env.PORT ?? 8080);
@@ -55,6 +57,7 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string) => {
     console.log(`[isobot] received ${signal}, shutting down`);
     stopRecovery();
+    stopSupport();
     try {
       await client.destroy();
     } finally {

@@ -107,7 +107,9 @@ async function githubRequest(url: string, init: RequestInit, status: number, fet
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetcher(url, { ...init, signal: controller.signal, redirect: "error" });
+    // Workers accepts manual redirects; the exact status check below rejects every 3xx.
+    // Never follow Location with GitHub authorization headers or issue content.
+    const response = await fetcher(url, { ...init, signal: controller.signal, redirect: "manual" });
     if (response.status !== status) {
       await response.body?.cancel();
       throw new GitHubError(`GitHub request failed (HTTP ${response.status})`);

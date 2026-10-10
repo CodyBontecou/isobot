@@ -1,8 +1,13 @@
 # View Pi conversations and logs
 
-Open [the Pi viewer](https://isobot-pi.costream.workers.dev/console?conversation=vox)
-and connect with the same bearer token used in Vox. The token is held only in
-the tab's memory and cleared when you disconnect or close the tab.
+Open [the Pi console](https://isobot-pi.costream.workers.dev/console?conversation=vox)
+and sign in with GitHub. The account controls create and revoke API tokens for
+Vox. See [GitHub login setup](github-login.md). The advanced bearer connection
+also accepts the existing Vox token; it stays only in the tab's memory.
+
+The console also supports chatting with Pi, managing shared workspace files,
+viewing resource usage and published pricing, and GitHub account sign-in when
+OAuth is configured. See [the console guide](console.md) for those workflows.
 
 The conversation name must match the `conversation` parameter in your Vox
 preset URL. `vox` is the default. Refresh retrieves:
@@ -14,11 +19,12 @@ preset URL. `vox` is the default. Refresh retrieves:
 
 Use **Load earlier** for older conversation messages. The viewer reads archived
 entries from before context compaction or resets as well as recent messages.
-Memory-only captures appear under **Saved captures**; they do not create model
-messages. While Pi is busy, the viewer refreshes every ten seconds.
+Memory-only captures appear under **Captures**; they do not create model
+messages. While Pi is busy, the console refreshes the transcript every 2.5 seconds.
 
 The public `/console` page contains only the interface. Conversation and capture
-data require bearer authentication. External strings are rendered as text, and
+data require an authenticated session or bearer token. External text is rendered
+as escaped text or safe Markdown, and
 the page only connects to the Worker's own origin. The transcript presents
 visible messages and tools; it excludes model thinking, provider signatures,
 and private harness metadata.

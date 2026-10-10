@@ -9,3 +9,11 @@ dist
 .dev.vars.*
 *.cpuprofile
 .env.prompt
+.env.chatgpt
+.env.oauth
+.chatgpt/
+cloudflare/public/
+ios/.build/
+ios/DerivedData/
+*.xcuserstate
+xcuserdata/

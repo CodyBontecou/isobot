@@ -3,6 +3,8 @@ dist
 .env
 .env.local
 .env.prompt
+.env.oauth
+.env.chatgpt
 .env.*.local
 *.log
 .DS_Store

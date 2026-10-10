@@ -15,7 +15,8 @@
     "agent:deploy": "npm --prefix cloudflare run deploy",
     "agent:typecheck": "npm --prefix cloudflare run typecheck",
     "agent:logs": "npm --prefix cloudflare run logs",
-    "test": "node --import tsx --test src/agent/*.test.ts cloudflare/src/*.test.ts"
+    "chatgpt": "node scripts/chatgpt.mjs",
+    "test": "node --import tsx --test src/agent/*.test.ts cloudflare/src/*.test.ts scripts/*.test.mjs"
   },
   "dependencies": {
     "@octokit/rest": "^21.0.2",

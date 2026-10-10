@@ -1,0 +1,551 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		004204E767FF63CA4CE276EB /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3F40CF0C4788DD07B832E05A /* Assets.xcassets */; };
+		106B0544AA83AAC7F1F64921 /* PreviewServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 705D6C1546B713762AC9878D /* PreviewServer.swift */; };
+		540F36F057AFA708ED19E313 /* IsobotApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24F9BC9D4EAA42E9F3DE4EE3 /* IsobotApp.swift */; };
+		62260AB6EB6F4491DF8D3EDC /* WorkspaceCapturesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81774FE9210454DCD29A7629 /* WorkspaceCapturesView.swift */; };
+		6B9326DF721B0C056B7DD8B2 /* SignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 556BD81F5D87938E16308359 /* SignInView.swift */; };
+		74C54B7C7B8BEF1CDC0A5038 /* GitHubSignIn.swift in Sources */ = {isa = PBXBuildFile; fileRef = 162F899A9FCCC2799A82A370 /* GitHubSignIn.swift */; };
+		7B125BED11C30D333FFD308D /* WorkspaceResourcesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 162560BBEED04A38EA47672F /* WorkspaceResourcesView.swift */; };
+		7F76A5FEB5E9A55D138690B9 /* WorkspaceFilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90005C9AA885453C6AACC6C7 /* WorkspaceFilesView.swift */; };
+		8FAF164CA5BBD5123B945E45 /* APIValidation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B29646B4D1A94C2D7336199E /* APIValidation.swift */; };
+		94F9D4A02A98AA965EC1FC06 /* WorkspaceUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 218B6A0C10DF577954243580 /* WorkspaceUI.swift */; };
+		990AB9FCEE08C1C816443A2E /* WorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EADB19742BD9C07300635468 /* WorkspaceView.swift */; };
+		9BF84B6AFD18A1F11E976ED8 /* AccountView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D409DE594F41589739EAAD92 /* AccountView.swift */; };
+		AACEB35EA31C46568B99DD52 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35A4C3463EC5F44997B75C78 /* AppModel.swift */; };
+		BAED32659C7E22684E399EE6 /* APIModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 027A5770BAC835F7982B817B /* APIModels.swift */; };
+		CE2B68ABAA2CE2D4BCCC3092 /* MarkdownView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4ABFFEC371217B79D748133 /* MarkdownView.swift */; };
+		D909BCA43476C2261D0A1151 /* CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2782548B69F167631269D106 /* CredentialStore.swift */; };
+		E2C7946CCA3C34E34530592F /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE24B7DC1D3B91B9A778C2CD /* ChatView.swift */; };
+		E909DD5D80BE3AE695E9FD95 /* PiTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 019AD8224350D67C60103E5E /* PiTheme.swift */; };
+		EF1E21246A759F3D3930D6DE /* AppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48C05FA32423CB4E66D2E798 /* AppModelTests.swift */; };
+		FE67F270EED1BE8F94B9DF1A /* IsobotAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A5CDC8DD8C9E2BBE60D5F9F /* IsobotAPIClient.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		841B9E909E8ABDE995964698 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A5A3619D0F24DC22CF81E8C9 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B9B9B8AF7BC39112A6789CDE;
+			remoteInfo = Isobot;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		019AD8224350D67C60103E5E /* PiTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PiTheme.swift; sourceTree = "<group>"; };
+		027A5770BAC835F7982B817B /* APIModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIModels.swift; sourceTree = "<group>"; };
+		162560BBEED04A38EA47672F /* WorkspaceResourcesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceResourcesView.swift; sourceTree = "<group>"; };
+		162F899A9FCCC2799A82A370 /* GitHubSignIn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubSignIn.swift; sourceTree = "<group>"; };
+		218B6A0C10DF577954243580 /* WorkspaceUI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceUI.swift; sourceTree = "<group>"; };
+		24F9BC9D4EAA42E9F3DE4EE3 /* IsobotApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IsobotApp.swift; sourceTree = "<group>"; };
+		2782548B69F167631269D106 /* CredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialStore.swift; sourceTree = "<group>"; };
+		2A5CDC8DD8C9E2BBE60D5F9F /* IsobotAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IsobotAPIClient.swift; sourceTree = "<group>"; };
+		310C5E5243BD47A6F237353B /* Isobot.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Isobot.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		35A4C3463EC5F44997B75C78 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		3F40CF0C4788DD07B832E05A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		48C05FA32423CB4E66D2E798 /* AppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelTests.swift; sourceTree = "<group>"; };
+		5089FB9F2000762C1E6A6436 /* IsobotTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = IsobotTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		556BD81F5D87938E16308359 /* SignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInView.swift; sourceTree = "<group>"; };
+		705D6C1546B713762AC9878D /* PreviewServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewServer.swift; sourceTree = "<group>"; };
+		81774FE9210454DCD29A7629 /* WorkspaceCapturesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceCapturesView.swift; sourceTree = "<group>"; };
+		90005C9AA885453C6AACC6C7 /* WorkspaceFilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFilesView.swift; sourceTree = "<group>"; };
+		B29646B4D1A94C2D7336199E /* APIValidation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIValidation.swift; sourceTree = "<group>"; };
+		B4276989FAD3FCB39B9105BF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		CE24B7DC1D3B91B9A778C2CD /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
+		D409DE594F41589739EAAD92 /* AccountView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountView.swift; sourceTree = "<group>"; };
+		E4ABFFEC371217B79D748133 /* MarkdownView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownView.swift; sourceTree = "<group>"; };
+		EADB19742BD9C07300635468 /* WorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceView.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		25561A83ED77740B80E5A82B /* Features */ = {
+			isa = PBXGroup;
+			children = (
+				690EB15978941E7C13C8F76C /* Account */,
+				427A25AC2742275B748E3F34 /* Auth */,
+				CFE72EEC14E92B92F0B3BEA9 /* Chat */,
+				B0413CFDADCB0F7E73F59553 /* Workspace */,
+			);
+			path = Features;
+			sourceTree = "<group>";
+		};
+		389B19DC8DC9331038172915 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				027A5770BAC835F7982B817B /* APIModels.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		427A25AC2742275B748E3F34 /* Auth */ = {
+			isa = PBXGroup;
+			children = (
+				556BD81F5D87938E16308359 /* SignInView.swift */,
+			);
+			path = Auth;
+			sourceTree = "<group>";
+		};
+		690EB15978941E7C13C8F76C /* Account */ = {
+			isa = PBXGroup;
+			children = (
+				D409DE594F41589739EAAD92 /* AccountView.swift */,
+			);
+			path = Account;
+			sourceTree = "<group>";
+		};
+		7B5E36A528D773BD4B80FBC4 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				E4ABFFEC371217B79D748133 /* MarkdownView.swift */,
+				019AD8224350D67C60103E5E /* PiTheme.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		8EF84094E8EE27078055CA98 /* Isobot */ = {
+			isa = PBXGroup;
+			children = (
+				3F40CF0C4788DD07B832E05A /* Assets.xcassets */,
+				B4276989FAD3FCB39B9105BF /* Info.plist */,
+				9839EBE42989D9A74FEA02B6 /* App */,
+				25561A83ED77740B80E5A82B /* Features */,
+				389B19DC8DC9331038172915 /* Models */,
+				C4EB5C8983D04E41C6EC856B /* Networking */,
+				7B5E36A528D773BD4B80FBC4 /* Shared */,
+			);
+			path = Isobot;
+			sourceTree = "<group>";
+		};
+		9839EBE42989D9A74FEA02B6 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				35A4C3463EC5F44997B75C78 /* AppModel.swift */,
+				2782548B69F167631269D106 /* CredentialStore.swift */,
+				162F899A9FCCC2799A82A370 /* GitHubSignIn.swift */,
+				24F9BC9D4EAA42E9F3DE4EE3 /* IsobotApp.swift */,
+				705D6C1546B713762AC9878D /* PreviewServer.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		B0413CFDADCB0F7E73F59553 /* Workspace */ = {
+			isa = PBXGroup;
+			children = (
+				81774FE9210454DCD29A7629 /* WorkspaceCapturesView.swift */,
+				90005C9AA885453C6AACC6C7 /* WorkspaceFilesView.swift */,
+				162560BBEED04A38EA47672F /* WorkspaceResourcesView.swift */,
+				218B6A0C10DF577954243580 /* WorkspaceUI.swift */,
+				EADB19742BD9C07300635468 /* WorkspaceView.swift */,
+			);
+			path = Workspace;
+			sourceTree = "<group>";
+		};
+		B6D6FF0702D84292B0D2E314 /* IsobotTests */ = {
+			isa = PBXGroup;
+			children = (
+				48C05FA32423CB4E66D2E798 /* AppModelTests.swift */,
+			);
+			path = IsobotTests;
+			sourceTree = "<group>";
+		};
+		C4EB5C8983D04E41C6EC856B /* Networking */ = {
+			isa = PBXGroup;
+			children = (
+				B29646B4D1A94C2D7336199E /* APIValidation.swift */,
+				2A5CDC8DD8C9E2BBE60D5F9F /* IsobotAPIClient.swift */,
+			);
+			path = Networking;
+			sourceTree = "<group>";
+		};
+		C7784A702F684C8FDE14D2A2 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				310C5E5243BD47A6F237353B /* Isobot.app */,
+				5089FB9F2000762C1E6A6436 /* IsobotTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		CFE72EEC14E92B92F0B3BEA9 /* Chat */ = {
+			isa = PBXGroup;
+			children = (
+				CE24B7DC1D3B91B9A778C2CD /* ChatView.swift */,
+			);
+			path = Chat;
+			sourceTree = "<group>";
+		};
+		DD0DF405D12E273339D261A3 = {
+			isa = PBXGroup;
+			children = (
+				8EF84094E8EE27078055CA98 /* Isobot */,
+				B6D6FF0702D84292B0D2E314 /* IsobotTests */,
+				C7784A702F684C8FDE14D2A2 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		2EBD202B35A60059AB64BFE2 /* IsobotTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 57335CB1502D5370FE6AF9C0 /* Build configuration list for PBXNativeTarget "IsobotTests" */;
+			buildPhases = (
+				A3707F02130E08BC3307FC97 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				FBC2ADB29F21A93E7A4C212F /* PBXTargetDependency */,
+			);
+			name = IsobotTests;
+			packageProductDependencies = (
+			);
+			productName = IsobotTests;
+			productReference = 5089FB9F2000762C1E6A6436 /* IsobotTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		B9B9B8AF7BC39112A6789CDE /* Isobot */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 15B79FE17523E770CCD796C5 /* Build configuration list for PBXNativeTarget "Isobot" */;
+			buildPhases = (
+				35E0C5529ADC9F5B51254342 /* Sources */,
+				8A03BD32A8A16122EC2CDFC6 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Isobot;
+			packageProductDependencies = (
+			);
+			productName = Isobot;
+			productReference = 310C5E5243BD47A6F237353B /* Isobot.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A5A3619D0F24DC22CF81E8C9 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					B9B9B8AF7BC39112A6789CDE = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = ECCF4B9E3F2F1B51F3688A9D /* Build configuration list for PBXProject "Isobot" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = DD0DF405D12E273339D261A3;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = C7784A702F684C8FDE14D2A2 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				B9B9B8AF7BC39112A6789CDE /* Isobot */,
+				2EBD202B35A60059AB64BFE2 /* IsobotTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		8A03BD32A8A16122EC2CDFC6 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				004204E767FF63CA4CE276EB /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		35E0C5529ADC9F5B51254342 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BAED32659C7E22684E399EE6 /* APIModels.swift in Sources */,
+				8FAF164CA5BBD5123B945E45 /* APIValidation.swift in Sources */,
+				9BF84B6AFD18A1F11E976ED8 /* AccountView.swift in Sources */,
+				AACEB35EA31C46568B99DD52 /* AppModel.swift in Sources */,
+				E2C7946CCA3C34E34530592F /* ChatView.swift in Sources */,
+				D909BCA43476C2261D0A1151 /* CredentialStore.swift in Sources */,
+				74C54B7C7B8BEF1CDC0A5038 /* GitHubSignIn.swift in Sources */,
+				FE67F270EED1BE8F94B9DF1A /* IsobotAPIClient.swift in Sources */,
+				540F36F057AFA708ED19E313 /* IsobotApp.swift in Sources */,
+				CE2B68ABAA2CE2D4BCCC3092 /* MarkdownView.swift in Sources */,
+				E909DD5D80BE3AE695E9FD95 /* PiTheme.swift in Sources */,
+				106B0544AA83AAC7F1F64921 /* PreviewServer.swift in Sources */,
+				6B9326DF721B0C056B7DD8B2 /* SignInView.swift in Sources */,
+				62260AB6EB6F4491DF8D3EDC /* WorkspaceCapturesView.swift in Sources */,
+				7F76A5FEB5E9A55D138690B9 /* WorkspaceFilesView.swift in Sources */,
+				7B125BED11C30D333FFD308D /* WorkspaceResourcesView.swift in Sources */,
+				94F9D4A02A98AA965EC1FC06 /* WorkspaceUI.swift in Sources */,
+				990AB9FCEE08C1C816443A2E /* WorkspaceView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A3707F02130E08BC3307FC97 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EF1E21246A759F3D3930D6DE /* AppModelTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		FBC2ADB29F21A93E7A4C212F /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B9B9B8AF7BC39112A6789CDE /* Isobot */;
+			targetProxy = 841B9E909E8ABDE995964698 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		46D8E02A5593C19DCB287D03 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = tech.isolated.IsobotTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Isobot.app/Isobot";
+			};
+			name = Debug;
+		};
+		4943C9033030E3C7F0F38151 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Isobot/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = tech.isolated.isobot;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		4AC1D7B8A76EB17C014FA5BA /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = tech.isolated.IsobotTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Isobot.app/Isobot";
+			};
+			name = Release;
+		};
+		777CE5993C7534064F8CA8AF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.0.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.9;
+			};
+			name = Debug;
+		};
+		B6A384CB3FD7A60A810406C6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.0.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.9;
+			};
+			name = Release;
+		};
+		D58C0C8725CEC63B88D7DE5B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Isobot/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = tech.isolated.isobot;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		15B79FE17523E770CCD796C5 /* Build configuration list for PBXNativeTarget "Isobot" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D58C0C8725CEC63B88D7DE5B /* Debug */,
+				4943C9033030E3C7F0F38151 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		57335CB1502D5370FE6AF9C0 /* Build configuration list for PBXNativeTarget "IsobotTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				46D8E02A5593C19DCB287D03 /* Debug */,
+				4AC1D7B8A76EB17C014FA5BA /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		ECCF4B9E3F2F1B51F3688A9D /* Build configuration list for PBXProject "Isobot" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				777CE5993C7534064F8CA8AF /* Debug */,
+				B6A384CB3FD7A60A810406C6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A5A3619D0F24DC22CF81E8C9 /* Project object */;
+}

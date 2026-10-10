@@ -17,6 +17,7 @@ test("HTTP prompt routes authenticate, validate and preserve conversation routin
       contents: `import worker from './index.ts';
         export default { async fetch(request, env) {
           const calls = [];
+          const selections = [];
           const bindings = { ...env, Assistant: { getByName(name) {
             calls.push({ method: 'getByName', name });
             return {
@@ -35,6 +36,12 @@ test("HTTP prompt routes authenticate, validate and preserve conversation routin
                 };
               },
             };
+          } }, ChatGPTAuth: { getByName(name) {
+            selections.push(name);
+            return { async getSelection() {
+              if (request.headers.get('X-Test-Selection-Failure') === 'true') throw new Error('private credential provider detail');
+              return { model: request.headers.get('X-Test-Selected-Model'), revision: 1 };
+            } };
           } } };
           if (request.headers.get('X-Test-No-Tokens') === 'true') {
             bindings.ISOBOT_API_TOKEN = undefined;
@@ -43,6 +50,7 @@ test("HTTP prompt routes authenticate, validate and preserve conversation routin
           const response = await worker.fetch(request, bindings);
           const headers = new Headers(response.headers);
           headers.set('X-Test-Agent-Calls', JSON.stringify(calls));
+          headers.set('X-Test-Selection-Lookups', JSON.stringify(selections));
           return new Response(response.body, { status: response.status, headers });
         } };`,
       resolveDir: new URL(".", import.meta.url).pathname,
@@ -60,11 +68,13 @@ test("HTTP prompt routes authenticate, validate and preserve conversation routin
     }],
   };
   const runtime = new Miniflare(convertV4MiniflareOptions(options));
-  const request = (path: string, options: { method?: string; body?: unknown; rawBody?: string; token?: string | null; noTokens?: boolean } = {}) => {
+  const request = (path: string, options: { method?: string; body?: unknown; rawBody?: string; token?: string | null; noTokens?: boolean; selectedModel?: string; selectionFailure?: boolean } = {}) => {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     const token = options.token === undefined ? "test-prompt-token" : options.token;
     if (token !== null) headers.Authorization = `Bearer ${token}`;
     if (options.noTokens) headers["X-Test-No-Tokens"] = "true";
+    if (options.selectedModel) headers["X-Test-Selected-Model"] = options.selectedModel;
+    if (options.selectionFailure) headers["X-Test-Selection-Failure"] = "true";
     return runtime.dispatchFetch(`http://test${path}`, {
       method: options.method ?? "POST", headers,
       body: options.rawBody ?? (options.body === undefined ? undefined : JSON.stringify(options.body)),
@@ -83,6 +93,7 @@ test("HTTP prompt routes authenticate, validate and preserve conversation routin
         const response = await request(path, { method });
         assert.equal(response.status, 401);
         assert.deepEqual(calls(response), []);
+        assert.deepEqual(JSON.parse(response.headers.get("X-Test-Selection-Lookups")!), []);
       }
     });
     await t.test("existing isobot token retains prompt and service access", async () => {
@@ -92,7 +103,23 @@ test("HTTP prompt routes authenticate, validate and preserve conversation routin
       const status = await request("/api/status", { token: "test-isobot-token", method: "GET" });
       assert.equal(status.status, 200);
       assert.deepEqual(await status.json(), { ready: false, model: "test-model" });
+      assert.deepEqual(JSON.parse(status.headers.get("X-Test-Selection-Lookups")!), ["primary"]);
       assert.equal((await request("/api/tickets", { token: "test-isobot-token", body: {} })).status, 400);
+    });
+    await t.test("service status reports the selected ChatGPT model", async () => {
+      const status = await request("/api/status", { token: "test-isobot-token", method: "GET", selectedModel: "gpt-6-astra" });
+      assert.equal(status.status, 200);
+      assert.equal(status.headers.get("Cache-Control"), "no-store");
+      assert.deepEqual(await status.json(), { ready: false, model: "gpt-6-astra" });
+      assert.deepEqual(JSON.parse(status.headers.get("X-Test-Selection-Lookups")!), ["primary"]);
+      assert.deepEqual(calls(status), []);
+    });
+    await t.test("unavailable central selection fails status safely", async () => {
+      const status = await request("/api/status", { token: "test-isobot-token", method: "GET", selectionFailure: true });
+      assert.equal(status.status, 503);
+      assert.equal(status.headers.get("Cache-Control"), "no-store");
+      assert.deepEqual(await status.json(), { error: "Agent status is unavailable" });
+      assert.deepEqual(calls(status), []);
     });
     await t.test("missing, incorrect and unconfigured tokens fail before agent lookup", async () => {
       for (const auth of [{ token: null }, { token: "incorrect" }, { noTokens: true }]) {

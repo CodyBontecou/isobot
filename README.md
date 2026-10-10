@@ -6,15 +6,18 @@ forums also become issues, and comments and issue state mirror both ways.
 
 The ticket agent uses Cloudflare's [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi).
 `PiHarness` runs Pi Durable on SQLite-backed Durable Objects, with Workers AI
-(`@cf/moonshotai/kimi-k2.7-code`), a tool registry, and lifecycle recovery. One
+(`@cf/moonshotai/kimi-k2.7-code`) by default or an eligible ChatGPT plan after
+OAuth sign-in and model selection, a tool registry, and lifecycle recovery. One
 Isobot object owns each Discord message's ticket. The Discord Gateway and
 existing forum/GitHub synchronization run on Fly using discord.js.
 
 The deployed Worker is https://isobot-pi.costream.workers.dev. `/health` is public;
-agent API routes require bearer authentication. Prompt, Vox intake and note archive
-routes accept either
-the dedicated `PROMPT_API_TOKEN` or the bridge’s `ISOBOT_API_TOKEN`. Other bot
-API routes require the bridge token. The original
+conversation, chat, workspace, resource, and Vox APIs accept owner browser
+sessions, scoped account API tokens, or the dedicated `PROMPT_API_TOKEN` and
+bridge’s `ISOBOT_API_TOKEN`. Browser mutations require the session CSRF token.
+See [GitHub login and token setup](docs/github-login.md). Other bot
+API routes require the bridge token. ChatGPT management routes require the separate
+`CHATGPT_ADMIN_TOKEN`. The original
 first-agent playground remains available at authenticated `POST /api/ask` and
 has no GitHub tools.
 
@@ -38,10 +41,18 @@ Vox.md capture presets can send their existing HTTP JSON directly to
 original Markdown and metadata; Pi can search and read saved memory. See
 [Vox setup and Markdown exports](docs/vox-integration.md).
 
-Open [the Pi conversation viewer](https://isobot-pi.costream.workers.dev/console?conversation=vox)
-with your bearer token to see prompts, replies, tool activity and saved captures.
+Open [the Pi console](https://isobot-pi.costream.workers.dev/console?conversation=vox)
+to chat with Pi, edit shared files, browse saved captures, and inspect agent
+usage and Cloudflare pricing. Sign in with GitHub when configured, or connect
+with your existing Vox bearer token. See [the console guide](docs/console.md).
+The native iPhone and iPad client shares those conversations and files; see
+[iOS setup and authentication](docs/ios.md).
 Run `npm run agent:logs` for live Worker/Durable Object logs. See
 [conversation and log inspection](docs/agent-inspection.md).
+
+Pi can also use a ChatGPT subscription through OAuth. Run `npm run chatgpt -- login`
+after provisioning its administrator token, then select an account model. See
+[ChatGPT connection and model selection](docs/chatgpt.md).
 
 ## Develop and deploy
 
@@ -105,3 +116,8 @@ See [Discord bridge configuration and limits](docs/discord-bridge.md). Existing
 forum and sync handlers keep their current dedupe limits.
 
 See [deployment validation](docs/deployment.md) for the deployed versions and checks.
+
+
+## In-app support
+
+The dedicated support service, isolated Pi operations, private Discord relay and support-chat Codex dispatcher are described in [support deployment notes](docs/support.md). The v1 API uses separate service, Discord bridge and task callback credentials. No live support resources are created by running the deterministic test suite.
