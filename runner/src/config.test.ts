@@ -7,7 +7,8 @@ test("the shipped config is valid and starts every repo at pr autonomy", () => {
   const repos = configuredRepos(config);
   assert.ok(repos.length >= 6);
   for (const { owner, repo } of repos) assert.equal(policyFor(config, `${owner}/${repo}`).autonomy, "pr");
-  assert.equal(config.discordCategories["gitsync.md"], "codybontecou/Sync.md");
+  assert.equal(config.discordCategories["gitsync.md"], "codybontecou/GitSync.md");
+  assert.equal(config.discordCategories["whereday"], "codybontecou/whereday");
 });
 
 test("repos not listed in the config are off", () => {

@@ -5,7 +5,7 @@ import { runAgent, type RunAgentInput } from "./runAgent.js";
 import type { ReplyContext, TicketOperation } from "./types.js";
 
 const EVENT_ID = "123456789012345678";
-const ISSUE_URL = "https://github.com/codybontecou/Sync.md/issues/42";
+const ISSUE_URL = "https://github.com/codybontecou/GitSync.md/issues/42";
 const originalUrl = process.env.ISOBOT_AGENT_URL;
 const originalToken = process.env.ISOBOT_API_TOKEN;
 
@@ -25,7 +25,7 @@ function input(replies: MessageReplyOptions[] = []): RunAgentInput {
   return {
     trigger: { id: EVENT_ID, reply: async (options) => { replies.push(options); } },
     replyContext: context,
-    repo: { owner: "codybontecou", repo: "Sync.md" },
+    repo: { owner: "codybontecou", repo: "GitSync.md" },
   };
 }
 
@@ -81,7 +81,7 @@ test("submits a JSON-only ticket and retries a deployment failure with the same 
     assert.equal(call.init.redirect, "error");
     assert.equal(typeof call.init.body, "string");
     assert.deepEqual(JSON.parse(String(call.init.body)), {
-      eventId: EVENT_ID, repo: { owner: "codybontecou", repo: "Sync.md" }, context,
+      eventId: EVENT_ID, repo: { owner: "codybontecou", repo: "GitSync.md" }, context,
     });
   }
   assert.equal(calls[2].url, `https://agent.example.workers.dev/api/tickets/${EVENT_ID}`);

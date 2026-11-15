@@ -35,7 +35,7 @@ The bridge submits `POST /api/tickets` with:
 ```json
 {
   "eventId": "the-triggering-discord-message-id",
-  "repo": { "owner": "codybontecou", "repo": "Sync.md" },
+  "repo": { "owner": "codybontecou", "repo": "GitSync.md" },
   "context": {
     "trigger": { "authorTag": "...", "authorId": "...", "content": "...", "jumpUrl": "...", "createdAt": "..." },
     "parent": { "authorTag": "...", "authorId": "...", "content": "...", "jumpUrl": "...", "createdAt": "..." },

@@ -5,7 +5,7 @@ import { recoverTicket } from "./recovery.js";
 import type { TicketRequest } from "./types.js";
 
 const EVENT_ID = "123456789012345678";
-const ISSUE_URL = "https://github.com/codybontecou/Sync.md/issues/42";
+const ISSUE_URL = "https://github.com/codybontecou/GitSync.md/issues/42";
 const originalUrl = process.env.ISOBOT_AGENT_URL;
 const originalToken = process.env.ISOBOT_API_TOKEN;
 
@@ -16,7 +16,7 @@ function ticket(): TicketRequest {
   };
   return {
     eventId: EVENT_ID,
-    repo: { owner: "codybontecou", repo: "Sync.md" },
+    repo: { owner: "codybontecou", repo: "GitSync.md" },
     context: { trigger: snapshot, parent: snapshot, recent: [], channelName: "help", guildName: "isolated.tech" },
   };
 }

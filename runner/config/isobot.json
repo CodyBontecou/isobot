@@ -24,10 +24,11 @@
   "discordCategories": {
     "time.md": "codybontecou/time.md",
     "health.md": "codybontecou/health-md",
-    "gitsync.md": "codybontecou/Sync.md",
-    "sync.md": "codybontecou/Sync.md",
+    "gitsync.md": "codybontecou/GitSync.md",
+    "sync.md": "codybontecou/GitSync.md",
     "instarep.ly": "codybontecou/Instarep.ly",
-    "iso.me": "codybontecou/isome",
+    "whereday": "codybontecou/whereday",
+    "iso.me": "codybontecou/whereday",
     "vox.md": "codybontecou/vox.md"
   },
   "defaults": {
@@ -70,9 +71,9 @@
   "repos": {
     "codybontecou/time.md": {},
     "codybontecou/health-md": {},
-    "codybontecou/Sync.md": {},
+    "codybontecou/GitSync.md": {},
     "codybontecou/Instarep.ly": {},
-    "codybontecou/isome": {},
+    "codybontecou/whereday": {},
     "codybontecou/vox.md": {}
   }
 }
