@@ -44,7 +44,7 @@ final class AppModel {
         #else
         previewMode = false
         #endif
-        originText = defaults.string(forKey: "serverOrigin") ?? "https://isobot-pi.costream.workers.dev"
+        originText = defaults.string(forKey: "serverOrigin") ?? "https://pi.isolated.tech"
         let storedConversation = defaults.string(forKey: "conversation") ?? "vox"
         conversation = APIValidation.isIdentifier(storedConversation) ? storedConversation : "vox"
         conversations = (defaults.stringArray(forKey: "conversations") ?? ["vox", "default"]).filter(APIValidation.isIdentifier)

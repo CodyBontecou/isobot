@@ -6,8 +6,8 @@ JSON fields in SQLite on the conversation's Durable Object.
 
 | Preset behavior | Endpoint URL |
 | --- | --- |
-| Send an instruction to Pi and save the result | `https://isobot-pi.costream.workers.dev/api/vox?mode=prompt&conversation=vox` |
-| Save a note as memory without running the model | `https://isobot-pi.costream.workers.dev/api/vox?mode=memory&conversation=vox` |
+| Send an instruction to Pi and save the result | `https://pi.isolated.tech/api/vox?mode=prompt&conversation=vox` |
+| Save a note as memory without running the model | `https://pi.isolated.tech/api/vox?mode=memory&conversation=vox` |
 
 In Vox, edit your custom preset, choose **Destination → Target → HTTP**, paste
 the appropriate URL, and save the raw value of `PROMPT_API_TOKEN` from the
@@ -60,7 +60,7 @@ timestamps in Swift's 2001 epoch remain intact in the original JSON.
 
 ## Retrieve and export
 
-For a browser interface, open [the Pi viewer](https://isobot-pi.costream.workers.dev/console?conversation=vox)
+For a browser interface, open [the Pi viewer](https://pi.isolated.tech/console?conversation=vox)
 and connect with the same bearer token. It shows your conversation and captures,
 including the response to the latest prompt.
 [Conversation and runtime logs](agent-inspection.md) covers inspection in detail.
@@ -70,7 +70,7 @@ Every read uses the same bearer token. List saved notes:
 ```sh
 source .env.prompt
 curl --fail-with-body \
-  'https://isobot-pi.costream.workers.dev/api/notes?conversation=vox&limit=25' \
+  'https://pi.isolated.tech/api/notes?conversation=vox&limit=25' \
   -H "Authorization: Bearer $PROMPT_API_TOKEN"
 ```
 
@@ -93,7 +93,7 @@ operation, and 404 for memory-only captures. You can also query memory through
 the regular prompt API:
 
 ```sh
-curl --fail-with-body https://isobot-pi.costream.workers.dev/api/prompt \
+curl --fail-with-body https://pi.isolated.tech/api/prompt \
   -H "Authorization: Bearer $PROMPT_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"conversation":"vox","prompt":"Search my saved captures for the workshop plan."}'

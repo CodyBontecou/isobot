@@ -3,7 +3,7 @@ import test from "node:test";
 import { authenticateAccountToken, checkSessionMutation, handleAccountRequest, isAccountRoute, resolveAccountSession, type AccountEnvironment } from "./account-routes.js";
 import type { AccountProfile, AccountSession, ApiTokenInput, ApiTokenRecord, OAuthFlow, OAuthFlowInput, SessionInput } from "./account-store.js";
 
-const origin = "https://isobot-pi.costream.workers.dev";
+const origin = "https://pi.isolated.tech";
 const sessionCredential = "S".repeat(43);
 const csrfToken = "C".repeat(43);
 const tokenId = "99e41d5f-0c74-42bd-a942-64d36fbaf447";

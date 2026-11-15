@@ -44,7 +44,7 @@ and its [linked harness example](https://github.com/cloudflare/agents/tree/main/
 
 | Service | Deployed state |
 | --- | --- |
-| Pi Worker | `https://isobot-pi.costream.workers.dev` |
+| Pi Worker | `https://pi.isolated.tech` |
 | Worker version | `e9012895-a397-4209-9828-448767e692a1` |
 | Active model | ChatGPT plan `gpt-6.1-sol`, medium reasoning |
 | Workers AI fallback | `@cf/moonshotai/kimi-k2.7-code`, restored explicitly with `chatgpt -- workers-ai` |
@@ -139,7 +139,7 @@ Validation completed:
 - Vox's synthetic Send Test passed without adding a capture. Prompt receipts
   return only after Pi's durable admission; response downloads are independent
   of Vox's 30-second request timeout.
-- The deployed [conversation viewer](https://isobot-pi.costream.workers.dev/console?conversation=vox)
+- The deployed [conversation viewer](https://pi.isolated.tech/console?conversation=vox)
   and protected transcript API expose saved prompts, replies, tools, pending
   operations, and capture downloads. Live checks found the user's latest Vox
   request and completed reply, verified memory tool history, and rejected

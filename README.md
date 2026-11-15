@@ -14,7 +14,7 @@ OAuth sign-in and model selection, a tool registry, and lifecycle recovery. One
 Isobot object owns each Discord message's ticket. The Discord Gateway and
 existing forum/GitHub synchronization run in a Cloudflare Container using discord.js.
 
-The deployed Worker is https://isobot-pi.costream.workers.dev. `/health` is public;
+The deployed Worker is https://pi.isolated.tech. `/health` is public;
 conversation, chat, workspace, resource, and Vox APIs accept owner browser
 sessions, scoped account API tokens, or the dedicated `PROMPT_API_TOKEN` and
 bridge’s `ISOBOT_API_TOKEN`. Browser mutations require the session CSRF token.
@@ -28,7 +28,7 @@ has no GitHub tools.
 
 ```sh
 source .env.prompt
-curl --fail-with-body https://isobot-pi.costream.workers.dev/api/prompt \
+curl --fail-with-body https://pi.isolated.tech/api/prompt \
   -H "Authorization: Bearer $PROMPT_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"Say hello!","conversation":"terminal"}'
@@ -44,7 +44,7 @@ Vox.md capture presets can send their existing HTTP JSON directly to
 original Markdown and metadata; Pi can search and read saved memory. See
 [Vox setup and Markdown exports](docs/vox-integration.md).
 
-Open [the Pi console](https://isobot-pi.costream.workers.dev/console?conversation=vox)
+Open [the Pi console](https://pi.isolated.tech/console?conversation=vox)
 to chat with Pi, edit shared files, browse saved captures, and inspect agent
 usage and Cloudflare pricing. Sign in with GitHub when configured, or connect
 with your existing Vox bearer token. See [the console guide](docs/console.md).

@@ -1,6 +1,6 @@
 # View Pi conversations and logs
 
-Open [the Pi console](https://isobot-pi.costream.workers.dev/console?conversation=vox)
+Open [the Pi console](https://pi.isolated.tech/console?conversation=vox)
 and sign in with GitHub. The account controls create and revoke API tokens for
 Vox. See [GitHub login setup](github-login.md). The advanced bearer connection
 also accepts the existing Vox token; it stays only in the tab's memory.
@@ -34,7 +34,7 @@ and private harness metadata.
 ```sh
 source .env.prompt
 curl --fail-with-body \
-  'https://isobot-pi.costream.workers.dev/api/conversation?conversation=vox&limit=100' \
+  'https://pi.isolated.tech/api/conversation?conversation=vox&limit=100' \
   -H "Authorization: Bearer $PROMPT_API_TOKEN"
 ```
 

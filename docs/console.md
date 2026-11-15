@@ -1,6 +1,6 @@
 # Pi chat and workspace
 
-Open [the Pi console](https://isobot-pi.costream.workers.dev/console?conversation=vox)
+Open [the Pi console](https://pi.isolated.tech/console?conversation=vox)
 to chat with the durable agent and manage the files it can use. The `conversation`
 parameter selects the same persistent agent used by that Vox preset. A new
 conversation name creates an independent workspace and history.

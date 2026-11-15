@@ -1,6 +1,6 @@
 # HTTPS prompt API
 
-Send `POST https://isobot-pi.costream.workers.dev/api/prompt` with a JSON body and
+Send `POST https://pi.isolated.tech/api/prompt` with a JSON body and
 an `Authorization: Bearer <token>` header. A dedicated prompt token is saved in
 the ignored `.env.prompt` file in the repo root; it authorizes the prompt APIs.
 The existing Discord bridge API token also works.
@@ -9,7 +9,7 @@ From the repository directory:
 
 ```sh
 source .env.prompt
-curl --fail-with-body https://isobot-pi.costream.workers.dev/api/prompt \
+curl --fail-with-body https://pi.isolated.tech/api/prompt \
   -H "Authorization: Bearer $PROMPT_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"Say hello in one sentence.","conversation":"terminal"}'

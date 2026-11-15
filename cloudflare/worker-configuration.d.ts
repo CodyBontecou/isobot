@@ -7,7 +7,7 @@ interface __BaseEnv_Env {
 	SUPPORT_GITHUB_REPOSITORY: "CodyBontecou/myself.md";
 	SUPPORT_GITHUB_REF: "main";
 	PI_MODEL: "@cf/moonshotai/kimi-k2.7-code";
-	AUTH_ORIGIN: "https://isobot-pi.costream.workers.dev";
+	AUTH_ORIGIN: "https://pi.isolated.tech";
 	GITHUB_OAUTH_ALLOWED_IDS: "20440899";
 	Assistant: DurableObjectNamespace<import("./src/index").Assistant>;
 	DiscordAssistant: DurableObjectNamespace<import("./src/index").DiscordAssistant>;

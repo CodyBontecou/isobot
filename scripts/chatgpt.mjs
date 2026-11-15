@@ -12,7 +12,7 @@ export const ISSUER = 'https://auth.openai.com';
 export const RESOURCE = 'https://api.openai.com/v1';
 export const REDIRECT_URI = 'http://127.0.0.1:1455/auth/callback';
 export const SCOPES = ['openid', 'profile', 'email', 'offline_access', 'resource.invoke', 'chatgpt.tokens.use.direct'];
-const DEFAULT_WORKER = 'https://isobot-pi.costream.workers.dev';
+const DEFAULT_WORKER = 'https://pi.isolated.tech';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TIMEOUT_MS = 10 * 60 * 1000;
 

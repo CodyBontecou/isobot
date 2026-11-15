@@ -3,7 +3,7 @@
 The `isobot-discord-bridge` Worker routes `/health` and `/gh/webhook` to one
 `DiscordBridge` Container named `production`. It runs the repository's existing
 Node.js/discord.js application. The Pi agent remains at
-`https://isobot-pi.costream.workers.dev`.
+`https://pi.isolated.tech`.
 
 The one-minute Cron Trigger checks the same instance and starts it if needed.
 Each request renews the ten-minute idle timeout. A durable alarm checks every
