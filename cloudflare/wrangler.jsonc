@@ -5,6 +5,7 @@
   "account_id": "e4265f322e6380ee832b83ad45e3e8c0",
   "compatibility_date": "2026-10-07",
   "compatibility_flags": ["nodejs_compat"],
+  "services": [{ "binding": "DISCORD_BRIDGE", "service": "isobot-discord-bridge" }],
   "ai": { "binding": "AI" },
   "vars": {
     "SUPPORT_GITHUB_REPOSITORY": "CodyBontecou/myself.md",
@@ -21,6 +22,7 @@
   "durable_objects": {
     "bindings": [
       { "name": "Assistant", "class_name": "Assistant" },
+      { "name": "DiscordAssistant", "class_name": "DiscordAssistant" },
       { "name": "Isobot", "class_name": "Isobot" },
       { "name": "DeliveryInbox", "class_name": "DeliveryInbox" },
       { "name": "ChatGPTAuth", "class_name": "ChatGPTAuth" },
@@ -44,6 +46,7 @@
         "SupportTurn",
       ],
     },
+    { "tag": "v7", "new_sqlite_classes": ["DiscordAssistant"] },
   ],
   "observability": { "enabled": true },
 }

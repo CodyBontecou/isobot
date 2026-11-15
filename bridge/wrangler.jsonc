@@ -1,0 +1,64 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "isobot-discord-bridge",
+  "main": "src/index.ts",
+  "account_id": "e4265f322e6380ee832b83ad45e3e8c0",
+  "compatibility_date": "2026-10-29",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "vars": {
+    "ISOBOT_ALLOWED_USERS": "",
+    "DISCORD_HISTORY_GUILD_ID": "1443424100759634003"
+  },
+  "secrets": {
+    "required": [
+      "DISCORD_BOT_TOKEN",
+      "GITHUB_TOKEN",
+      "GITHUB_WEBHOOK_SECRET",
+      "ISOBOT_API_TOKEN",
+      "SUPPORT_BRIDGE_TOKEN",
+      "ISOBOT_AGENT_URL",
+      "SUPPORT_DISCORD_CHANNEL_ID",
+      "SUPPORT_DISCORD_STAFF_IDS"
+    ]
+  },
+  "containers": [
+    {
+      "class_name": "DiscordBridge",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "base": {
+          "dockerfile": "../Dockerfile",
+          "build_context": ".."
+        }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "BRIDGE",
+        "class_name": "DiscordBridge"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "DiscordBridge"
+      ]
+    }
+  ],
+  "triggers": {
+    "crons": [
+      "* * * * *"
+    ]
+  },
+  "observability": {
+    "enabled": true
+  },
+  "workers_dev": true,
+  "preview_urls": false
+}

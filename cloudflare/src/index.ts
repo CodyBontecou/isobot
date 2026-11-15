@@ -1,3 +1,4 @@
+import { discordHistoryExtension } from "./discord-tools.js";
 import { handleSupportRequest } from "./support-service.js";
 export { SupportAccount, SupportDirectory } from "./support-service.js";
 export { SupportTurn } from "./support-agent.js";
@@ -44,6 +45,7 @@ export class Assistant extends Agent<Bindings> {
   harness = new PiHarness({
     harness: ({ storage, context }) => {
       this.registry.install(workspaceExtension(this.workspace));
+      this.installExtraTools();
       this.registry.install({
         name: "capture-memory",
         sections: [{ key: "preamble", tag: false, render: () => [
@@ -93,6 +95,8 @@ export class Assistant extends Agent<Bindings> {
     this.workspace = new Workspace(ctx.storage);
     this.lifecycle.use(this.harness);
   }
+
+  protected installExtraTools(): void {}
 
   async ask(prompt: string) {
     await this.modelSelection.sync();
@@ -179,6 +183,13 @@ export class Assistant extends Agent<Bindings> {
   }
 }
 
+/** Owner-token-only history conversations never share state with ordinary app sessions. */
+export class DiscordAssistant extends Assistant {
+  protected override installExtraTools(): void {
+    this.registry.install(discordHistoryExtension(this.env.DISCORD_BRIDGE, this.env.ISOBOT_API_TOKEN));
+  }
+}
+
 async function authenticated(request: Request, env: Bindings, promptRoute: boolean): Promise<boolean> {
   const tokens = [env.ISOBOT_API_TOKEN, ...(promptRoute ? [env.PROMPT_API_TOKEN] : [])]
     .filter((value): value is string => Boolean(value));
@@ -213,7 +224,11 @@ export default {
     }
     if (isChatGPTRoute(url.pathname)) return await handleChatGPTRequest(request, env);
     if (isAccountRoute(url.pathname)) return await handleAccountRequest(request, env);
-    const promptRoute = url.pathname === "/api/prompt" || url.pathname === "/api/ask"
+    const discordRoute = url.pathname.startsWith("/api/discord/");
+    if (discordRoute && !await authenticated(request, env, true)) {
+      return Response.json({ error: "Owner prompt API credential required" }, { status: 401 });
+    }
+    const promptRoute = discordRoute || url.pathname === "/api/prompt" || url.pathname === "/api/ask"
       || url.pathname === "/api/conversation" || isCaptureRoute(url.pathname) || isChatRoute(url.pathname) || isWorkspaceRoute(url.pathname);
     try {
       if (!await authenticated(request, env, promptRoute)) {
@@ -245,9 +260,14 @@ export default {
       }
     }
     try {
+      if (discordRoute && ["channels", "threads", "search", "messages"].includes(url.pathname.split("/").pop()!)) {
+        if (request.method !== "GET") return Response.json({ error: "Use GET" }, { status: 405 });
+        const target = new URL(request.url); target.hostname = "discord-bridge";
+        return env.DISCORD_BRIDGE.fetch(new Request(target, { headers: { Authorization: `Bearer ${env.ISOBOT_API_TOKEN}` }, signal: AbortSignal.timeout(30_000) }));
+      }
       if (isChatRoute(url.pathname)) return await handleChatRequest(request, { Assistant: env.Assistant });
       if (isWorkspaceRoute(url.pathname)) return await handleWorkspaceRequest(request, conversation => env.Assistant.getByName(`http:${conversation}`));
-      if (url.pathname === "/api/conversation") {
+      if (url.pathname === "/api/conversation" || url.pathname === "/api/discord/conversation") {
         if (request.method !== "GET") return Response.json({ error: "Use GET to view a conversation" }, { status: 405, headers: { ...responseHeaders, Allow: "GET" } });
         const conversation = url.searchParams.get("conversation") ?? "vox";
         const limit = Number(url.searchParams.get("limit") ?? "100");
@@ -257,11 +277,11 @@ export default {
           || (before !== null && (!/^[1-9]\d{0,19}$/.test(before) || !Number.isSafeInteger(Number(before))))) {
           return Response.json({ error: "Invalid conversation, limit (1–100), or entry cursor" }, { status: 400, headers: responseHeaders });
         }
-        const snapshot = await env.Assistant.getByName(`http:${conversation}`).conversationSnapshot({ limit, ...(before === null ? {} : { before }) });
+        const snapshot = await (discordRoute ? env.DiscordAssistant : env.Assistant).getByName(`http:${conversation}`).conversationSnapshot({ limit, ...(before === null ? {} : { before }) });
         return Response.json({ conversation, ...JSON.parse(snapshot) }, { headers: responseHeaders });
       }
       if (isCaptureRoute(url.pathname)) return await handleCaptureRequest(request, env);
-      if (url.pathname === "/api/prompt") {
+      if (url.pathname === "/api/prompt" || url.pathname === "/api/discord/prompt") {
         if (request.method !== "POST") {
           return Response.json({ error: "Use POST with a JSON prompt" }, { status: 405, headers: { Allow: "POST" } });
         }
@@ -271,7 +291,7 @@ export default {
         }
         const conversation = input.conversation ?? "default";
         const requestId = input.requestId ?? crypto.randomUUID();
-        const agent = env.Assistant.getByName(`http:${conversation}`);
+        const agent = (discordRoute ? env.DiscordAssistant : env.Assistant).getByName(`http:${conversation}`);
         const result = await agent.runPrompt(input.prompt, requestId);
         if (result.conflict) {
           return Response.json({ error: "requestId was already used with a different prompt", conversation, requestId }, { status: 409, headers: responseHeaders });

@@ -12,6 +12,7 @@ import {
   record,
   text,
   identifier,
+  type Attachment,
   type Conversation,
   type SupportJob,
 } from "./support-store.js";
@@ -129,6 +130,53 @@ export class SupportAccount extends DurableObject<Bindings> {
       });
     }
   }
+  private async prepareSnapshot(
+    account: string,
+    id: string,
+    input: Record<string, unknown>,
+  ): Promise<{ attachment: Attachment; ciphertext: string }> {
+    if (input.accepted !== true)
+      throw new SupportError(
+        403,
+        "Review and accept this snapshot on the owner device first",
+      );
+    const content = typeof input.content === "string" ? input.content : "",
+      attachmentId = identifier(input.id);
+    text(content, 128000);
+    const category = identifier(input.category),
+      capturedAt = Number(input.capturedAt);
+    if (
+      !Number.isSafeInteger(capturedAt) ||
+      capturedAt < 0 ||
+      capturedAt > Date.now() + 60000
+    )
+      throw new SupportError(400, "Invalid capture time");
+    if (encoder.encode(content).byteLength > 128000)
+      throw new SupportError(413, "Snapshot exceeds 128 KB");
+    const hash = await digest(content);
+    if (hash !== input.digest)
+      throw new SupportError(409, "Approved snapshot digest does not match");
+    const cipher = await encrypt(
+      this.env.SUPPORT_ENCRYPTION_KEY,
+      content,
+      `${account}:${id}:${attachmentId}`,
+    );
+    return {
+      attachment: {
+        id: attachmentId,
+        requestId:
+          input.requestId === null || input.requestId === undefined
+            ? null
+            : identifier(input.requestId),
+        category,
+        digest: hash,
+        bytes: encoder.encode(content).byteLength,
+        capturedAt,
+        removed: false,
+      },
+      ciphertext: cipher,
+    };
+  }
   private accountName() {
     const row = this.ctx.storage.sql
       .exec<{ value: string }>(
@@ -206,18 +254,40 @@ export class SupportAccount extends DurableObject<Bindings> {
     switch (action) {
       case "list":
         result = {
+          initialSnapshots: true,
+          messageSnapshots: true,
           conversations: this.store
             .list()
             .filter((c) => !agent || this.store.get(c.id).agentAccess),
         };
         break;
-      case "create":
+      case "create": {
+        const conversationId = identifier(input.id);
+        if (agent && input.initialSnapshot !== undefined)
+          throw new SupportError(
+            403,
+            "Initial snapshots require owner approval",
+          );
+        const initial =
+          input.initialSnapshot === undefined
+            ? undefined
+            : await this.prepareSnapshot(
+                account,
+                conversationId,
+                record(input.initialSnapshot),
+              );
+        if (initial && initial.attachment.requestId !== null)
+          throw new SupportError(
+            400,
+            "An initial snapshot cannot answer a data request",
+          );
         result = snapshot(
           this.ctx.storage.transactionSync(() =>
-            this.store.create(identifier(input.id), input.title),
+            this.store.create(conversationId, input.title, initial),
           ),
         );
         break;
+      }
       case "read": {
         const before =
           input.before === undefined ? undefined : Number(input.before);
@@ -237,11 +307,35 @@ export class SupportAccount extends DurableObject<Bindings> {
         };
         break;
       }
-      case "send":
+      case "send": {
+        if (agent && input.snapshot !== undefined)
+          throw new SupportError(
+            403,
+            "Message snapshots require owner approval",
+          );
+        const data =
+          input.snapshot === undefined ? undefined : record(input.snapshot);
+        const prepared = data
+          ? await this.prepareSnapshot(account, id, data)
+          : undefined;
+        if (prepared && prepared.attachment.requestId !== null)
+          throw new SupportError(
+            400,
+            "A message snapshot cannot answer a data request",
+          );
         result = snapshot(
-          this.store.message(id, identifier(input.id), "user", input.text),
+          this.ctx.storage.transactionSync(() =>
+            this.store.send(
+              id,
+              identifier(input.id),
+              input.text,
+              prepared,
+              data ? Number(data.generation) : undefined,
+            ),
+          ),
         );
         break;
+      }
       case "resolve":
       case "reopen":
         result = snapshot(
@@ -276,51 +370,14 @@ export class SupportAccount extends DurableObject<Bindings> {
         result = snapshot(this.store.decline(id, identifier(input.requestId)));
         break;
       case "share": {
-        if (input.accepted !== true)
-          throw new SupportError(
-            403,
-            "Review and accept this snapshot on the owner device first",
-          );
-        const c = this.store.live(id, Number(input.generation)),
-          content = typeof input.content === "string" ? input.content : "",
-          attachmentId = identifier(input.id);
-        text(content, 128000);
-        const category = identifier(input.category),
-          capturedAt = Number(input.capturedAt);
-        if (
-          !Number.isSafeInteger(capturedAt) ||
-          capturedAt < 0 ||
-          capturedAt > Date.now() + 60000
-        )
-          throw new SupportError(400, "Invalid capture time");
-        if (encoder.encode(content).byteLength > 128000)
-          throw new SupportError(413, "Snapshot exceeds 128 KB");
-        const hash = await digest(content);
-        if (hash !== input.digest)
-          throw new SupportError(
-            409,
-            "Approved snapshot digest does not match",
-          );
-        const cipher = await encrypt(
-          this.env.SUPPORT_ENCRYPTION_KEY,
-          content,
-          `${account}:${id}:${attachmentId}`,
-        );
+        const c = this.store.live(id, Number(input.generation));
+        const prepared = await this.prepareSnapshot(account, id, input);
         result = snapshot(
           this.store.attach(
             id,
             c.generation,
-            {
-              id: attachmentId,
-              requestId:
-                input.requestId === null ? null : identifier(input.requestId),
-              category,
-              digest: hash,
-              bytes: encoder.encode(content).byteLength,
-              capturedAt,
-              removed: false,
-            },
-            cipher,
+            prepared.attachment,
+            prepared.ciphertext,
           ),
         );
         break;

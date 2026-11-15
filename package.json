@@ -16,7 +16,9 @@
     "agent:typecheck": "npm --prefix cloudflare run typecheck",
     "agent:logs": "npm --prefix cloudflare run logs",
     "chatgpt": "node scripts/chatgpt.mjs",
-    "test": "node --import tsx --test src/agent/*.test.ts cloudflare/src/*.test.ts scripts/*.test.mjs"
+    "test": "node --import tsx --test src/agent/*.test.ts src/webhooks/*.test.ts src/discord/*.test.ts cloudflare/src/*.test.ts scripts/*.test.mjs",
+    "bridge:deploy": "npm --prefix bridge run deploy",
+    "bridge:typecheck": "npm --prefix bridge run typecheck"
   },
   "dependencies": {
     "@octokit/rest": "^21.0.2",

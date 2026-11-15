@@ -1,5 +1,8 @@
 # isobot
 
+The Discord Gateway bridge runs in Cloudflare Containers; the Pi agent runs in
+Workers and Durable Objects. See [bridge deployment](bridge/README.md).
+
 Discord assistant for isolated.tech. Mention isobot in a reply or a thread to
 turn a comment into a GitHub issue. Tagged bug/feature posts in mapped `#help`
 forums also become issues, and comments and issue state mirror both ways.
@@ -9,7 +12,7 @@ The ticket agent uses Cloudflare's [Pi harness example](https://github.com/cloud
 (`@cf/moonshotai/kimi-k2.7-code`) by default or an eligible ChatGPT plan after
 OAuth sign-in and model selection, a tool registry, and lifecycle recovery. One
 Isobot object owns each Discord message's ticket. The Discord Gateway and
-existing forum/GitHub synchronization run on Fly using discord.js.
+existing forum/GitHub synchronization run in a Cloudflare Container using discord.js.
 
 The deployed Worker is https://isobot-pi.costream.workers.dev. `/health` is public;
 conversation, chat, workspace, resource, and Vox APIs accept owner browser
@@ -74,11 +77,17 @@ npx wrangler secret put ISOBOT_API_TOKEN
 npm run deploy
 ```
 
-Set the deployed Worker origin and matching API token on Fly, then deploy the
-bridge with `flyctl deploy --app isobot --ha=false`. Keep one bot machine; the
-existing `fly.toml` uses an immediate deployment so two bot processes do not
-handle the same events. Existing GitHub webhooks remain at
-`https://isobot.fly.dev/gh/webhook`.
+Deploy the Discord bridge with `npm run bridge:deploy` after configuring the
+bridge Worker secrets. See [Container operations](bridge/README.md). Keep the old
+Fly machine stopped. GitHub webhooks use
+`https://isobot-discord-bridge.costream.workers.dev/gh/webhook`;
+`npm run webhooks:register` migrates existing Fly hooks in place.
+
+## Discord history from Pi
+
+The owner prompt agent can now search indexed Discord history and read message
+context. See [Discord history through Pi](docs/discord-history.md) for usage,
+permissions, coverage and API details.
 
 ## Ticket workflow
 
@@ -107,7 +116,7 @@ in `cloudflare/package.json`.
 The Worker records production tickets in a durable delivery inbox before
 submitting them to Pi. The bridge checks that inbox on startup and every 30
 seconds, resumes unfinished operations, and acknowledges successful Discord
-replies. A Fly restart therefore preserves pending delivery. Inaccessible or
+replies. A Container restart therefore preserves pending delivery. Inaccessible or
 deleted source messages remain pending for investigation. A crash after Discord
 accepts a reply but before acknowledgment can duplicate delivery after Discord’s
 nonce window expires.

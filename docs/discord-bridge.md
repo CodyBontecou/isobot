@@ -1,27 +1,29 @@
 # Discord bridge and Pi agent
 
-Isobot keeps its Discord Gateway connection on Fly so mentions, forum posts, and
+See [Container operations](../bridge/README.md) for deployment and recovery.
+
+Isobot keeps its Discord Gateway connection in a Cloudflare Container so mentions, forum posts, and
 thread comments continue to arrive through `discord.js`. Ticket drafting now runs
 on a Cloudflare Pi Durable agent. Each triggering Discord message identifies one
 durable ticket operation.
 
-The Fly process requires these environment variables:
+The Container process requires these environment variables:
 
 - `DISCORD_BOT_TOKEN`: the existing Discord bot token.
-- `GITHUB_TOKEN`: still used by the forum and comment sync handlers on Fly.
+- `GITHUB_TOKEN`: still used by the forum and comment sync handlers in a Cloudflare Container.
 - `ISOBOT_AGENT_URL`: the deployed Cloudflare Worker origin, such as
   `https://isobot-agent.example.workers.dev`. Remote URLs require HTTPS;
   HTTP is permitted for localhost development. Credentials, queries, and
   fragments are rejected.
 - `ISOBOT_API_TOKEN`: the bearer token also configured as a Worker secret.
-- `GITHUB_WEBHOOK_SECRET`: keep the existing secret to enable the Fly webhook
+- `GITHUB_WEBHOOK_SECRET`: keep the existing secret to enable the Container webhook
   server.
 - `ISOBOT_ALLOWED_USERS`: optional comma-separated Discord user IDs. The
   application owner/team remains the default allowlist.
 
-The Fly bridge no longer needs an OpenAI API key. Its HTTP health check and
-`/gh/webhook` endpoint stay on Fly. Leave the existing GitHub webhook destinations
-in place while this bridge owns the forum and issue synchronization handlers.
+The Container bridge no longer needs an OpenAI API key. Its HTTP health check and
+`/gh/webhook` endpoint are exposed by the `isobot-discord-bridge` Worker. Update
+existing Fly webhook destinations in place using `npm run webhooks:register`.
 
 ## Wire contract
 
@@ -85,4 +87,4 @@ suppresses duplicate replies only within Discord’s recent-message window.
 The existing forum and synchronization handlers are unchanged. Their in-memory
 caches and dedupe behavior remain separate from Pi’s durable ticket operations.
 The mention handler suppresses concurrent duplicate events within one process.
-Only one Fly bot process should handle live events during deployment.
+Only one bot process should handle live events during deployment.

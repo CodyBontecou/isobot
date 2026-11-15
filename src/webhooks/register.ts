@@ -14,7 +14,7 @@ async function main(): Promise<void> {
   if (!token) throw new Error("GITHUB_TOKEN is required");
   const secret = process.env.GITHUB_WEBHOOK_SECRET;
   if (!secret) throw new Error("GITHUB_WEBHOOK_SECRET is required");
-  const url = process.env.WEBHOOK_URL ?? "https://isobot.fly.dev/gh/webhook";
+  const url = process.env.WEBHOOK_URL ?? "https://isobot-discord-bridge.costream.workers.dev/gh/webhook";
 
   const repos = dedupeRepos(Object.values(reposJson) as RepoTarget[]);
   const octokit = new Octokit({ auth: token, userAgent: "isobot/0.1" });
@@ -22,7 +22,8 @@ async function main(): Promise<void> {
   for (const r of repos) {
     try {
       const { data: hooks } = await octokit.repos.listWebhooks({ owner: r.owner, repo: r.repo });
-      const existing = hooks.find((h) => h.config?.url === url);
+      const existing = hooks.find((h) => h.config?.url === url)
+        ?? hooks.find((h) => h.config?.url === "https://isobot.fly.dev/gh/webhook");
       const config = { url, content_type: "json" as const, secret, insecure_ssl: "0" };
       if (existing) {
         await octokit.repos.updateWebhook({
@@ -47,6 +48,7 @@ async function main(): Promise<void> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[fail] ${r.owner}/${r.repo}: ${msg}`);
+      process.exitCode = 1;
     }
   }
 }

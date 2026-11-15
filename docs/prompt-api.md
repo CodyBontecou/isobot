@@ -55,3 +55,12 @@ For another client, load `PROMPT_API_TOKEN` from your secret store. To replace t
 prompt token, save the chosen value securely, update the Worker with
 `npx wrangler secret put PROMPT_API_TOKEN` from `cloudflare`, and update your
 clients. The Discord bridge uses its own API token.
+
+## Discord-enabled owner conversations
+
+Use `POST /api/discord/prompt` with the same body and owner prompt credential for
+read-only Discord history tools. These conversations use a separate private
+namespace. Ordinary account tokens cannot access them. Read their transcripts at
+`GET /api/discord/conversation`. The installed Pi extension uses this route for
+new requests and preserves the original route for older retries. See
+[Discord history](discord-history.md).

@@ -1,4 +1,43 @@
-# Deployment record — October 7, 2026
+# Deployment record
+
+## Discord history tools — October 29, 2026
+
+- Bridge version: `34b3c9d4-baeb-468b-9872-36f6aa7ab36d`.
+- Pi Worker version: `8d633c99-ac05-4e27-bc13-c367588c60db`.
+- Owner-only Discord conversations run in the new `DiscordAssistant` namespace
+  with the four read-only history tools. The Pi Worker calls the bridge through
+  a service binding. Existing conversation namespaces and credentials are retained.
+- Live indexed search, channel/message reads, archive listing, and an actual Pi
+  prompt with verified search/read tool calls and source citations passed.
+- The installed Pi extension preserves old retry routes and uses the new
+  Discord-enabled endpoint for new requests.
+
+See [Discord history through Pi](discord-history.md).
+
+## Discord bridge migration — October 29, 2026
+
+- Bridge: `https://isobot-discord-bridge.costream.workers.dev`.
+- Worker version: `c6cab0fc-ca2c-4c49-a178-b9c8362c2e23`.
+- Container: Durable Object scheduling policy, named image `base`, instance size
+  `lite`, fixed Durable Object identity `production`.
+- Pi Worker and its durable data remain in place.
+- `isobot#9767` connected successfully; authenticated Container restart returned
+  to Discord readiness. The bridge token authenticated to Pi and the delivery
+  inbox was empty.
+- Existing GitHub hooks were updated in place for Sync.md, health-md, Instarep.ly,
+  time.md, and isome. A hook was added for the configured vox.md repository.
+  All six actual GitHub ping deliveries returned HTTP 202.
+- Signed synthetic pings returned 202; unsigned pings and unauthenticated
+  lifecycle requests returned 401.
+- An isolated Pi ticket preview completed both issue and reply tools without
+  creating a GitHub issue or sending a Discord message.
+- 245 regression tests and both bridge/Node TypeScript checks passed.
+- Fly machine `2872ddec030398` remains stopped for rollback. The temporary
+  credential-transfer machine was destroyed.
+
+See [Container operations](../bridge/README.md) for deployment and rollback.
+
+## Earlier Pi deployment — October 7, 2026
 
 Built from Cloudflare's [Pi guide](https://developers.cloudflare.com/agents/harnesses/pi/)
 and its [linked harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi).
@@ -12,8 +51,8 @@ and its [linked harness example](https://github.com/cloudflare/agents/tree/main/
 | ChatGPT connection | OAuth sign-in and completed inference verified; automatic refresh enabled |
 | Console GitHub login | OAuth configured; CodyBontecou signed in and session reload verified |
 | Durable Objects | `Assistant`, `Isobot`, `DeliveryInbox`, `ChatGPTAuth`, `AccountAuth` with SQLite migrations v1–v5 |
-| Discord bridge / sync | Existing Fly app `isobot`, `https://isobot.fly.dev` |
-| Fly image | `isobot:deployment-01M4B5GSST5WBQFF8MXG6QDDQ6` |
+| Discord bridge / sync | Cloudflare Container, `https://isobot-discord-bridge.costream.workers.dev` |
+| Previous Fly image (rollback only) | `isobot:deployment-01M4B5GSST5WBQFF8MXG6QDDQ6` |
 | Discord identity | `isobot#9767` |
 
 Validation completed:
@@ -120,7 +159,8 @@ Validation completed:
 - GitHub issue reads succeeded for all six configured repositories. Live tool
   checks used preview mode, so they did not create test issues or send messages.
 
-The existing GitHub webhook URLs and forum/comment sync remain on Fly. The
+The previous Fly deployment is retained stopped for rollback. Current Container
+operations and webhook routing are described in [bridge/README.md](../bridge/README.md). The
 approved GitHub credential transfer and generated shared API token were stored
 as service secrets; temporary local copies were deleted. This repository
 contains the deployed source, configuration, and validation records.

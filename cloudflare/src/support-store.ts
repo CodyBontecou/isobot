@@ -190,10 +190,17 @@ export class SupportStore {
       JSON.stringify(result),
     );
   }
-  create(id: string, titleValue: unknown) {
+  create(
+    id: string,
+    titleValue: unknown,
+    initial?: { attachment: Attachment; ciphertext: string },
+  ) {
     identifier(id);
     const title = text(titleValue, 120);
-    const prior = this.receipt(id, id, title);
+    const fingerprint = initial
+      ? JSON.stringify({ title, attachment: initial.attachment })
+      : title;
+    const prior = this.receipt(id, id, fingerprint);
     if (prior) return this.get(id);
     if (
       this.sql
@@ -223,14 +230,55 @@ export class SupportStore {
       autoReply: true,
       messages: [],
       requests: [],
-      attachments: [],
+      attachments: initial ? [initial.attachment] : [],
       createdAt: now,
       updatedAt: now,
     };
+    if (initial)
+      this.sql.exec(
+        "INSERT INTO support_attachments VALUES (?,?,?)",
+        `${id}:${initial.attachment.id}`,
+        id,
+        initial.ciphertext,
+      );
     this.save(c);
     const started = this.message(id, id, "user", title);
-    this.remember(id, id, title, { id });
+    this.remember(id, id, fingerprint, { id });
     return started;
+  }
+  send(
+    id: string,
+    messageId: string,
+    value: unknown,
+    snapshot?: { attachment: Attachment; ciphertext: string },
+    generation?: number,
+  ) {
+    const content = text(value, 1800);
+    const fingerprint = JSON.stringify({
+      content,
+      snapshot: snapshot?.attachment ?? null,
+    });
+    if (this.receipt(messageId, id, fingerprint)) return this.get(id);
+    const current = this.live(id, generation);
+    if (
+      snapshot &&
+      current.messages.some((message) => message.id === messageId)
+    )
+      throw new SupportError(
+        409,
+        "Message ID already used without this snapshot",
+      );
+    if (snapshot)
+      this.attach(
+        id,
+        current.generation,
+        snapshot.attachment,
+        snapshot.ciphertext,
+        false,
+      );
+    const sent = this.message(id, messageId, "user", content, generation);
+    this.remember(messageId, id, fingerprint, { id: messageId });
+    return sent;
   }
   message(
     conversation: string,
@@ -359,6 +407,7 @@ export class SupportStore {
     generation: number,
     attachment: Attachment,
     ciphertext: string,
+    scheduleReply = true,
   ) {
     const c = this.live(id, generation);
     const prior = c.attachments.find((a) => a.id === attachment.id);
@@ -396,12 +445,13 @@ export class SupportStore {
     );
     c.attachments.push(attachment);
     this.save(c);
-    this.job(
-      c,
-      `attachment-${attachment.id}`,
-      "pi",
-      JSON.stringify({ attachmentId: attachment.id }),
-    );
+    if (scheduleReply)
+      this.job(
+        c,
+        `attachment-${attachment.id}`,
+        "pi",
+        JSON.stringify({ attachmentId: attachment.id }),
+      );
     return c;
   }
   attachment(id: string, attachmentId: string, generation: number) {
