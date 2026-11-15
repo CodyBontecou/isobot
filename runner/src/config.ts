@@ -55,8 +55,23 @@ export interface RunnerConfig {
   trustedAuthors?: string[];
   /** Discord category name → owner/repo, for triage of community messages. */
   discordCategories: Record<string, string>;
+  /** The owner's Vox.md captures, posted by a Vox HTTP preset to one Pi conversation. */
+  vox?: VoxConfig;
   defaults: RepoPolicy;
   repos: Record<string, Partial<RepoPolicy>>;
+}
+
+export interface VoxConfig {
+  /** Pi conversation the Vox preset posts to (`/api/vox?mode=memory&conversation=<this>`). */
+  conversation: string;
+  /** File confident proposals from these notes straight as ready, so builds start without a click. */
+  autoApprove: boolean;
+  /** Below this triage confidence a Vox proposal still waits for approval. Default 0.7. */
+  minAutoApproveConfidence?: number;
+  /** Most proposals one rambling note may produce. Default 3. */
+  maxProposalsPerNote?: number;
+  /** How the owner's product names come out of speech-to-text, for the triage model. */
+  hints?: string;
 }
 
 export interface Labels {
@@ -98,6 +113,14 @@ export function validateConfig(config: RunnerConfig): void {
   }
   for (const [category, repo] of Object.entries(config.discordCategories ?? {})) {
     if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) fail(`discordCategories.${category} must be owner/repo`);
+  }
+  if (config.vox) {
+    if (!/^[A-Za-z0-9_-]{1,100}$/.test(config.vox.conversation ?? "")) fail("vox.conversation must be 1-100 letters, digits, underscores or hyphens");
+    if (typeof config.vox.autoApprove !== "boolean") fail("vox.autoApprove must be true or false");
+    const min = config.vox.minAutoApproveConfidence;
+    if (min !== undefined && !(min > 0 && min <= 1)) fail("vox.minAutoApproveConfidence must be in (0, 1]");
+    const most = config.vox.maxProposalsPerNote;
+    if (most !== undefined && !(Number.isInteger(most) && most >= 1 && most <= 10)) fail("vox.maxProposalsPerNote must be 1-10");
   }
   for (const [name, partial] of Object.entries(config.repos ?? {})) {
     if (!/^[\w.-]+\/[\w.-]+$/.test(name)) fail(`repo key ${name} must be owner/repo`);

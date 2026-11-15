@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { loadConfig } from "./config.js";
 import { Notifier } from "./notify.js";
 import { Store } from "./store.js";
-import { DiscordSource, GitHubSource, triage } from "./triage.js";
+import { DiscordSource, GitHubSource, triage, VoxSource } from "./triage.js";
 import { FakeBuilder, FakeGitHub } from "./testing.js";
 
 const channels = [
@@ -176,4 +176,107 @@ test("triage can't move an item to a different repository", async () => {
   await triage({ config, store, github, builder, notifier: new Notifier(), sources });
   const created = [...github.issues.values()];
   assert.deepEqual(created.map(i => `${i.owner}/${i.repo}`), ["codybontecou/time.md"]);
+});
+
+function fakeVox(notes: { sequence: number; id: string; markdown: string }[], failMarkdown = new Set<string>()) {
+  const requests: string[] = [];
+  const fetcher = (async (url: string, init?: RequestInit) => {
+    requests.push(url);
+    assert.equal(new Headers(init?.headers).get("Authorization"), "Bearer token");
+    const parsed = new URL(url);
+    assert.equal(parsed.searchParams.get("conversation"), "isobot");
+    const one = parsed.pathname.match(/^\/api\/notes\/(.+)\.md$/);
+    if (one) {
+      if (failMarkdown.has(one[1])) return new Response("down", { status: 503 });
+      return new Response(notes.find(n => n.id === one[1])!.markdown);
+    }
+    const before = Number(parsed.searchParams.get("before") ?? Infinity);
+    const limit = Number(parsed.searchParams.get("limit"));
+    const page = notes.filter(n => n.sequence < before).sort((a, b) => b.sequence - a.sequence);
+    const items = page.slice(0, limit).map(n => ({ sequence: n.sequence, id: n.id, mode: "memory", receivedAt: "2026-11-15T15:00:00Z", preview: "" }));
+    return Response.json({ conversation: "isobot", items, ...(page.length > limit ? { nextCursor: items[items.length - 1].sequence } : {}) });
+  }) as typeof fetch;
+  return { fetcher, requests };
+}
+
+test("Vox source reads the whole dedicated conversation once, oldest first, then only new notes", async () => {
+  const store = new Store(":memory:");
+  const notes = Array.from({ length: 150 }, (_, i) => ({ sequence: i + 1, id: `note-${i + 1}`, markdown: `Vox feedback ${i + 1}` }));
+  const { fetcher } = fakeVox(notes);
+  const source = new VoxSource("https://pi.test", "token", "isobot", fetcher);
+
+  const first = await source.collect(store);
+  assert.equal(first.items.length, 150, "notes sent before the runner existed still count, across pages");
+  assert.deepEqual([first.items[0].id, first.items[149].id], ["vox:note-1", "vox:note-150"]);
+  assert.deepEqual(first.items[0], {
+    id: "vox:note-1", source: "vox", repo: null, url: null, author: "owner",
+    text: "[Vox.md voice note, 2026-11-15T15:00:00Z]\n\nVox feedback 1",
+  });
+  assert.deepEqual(first.cursors, { "vox:isobot": "150" });
+  assert.equal(store.cursor("vox:isobot"), null, "cursors wait for triage to succeed");
+  store.setCursor("vox:isobot", "150");
+
+  notes.push({ sequence: 151, id: "note-151", markdown: "  " }, { sequence: 152, id: "note-152", markdown: "Lock screen opens a new note" });
+  const second = await source.collect(store);
+  assert.deepEqual(second.items.map(i => i.id), ["vox:note-152"], "blank notes are skipped");
+  assert.deepEqual(second.cursors, { "vox:isobot": "152" });
+  store.setCursor("vox:isobot", "152");
+  assert.deepEqual(await source.collect(store), { items: [], cursors: {} });
+});
+
+test("a Vox note that can't be read fails the source so its cursor stays put", async () => {
+  const store = new Store(":memory:");
+  const { fetcher } = fakeVox([{ sequence: 1, id: "a", markdown: "one" }, { sequence: 2, id: "b", markdown: "two" }], new Set(["b"]));
+  await assert.rejects(new VoxSource("https://pi.test", "token", "isobot", fetcher).collect(store), /HTTP 503/);
+  assert.equal(store.cursor("vox:isobot"), null);
+});
+
+function voxTriage(decisions: { id: string; repo: string; title: string; confidence: number }[], voxConfig?: object) {
+  const config = { ...loadConfig(), vox: { conversation: "isobot", autoApprove: true, ...voxConfig } };
+  const github = new FakeGitHub();
+  const builder = new FakeBuilder();
+  builder.triageResult = {
+    digest: "",
+    decisions: decisions.map(d => ({ ...d, action: "propose" as const, kind: "bug" as const, spec: "Spec", reason: "owner asked" })),
+  };
+  const posted: string[] = [];
+  const notifier = new Notifier("https://discord.test/webhook", (async (_url: string, init: RequestInit) => {
+    posted.push(JSON.parse(String(init.body)).content);
+    return new Response(null, { status: 204 });
+  }) as typeof fetch);
+  const sources = [{
+    name: "fake",
+    collect: async () => ({ cursors: {}, items: [
+      { id: "vox:n1", source: "vox" as const, repo: null, author: "owner", url: null, text: "voice note" },
+      { id: "discord:9", source: "discord" as const, repo: "codybontecou/vox.md", author: "fan", url: "https://discord.com/x", text: "msg" },
+    ] }),
+  }];
+  return { config, github, builder, posted, run: () => triage({ config, store: new Store(":memory:"), github, builder, notifier, sources }) };
+}
+
+test("confident proposals from the owner's Vox notes are filed ready to build; nothing else is", async () => {
+  const { github, run, posted, builder } = voxTriage([
+    { id: "vox:n1", repo: "codybontecou/vox.md", title: "One-tap recording", confidence: 0.9 },
+    { id: "vox:n1", repo: "codybontecou/vox.md", title: "Unclear tweak", confidence: 0.5 },
+    { id: "discord:9", repo: "codybontecou/vox.md", title: "Community ask", confidence: 0.95 },
+  ]);
+  const report = await run();
+  assert.deepEqual(report.proposals.map(p => [p.title, p.approved]), [["Community ask", false], ["One-tap recording", true], ["Unclear tweak", false]]);
+  const byTitle = (title: string) => [1, 2, 3].map(n => github.get("codybontecou", "vox.md", n)).find(issue => issue.title === title)!;
+  assert.deepEqual(byTitle("One-tap recording").labels, ["isobot:ready", "bug"]);
+  assert.match(byTitle("One-tap recording").body, /\*\*Source:\*\* the owner's Vox.md voice note/);
+  assert.match(byTitle("One-tap recording").body, /Auto-approved .*isobot:stop/);
+  assert.deepEqual(byTitle("Unclear tweak").labels, ["isobot:proposed", "bug"], "low confidence still waits");
+  assert.deepEqual(byTitle("Community ask").labels, ["isobot:proposed", "bug"], "only the owner's notes self-approve");
+  assert.match(posted[0], /🏗 One-tap recording/);
+  assert.match(posted[0], /add `isobot:stop` to cancel/);
+});
+
+test("autoApprove off keeps Vox proposals waiting, and one note yields at most maxProposalsPerNote issues", async () => {
+  const { github, run } = voxTriage([1, 2, 3].map(n => ({ id: "vox:n1", repo: "codybontecou/vox.md", title: `Change ${n}`, confidence: 0.9 - n / 100 })),
+    { autoApprove: false, maxProposalsPerNote: 2 });
+  const report = await run();
+  assert.deepEqual(report.proposals.map(p => p.title), ["Change 1", "Change 2"]);
+  assert.ok(report.proposals.every(p => !p.approved));
+  assert.deepEqual(github.get("codybontecou", "vox.md", 1).labels, ["isobot:proposed", "bug"]);
 });

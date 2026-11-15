@@ -31,6 +31,13 @@
     "iso.me": "codybontecou/whereday",
     "vox.md": "codybontecou/vox.md"
   },
+  "vox": {
+    "conversation": "isobot",
+    "autoApprove": true,
+    "minAutoApproveConfidence": 0.7,
+    "maxProposalsPerNote": 3,
+    "hints": "\"Vox\", \"box\", \"boxing\" or \"Voxboard\" = Vox.md (codybontecou/vox.md); \"Health and D\" or \"health MD\" = Health.md (codybontecou/health-md); \"time MD\" = time.md; \"where day\", \"iso me\" = whereday; \"git sync\" or \"sync MD\" = GitSync.md; \"insta reply\" = Instarep.ly."
+  },
   "defaults": {
     "autonomy": "pr",
     "checks": [],

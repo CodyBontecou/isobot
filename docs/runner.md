@@ -95,6 +95,28 @@ Release commands run on a clean checkout of the merge commit with the runner's
 scrubbed environment, so tools that need credentials (App Store Connect API
 keys, Wrangler) must find them in their own config on the machine.
 
+## Vox.md notes
+
+Your own voice notes can feed triage directly. In Vox.md, make a capture preset
+(e.g. **isobot**) with **Destination → Target → HTTP**:
+
+- URL: `https://pi.isolated.tech/api/vox?mode=memory&conversation=isobot`
+- Bearer Token: the raw `PROMPT_API_TOKEN` from `.env.prompt`
+
+Use `mode=memory`: the note is stored without Pi running a model on it. Each
+triage pass reads new notes from that conversation (the `vox` block in
+`runner/config/isobot.json`), splits a rambling note into up to
+`maxProposalsPerNote` concrete changes, and ignores errands, games and
+open-ended ideas. `hints` tells the model how product names come out of
+speech-to-text.
+
+With `autoApprove: true`, proposals at or above `minAutoApproveConfidence`
+(default 0.7) are filed as `isobot:ready` and build immediately; less certain
+ones wait as `isobot:proposed`. Only the `vox` source can self-approve, and repo
+autonomy still decides whether a PR merges. Add `isobot:stop` to cancel one.
+Because the conversation exists only for isobot, the first pass takes notes that
+were already there. Notes arrive at the next triage pass (`triageMinutes`).
+
 ## Builder sandbox
 
 Builders run with Claude Code's shell sandbox on. It allows writes to the

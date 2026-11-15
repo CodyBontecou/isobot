@@ -1,7 +1,7 @@
 import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
 import type { Builder, TriageDecision, TriageItem } from "./builder.js";
-import { configuredRepos, type Environment, type RunnerConfig } from "./config.js";
+import { configuredRepos, type Environment, type RunnerConfig, type VoxConfig } from "./config.js";
 import type { GitHubApi } from "./github.js";
 import type { Notifier } from "./notify.js";
 import type { Store } from "./store.js";
@@ -192,6 +192,69 @@ export class EmailSource implements Source {
   }
 }
 
+interface VoxNote { sequence: number; id: string; mode: string; receivedAt?: string }
+
+const VOX_NOTE_CHARS = 8000;
+
+/**
+ * The owner's Vox.md captures: a Vox preset with an HTTP destination posts each note to one Pi
+ * conversation (`/api/vox?mode=memory&conversation=…`), and this reads that conversation's archive.
+ * The conversation exists only for isobot, so unlike the other sources the first pass takes
+ * everything already there: notes sent before the runner was set up still count.
+ */
+export class VoxSource implements Source {
+  name = "vox";
+
+  constructor(
+    private piUrl: string,
+    private token: string,
+    private conversation: string,
+    private fetcher: typeof fetch = fetch,
+  ) {}
+
+  private async get(path: string): Promise<Response> {
+    const response = await this.fetcher(`${this.piUrl}${path}`, {
+      headers: { Authorization: `Bearer ${this.token}` }, signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`Vox notes ${path.split("?")[0]} returned HTTP ${response.status}`);
+    }
+    return response;
+  }
+
+  async collect(store: Store): Promise<Collected> {
+    const key = `vox:${this.conversation}`;
+    const cursor = Number(store.cursor(key) ?? "0");
+    const fresh: VoxNote[] = [];
+    let before: number | undefined;
+    // Newest first; stop at the cursor. Five pages of 100 is far more than a triage interval holds.
+    for (let page = 0; page < 5; page++) {
+      const query = new URLSearchParams({ conversation: this.conversation, limit: "100", ...(before ? { before: String(before) } : {}) });
+      const { items, nextCursor } = await (await this.get(`/api/notes?${query}`)).json() as { items: VoxNote[]; nextCursor?: number };
+      const newer = items.filter(note => note.sequence > cursor);
+      fresh.push(...newer);
+      if (newer.length < items.length || nextCursor === undefined) break;
+      before = nextCursor;
+    }
+    if (fresh.length === 0) return { items: [], cursors: {} };
+    const items: TriageItem[] = [];
+    for (const note of fresh.reverse()) {
+      const id = `vox:${note.id.toLowerCase()}`;
+      if (store.isSeen("triage", id)) continue;
+      // A failed read throws, so the cursor stays put and the note comes back next pass.
+      const query = new URLSearchParams({ conversation: this.conversation });
+      const markdown = await (await this.get(`/api/notes/${encodeURIComponent(note.id)}.md?${query}`)).text();
+      if (!markdown.trim()) continue;
+      items.push({
+        id, source: "vox", repo: null, url: null, author: "owner",
+        text: `[Vox.md voice note${note.receivedAt ? `, ${note.receivedAt}` : ""}]\n\n${markdown.slice(0, VOX_NOTE_CHARS)}`,
+      });
+    }
+    return { items, cursors: { [key]: String(Math.max(...fresh.map(note => note.sequence))) } };
+  }
+}
+
 export interface TriageDeps {
   config: RunnerConfig;
   store: Store;
@@ -203,9 +266,11 @@ export interface TriageDeps {
 
 export interface TriageReport {
   items: number;
-  proposals: { title: string; url: string }[];
+  proposals: Proposal[];
   digest: string;
 }
+
+interface Proposal { title: string; url: string; approved: boolean }
 
 /** One triage pass: collect → decide (model) → propose (GitHub issues awaiting the owner's approval) → digest. */
 export async function triage(deps: TriageDeps): Promise<TriageReport> {
@@ -242,12 +307,17 @@ export async function triage(deps: TriageDeps): Promise<TriageReport> {
   // If a chunk fails, cursors stay put and the next pass retries; `seen` marks keep finished items from repeating.
   for (let start = 0; start < items.length; start += TRIAGE_CHUNK) {
     const chunk = items.slice(start, start + TRIAGE_CHUNK);
-    const result = await deps.builder.triage({ items: chunk, repos, publicRepos, maxProposals: Math.max(budget, 0) });
+    const result = await deps.builder.triage({ items: chunk, repos, publicRepos, maxProposals: Math.max(budget, 0), hints: deps.config.vox?.hints });
     if (result.digest) digests.push(result.digest);
     const ranked = result.decisions.filter(d => d.action === "propose").sort((a, b) => b.confidence - a.confidence);
+    const perItem = new Map<string, number>();
     for (const decision of ranked) {
       if (budget <= 0) break;
       const item = byId.get(decision.id)!;
+      // A voice note may hold several changes; anything else becomes at most one issue or comment.
+      const allowed = item.source === "vox" ? deps.config.vox?.maxProposalsPerNote ?? 3 : 1;
+      if ((perItem.get(item.id) ?? 0) >= allowed) continue;
+      perItem.set(item.id, (perItem.get(item.id) ?? 0) + 1);
       // An item from a known repository stays there, whatever the (untrusted) text persuaded the model.
       if (item.repo && item.repo.toLowerCase() !== decision.repo?.toLowerCase()) decision.repo = item.repo;
       try {
@@ -266,30 +336,40 @@ export async function triage(deps: TriageDeps): Promise<TriageReport> {
 
   const lines = [
     `🗂 **isobot triage**: ${items.length} new item${items.length === 1 ? "" : "s"}, ${proposals.length} proposal${proposals.length === 1 ? "" : "s"}.`,
-    ...proposals.map(p => `• ${p.title} <${p.url}>`),
-    ...(proposals.length ? [`Add \`${labels.ready}\` to a proposal to have isobot build it.`] : []),
+    ...proposals.map(p => `• ${p.approved ? "🏗 " : ""}${p.title} <${p.url}>`),
+    ...(proposals.some(p => p.approved) ? [`🏗 = auto-approved from your Vox.md notes and queued to build; add \`${labels.stop}\` to cancel one.`] : []),
+    ...(proposals.some(p => !p.approved) ? [`Add \`${labels.ready}\` to a proposal to have isobot build it.`] : []),
     result.digest,
   ];
   await deps.notifier.discord(lines.filter(Boolean).join("\n"));
   return { items: items.length, proposals, digest: result.digest };
 }
 
-async function propose(deps: TriageDeps, decision: TriageDecision, item: TriageItem, isPublic: boolean): Promise<{ title: string; url: string }> {
+/** Only the owner's own notes skip the approval click, and only when triage is confident. */
+export function autoApproves(vox: VoxConfig | undefined, item: TriageItem, decision: TriageDecision): boolean {
+  return item.source === "vox" && vox?.autoApprove === true && decision.confidence >= (vox.minAutoApproveConfidence ?? 0.7);
+}
+
+async function propose(deps: TriageDeps, decision: TriageDecision, item: TriageItem, isPublic: boolean): Promise<Proposal> {
   const [owner, repo] = decision.repo!.split("/");
   const labels = deps.config.labels;
   const kindLabel = decision.kind === "bug" ? "bug" : decision.kind === "feature" ? "enhancement" : null;
-  const footer = `\n\n---\n<sub>Proposed by isobot triage (confidence ${decision.confidence.toFixed(2)}): ${decision.reason}. Add \`${labels.ready}\` to approve a build.</sub>\n<!-- isobot:triage:${item.id} -->`;
+  const approved = autoApproves(deps.config.vox, item, decision);
+  const next = approved
+    ? `Auto-approved from the owner's Vox.md note; add \`${labels.stop}\` to cancel the build.`
+    : `Add \`${labels.ready}\` to approve a build.`;
+  const footer = `\n\n---\n<sub>Proposed by isobot triage (confidence ${decision.confidence.toFixed(2)}): ${decision.reason}. ${next}</sub>\n<!-- isobot:triage:${item.id} -->`;
   if (item.source === "github") {
     const number = Number(item.id.split("#")[1]);
     await deps.github.comment(owner, repo, number, `## isobot proposal\n\n${decision.spec}${footer}`);
     await deps.github.addLabels(owner, repo, number, [labels.proposed]);
-    return { title: decision.title, url: item.url! };
+    return { title: decision.title, url: item.url!, approved: false };
   }
   // Public repos never get who said it; email links and senders never leave the runner.
   const who = isPublic ? "" : ` from ${item.author}`;
   const link = item.url && item.source !== "email" ? `: ${item.url}` : "";
-  const source = `\n\n**Source:** ${item.source} message${who}${link}`;
+  const source = item.source === "vox" ? "\n\n**Source:** the owner's Vox.md voice note" : `\n\n**Source:** ${item.source} message${who}${link}`;
   const issue = await deps.github.createIssue(owner, repo, decision.title, `${decision.spec}${source}${footer}`,
-    [labels.proposed, ...(kindLabel ? [kindLabel] : [])]);
-  return { title: decision.title, url: issue.url };
+    [approved ? labels.ready : labels.proposed, ...(kindLabel ? [kindLabel] : [])]);
+  return { title: decision.title, url: issue.url, approved };
 }

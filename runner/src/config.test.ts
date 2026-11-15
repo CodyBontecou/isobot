@@ -48,3 +48,12 @@ test("environment requires a GitHub token and HTTPS Pi URL", () => {
   assert.equal(env.home, "/tmp/x");
   assert.equal(env.imap, undefined);
 });
+
+test("vox config is validated", () => {
+  const ok = { ...loadConfig(), vox: { conversation: "isobot", autoApprove: true } } as RunnerConfig;
+  assert.doesNotThrow(() => validateConfig(ok));
+  assert.throws(() => validateConfig({ ...ok, vox: { conversation: "../x", autoApprove: true } }), /vox.conversation/);
+  assert.throws(() => validateConfig({ ...ok, vox: { conversation: "isobot", autoApprove: "yes" } } as unknown as RunnerConfig), /vox.autoApprove/);
+  assert.throws(() => validateConfig({ ...ok, vox: { conversation: "isobot", autoApprove: true, minAutoApproveConfidence: 0 } }), /minAutoApproveConfidence/);
+  assert.throws(() => validateConfig({ ...ok, vox: { conversation: "isobot", autoApprove: true, maxProposalsPerNote: 0 } }), /maxProposalsPerNote/);
+});
