@@ -11,7 +11,7 @@ const policy: RepoPolicy = {
 function input(overrides: Partial<GateInput> = {}): GateInput {
   return {
     policy,
-    diff: { files: [{ path: "src/view.swift", added: 10, removed: 2 }], changedLines: 12 },
+    diff: { files: [{ path: "src/view.swift", added: 10, removed: 2, binary: false }], changedLines: 12 },
     checks: { configured: true, passed: true, results: [{ command: "npm test", ok: true, output: "" }] },
     review: { verdict: "approve", confidence: 0.9, risk: "low", summary: "ok", concerns: [] },
     issueLabels: [], stopLabel: "isobot:stop",
@@ -48,10 +48,10 @@ test("every gate blocks on its own", () => {
     [{ review: { verdict: "request_changes", confidence: 0.9, risk: "low", summary: "", concerns: [] } }, /requested changes/],
     [{ review: { verdict: "approve", confidence: 0.5, risk: "low", summary: "", concerns: [] } }, /confidence 0.50/],
     [{ review: { verdict: "approve", confidence: 0.99, risk: "high", summary: "", concerns: [] } }, /high risk/],
-    [{ diff: { files: [{ path: "a.ts", added: 200, removed: 0 }], changedLines: 200 } }, /exceed/],
-    [{ diff: { files: [{ path: "App/Auth/Token.swift", added: 1, removed: 0 }], changedLines: 1 } }, /protected paths: App\/Auth\/Token.swift/],
-    [{ diff: { files: [{ path: "AppTests/LoginTests.swift", added: 1, removed: 9 }], changedLines: 10 } }, /removes more test lines/],
-    [{ diff: { files: [{ path: "src/x.test.ts", added: 0, removed: 4 }], changedLines: 4 } }, /removes more test lines/],
+    [{ diff: { files: [{ path: "a.ts", added: 200, removed: 0, binary: false }], changedLines: 200 } }, /exceed/],
+    [{ diff: { files: [{ path: "App/Auth/Token.swift", added: 1, removed: 0, binary: false }], changedLines: 1 } }, /protected paths: App\/Auth\/Token.swift/],
+    [{ diff: { files: [{ path: "AppTests/LoginTests.swift", added: 1, removed: 9, binary: false }], changedLines: 10 } }, /removes more test lines/],
+    [{ diff: { files: [{ path: "src/x.test.ts", added: 0, removed: 4, binary: false }], changedLines: 4 } }, /removes more test lines/],
     [{ issueLabels: ["ISOBOT:STOP"] }, /stop label/],
     [{ diff: { files: [], changedLines: 0 } }, /empty/],
   ];
@@ -63,6 +63,6 @@ test("every gate blocks on its own", () => {
 });
 
 test("adding tests is not treated as weakening them", () => {
-  const decision = evaluateGate(input({ diff: { files: [{ path: "AppTests/NewTests.swift", added: 30, removed: 2 }], changedLines: 32 } }));
+  const decision = evaluateGate(input({ diff: { files: [{ path: "AppTests/NewTests.swift", added: 30, removed: 2, binary: false }], changedLines: 32 } }));
   assert.equal(decision.merge, true);
 });

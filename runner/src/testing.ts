@@ -1,20 +1,21 @@
 import type { AgentRun, Builder, Review, TriageItem, TriageResult } from "./builder.js";
 import type { Labels } from "./config.js";
 import type { DiffStat } from "./git.js";
-import type { CiState, GitHubApi, Issue, PullRequest } from "./github.js";
+import type { CiState, GitHubApi, Issue, IssueComment, PullRequest } from "./github.js";
 import type { RepoOps } from "./pipeline.js";
 
 /** In-memory GitHub for tests. */
 export class FakeGitHub implements GitHubApi {
   issues = new Map<string, Issue>();
-  comments: { key: string; body: string }[] = [];
+  comments: { key: string; body: string; author?: string }[] = [];
   pulls = new Map<number, PullRequest & { owner: string; repo: string; branch: string; body: string }>();
   merged: number[] = [];
-  ci: CiState = "none";
+  ci: CiState = "success";
+  login = "owner";
   private nextPull = 100;
 
-  add(owner: string, repo: string, number: number, title: string, labels: string[], body = "Do the thing"): Issue {
-    const issue: Issue = { owner, repo, number, title, body, labels, state: "open", url: `https://github.com/${owner}/${repo}/issues/${number}`, author: "someone" };
+  add(owner: string, repo: string, number: number, title: string, labels: string[], body = "Do the thing", author = "owner"): Issue {
+    const issue: Issue = { owner, repo, number, title, body, labels, state: "open", url: `https://github.com/${owner}/${repo}/issues/${number}`, author };
     this.issues.set(`${owner}/${repo}#${number}`, issue);
     return issue;
   }
@@ -29,6 +30,10 @@ export class FakeGitHub implements GitHubApi {
     return this.comments.filter(c => c.key === `${owner}/${repo}#${number}`).map(c => c.body);
   }
 
+  async viewer(): Promise<string> { return this.login; }
+  async issueComments(owner: string, repo: string, number: number): Promise<IssueComment[]> {
+    return this.comments.filter(c => c.key === `${owner}/${repo}#${number}`).map(c => ({ author: c.author ?? this.login, body: c.body }));
+  }
   async defaultBranch(): Promise<string> { return "main"; }
   async issuesWithLabel(owner: string, repo: string, label: string): Promise<Issue[]> {
     return [...this.issues.values()].filter(i => i.owner === owner && i.repo === repo && i.state === "open" && i.labels.includes(label));
@@ -81,17 +86,19 @@ export class FakeGitHub implements GitHubApi {
 export class FakeRepo implements RepoOps {
   calls: string[] = [];
   changes = true;
-  diff_: DiffStat = { files: [{ path: "src/feature.ts", added: 20, removed: 3 }], changedLines: 23 };
+  commits = 0;
+  diff_: DiffStat = { files: [{ path: "src/feature.ts", added: 20, removed: 3, binary: false }], changedLines: 23 };
 
-  async sync(): Promise<void> { this.calls.push("sync"); }
-  async createWorktree(branch: string): Promise<string> { this.calls.push(`worktree ${branch}`); return `/tmp/wt/${branch}`; }
-  async removeWorktree(branch: string): Promise<void> { this.calls.push(`remove ${branch}`); }
-  async commitPending(): Promise<boolean> { this.calls.push("commit"); return this.changes; }
+  async sync(): Promise<string> { this.calls.push("sync"); return "base"; }
+  async createWorkspace(branch: string): Promise<string> { this.calls.push(`workspace ${branch}`); return `/tmp/wt/${branch}`; }
+  async removeWorkspace(name: string): Promise<void> { this.calls.push(`remove ${name}`); }
+  async commitPending(): Promise<void> { this.calls.push("commit"); }
+  async capture(): Promise<string> { this.commits++; return `sha${this.commits}`; }
+  async ahead(): Promise<number> { return this.changes ? 1 : 0; }
   async diffStat(): Promise<DiffStat> { return this.diff_; }
   async diff(): Promise<string> { return "diff --git a/x b/x"; }
-  async head(): Promise<string> { return "head"; }
-  async push(_dir: string, branch: string): Promise<void> { this.calls.push(`push ${branch}`); }
-  async checkoutAt(sha: string, label: string): Promise<string> { this.calls.push(`checkout ${sha} ${label}`); return "/tmp/release"; }
+  async push(sha: string, branch: string): Promise<void> { this.calls.push(`push ${sha} ${branch}`); }
+  async checkoutAt(sha: string, name: string): Promise<string> { this.calls.push(`checkout ${sha} ${name}`); return "/tmp/release"; }
 }
 
 export class FakeBuilder implements Builder {
@@ -102,7 +109,7 @@ export class FakeBuilder implements Builder {
   triageItems: TriageItem[] = [];
   implementResult: AgentRun = { ok: true, sessionId: "session-1", summary: "Added the feature and tests." };
 
-  async implement(): Promise<AgentRun> { this.implementCalls++; return this.implementResult; }
+  async implement(_input: { cwd: string; task: string }): Promise<AgentRun> { this.implementCalls++; return this.implementResult; }
   async revise(input: { feedback: string }): Promise<AgentRun> {
     this.reviseFeedback.push(input.feedback);
     return { ok: true, sessionId: "session-1", summary: "Fixed." };

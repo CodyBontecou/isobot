@@ -14,6 +14,7 @@ import { loadConfig } from "./config.js";
 import { Repo } from "./git.js";
 import { Notifier } from "./notify.js";
 import { Pipeline } from "./pipeline.js";
+import { setGitIdentity } from "./proc.js";
 import { Store } from "./store.js";
 import { FakeGitHub } from "./testing.js";
 
@@ -39,8 +40,10 @@ git(seed, "add", "-A");
 git(seed, "commit", "-q", "-m", "init");
 git(seed, "push", "-q", "origin", "HEAD:main");
 
+setGitIdentity("isobot smoke", "smoke@example.com");
 const config = loadConfig();
 config.repos = { "local/demo": { autonomy: "merge", checks: ["npm test"], requireCi: false } };
+config.trustedAuthors = ["owner"];
 config.builder.timeoutMinutes = 15;
 config.builder.maxTurns = 80;
 const github = new FakeGitHub();
@@ -49,7 +52,7 @@ github.add("local", "demo", 1, "Add a multiply function", ["isobot:ready"],
 const store = new Store(path.join(root, "runner.sqlite"));
 const pipeline = new Pipeline({
   config, env: { home: root }, store, github,
-  builder: new ClaudeCodeBuilder(config.builder, process.env.ISOBOT_CLAUDE_BIN ?? "claude"),
+  builder: new ClaudeCodeBuilder(config.builder, { secrets: [path.join(root, "runner.sqlite")], noWrite: [path.join(root, "home", "repos")] }, process.env.ISOBOT_CLAUDE_BIN ?? "claude"),
   notifier: new Notifier(),
   repo: (owner, repo) => new Repo(path.join(root, "home"), owner, repo, "unused-token", origin),
 });

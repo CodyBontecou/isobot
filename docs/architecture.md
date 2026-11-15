@@ -51,17 +51,23 @@ instructions:
 1. Triage reads untrusted content with **no tools** and outputs proposals only.
 2. Proposals never build until **you** add `isobot:ready`. Only tickets you
    create yourself (the owner-only `@isobot` mention) start as ready.
-3. Builders see the approved issue text, run with a scrubbed environment (no
-   GitHub, Pi, email or API credentials) and are denied reads of credential
-   folders. The runner itself pushes, opens PRs and merges.
-4. Merge decisions are deterministic code (`runner/src/policy.ts`), not the
-   model's opinion. Policy lives in this repo, so a builder can't edit a target
-   repo to grant itself autonomy.
+3. For a proposal, builders get isobot's own vetted spec, not the reporter's
+   text. Issues by anyone other than you (or `trustedAuthors`) can be built but
+   never merge without you, and an issue edited mid-build loses auto-merge.
+4. Builders work in a throwaway clone with a scrubbed environment: no GitHub,
+   Pi, email or API credentials, no global git config (credential helpers), no
+   `gh` login. Shell commands run in Claude Code's sandbox, which can write only
+   to the workspace and toolchain caches and can't read credential folders or
+   runner state. The runner copies the builder's commit into its own clone,
+   diffs and judges it there, and pushes that exact commit with git hooks off.
+5. Merge decisions are deterministic code (`runner/src/policy.ts`), not the
+   model's opinion, and are re-checked right before merging. Policy lives in this
+   repo, and agent instruction files (`CLAUDE.md`, `AGENTS.md`, `.claude/`) are
+   protected paths, so a builder can't grant itself more autonomy.
 
-Shell commands a builder runs are not sandboxed by default, because Xcode,
-simulators and package managers need broad file and network access. On the mini,
-run the runner as a dedicated macOS user that holds no personal credentials;
-that is the real isolation boundary.
+The sandbox and permission rules are defence in depth on a personal account. On
+the mini, run the runner as a dedicated macOS user that holds no personal
+credentials; that is the real isolation boundary.
 
 ## Autonomy and gates
 
@@ -73,7 +79,9 @@ Per repository in `runner/config/isobot.json`:
   reviewer approves with confidence ≥ `minReviewConfidence` and not high risk;
   the diff is under `maxChangedLines`; no protected paths (auth, purchases,
   entitlements, Info.plist, CI, migrations…); no net deletion of test lines; no
-  stop label; GitHub CI green when `requireCi`.
+  stop label; issue unchanged and written by a trusted author; GitHub CI green
+  when `requireCi` (a PR with no CI at all counts as not green, so set
+  `requireCi: false` for repos without CI).
 - `merge` is rejected by the config loader unless the repo has check commands.
 - Release: `release.onMerge` commands run on the merge commit after any isobot
   merge (deploy a Worker, upload to TestFlight). `release.onShip` (App Store

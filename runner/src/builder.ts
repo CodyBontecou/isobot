@@ -1,4 +1,6 @@
-import { homedir } from "node:os";
+import { mkdtempSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import path from "node:path";
 import type { RunnerConfig } from "./config.js";
 import { run, tail, workerEnv } from "./proc.js";
 
@@ -108,10 +110,65 @@ const TRIAGE_SCHEMA = {
   required: ["decisions", "digest"],
 };
 
-/** Credential locations no builder tool should read. */
+/** Credential locations no builder tool or shell command should read. */
 export function defaultDenyPaths(home = homedir()): string[] {
-  return [".ssh", ".aws", ".gnupg", ".config/gh", ".netrc", ".npmrc", ".docker", ".wrangler", ".kube", "Library/Keychains", ".appstoreconnect", ".fastlane"]
+  return [".ssh", ".aws", ".gnupg", ".config/gh", ".netrc", ".npmrc", ".docker", ".wrangler", ".kube", "Library/Keychains", ".appstoreconnect", ".fastlane", ".git-credentials"]
     .map(entry => `${home}/${entry}`);
+}
+
+/** Places a builder must never modify: runner state, shell startup, Claude settings, login items. */
+export function defaultNoWritePaths(home = homedir()): string[] {
+  return [".claude", ".claude.json", ".config", ".zshrc", ".zprofile", ".zshenv", ".bashrc", ".bash_profile", ".profile", ".gitconfig", "Library/LaunchAgents"]
+    .map(entry => `${home}/${entry}`);
+}
+
+/** Toolchain caches builds legitimately write to outside the workspace. */
+export function defaultBuildCaches(home = homedir()): string[] {
+  return ["Library/Developer/Xcode/DerivedData", "Library/Developer/CoreSimulator", "Library/Developer/XCTestDevices", "Library/Caches",
+    "Library/Logs", "Library/org.swift.swiftpm", ".swiftpm", ".npm", ".cache", ".gradle", ".cargo", ".bun", ".pnpm-store", ".cocoapods"]
+    .map(entry => `${home}/${entry}`);
+}
+
+/** Absolute paths in permission rules need a leading `//`; a single `/` is relative to the settings file. */
+const rulePath = (p: string) => `/${p.startsWith("/") ? p : `/${p}`}`;
+
+export interface BuilderPaths {
+  /** Runner secrets and state the builder must not read or write (runner.env, sqlite, clones, logs). */
+  secrets: string[];
+  /** Directories the builder must not modify (e.g. the isobot checkout running this code). */
+  noWrite: string[];
+}
+
+export function builderSettings(extra: Record<string, unknown>, paths: BuilderPaths, home = homedir()): Record<string, unknown> {
+  const denyRead = [...defaultDenyPaths(home), ...paths.secrets];
+  const noWrite = [...defaultNoWritePaths(home), ...paths.noWrite, ...paths.secrets];
+  const sandbox = (extra.sandbox ?? {}) as Record<string, unknown>;
+  const filesystem = (sandbox.filesystem ?? {}) as Record<string, string[]>;
+  const permissions = (extra.permissions ?? {}) as Record<string, string[]>;
+  return {
+    ...extra,
+    sandbox: {
+      enabled: true,
+      failIfUnavailable: true,
+      allowUnsandboxedCommands: false,
+      autoAllowBashIfSandboxed: true,
+      ...sandbox,
+      filesystem: {
+        ...filesystem,
+        allowWrite: [...defaultBuildCaches(home), ...(filesystem.allowWrite ?? [])],
+        denyRead: [...denyRead, ...(filesystem.denyRead ?? [])],
+        denyWrite: [...noWrite, ...(filesystem.denyWrite ?? [])],
+      },
+    },
+    permissions: {
+      ...permissions,
+      deny: [
+        ...(permissions.deny ?? []),
+        ...denyRead.flatMap(p => [`Read(${rulePath(p)})`, `Read(${rulePath(p)}/**)`]),
+        ...noWrite.flatMap(p => [`Edit(${rulePath(p)})`, `Edit(${rulePath(p)}/**)`, `Write(${rulePath(p)})`, `Write(${rulePath(p)}/**)`]),
+      ],
+    },
+  };
 }
 
 interface CliResult {
@@ -125,34 +182,25 @@ interface CliResult {
 }
 
 export class ClaudeCodeBuilder implements Builder {
-  constructor(private config: RunnerConfig["builder"], private bin = "claude") {}
+  private settingsJson: string;
+  private ghConfigDir: string;
 
-  private settings(): string {
-    const deny = defaultDenyPaths();
-    const base = this.config.settings ?? {};
-    const sandbox = (base.sandbox ?? {}) as Record<string, unknown>;
-    const filesystem = (sandbox.filesystem ?? {}) as Record<string, unknown>;
-    const permissions = (base.permissions ?? {}) as Record<string, unknown>;
-    return JSON.stringify({
-      ...base,
-      sandbox: { ...sandbox, filesystem: { ...filesystem, denyRead: [...((filesystem.denyRead as string[]) ?? []), ...deny] } },
-      permissions: {
-        ...permissions,
-        deny: [...((permissions.deny as string[]) ?? []), ...deny.flatMap(p => [`Read(${p}/**)`, `Read(${p})`])],
-      },
-    });
+  constructor(private config: RunnerConfig["builder"], paths: BuilderPaths, private bin = "claude") {
+    this.settingsJson = JSON.stringify(builderSettings(config.settings ?? {}, paths));
+    // An empty gh config directory: the gh CLI then has no login to lend a builder.
+    this.ghConfigDir = mkdtempSync(path.join(tmpdir(), "isobot-gh-"));
   }
 
   private async call(cwd: string, prompt: string, args: string[], timeoutMs: number): Promise<CliResult> {
     const fullArgs = [
-      "-p", "--output-format", "json", "--settings", this.settings(),
+      "-p", "--output-format", "json", "--settings", this.settingsJson,
       ...(this.config.model ? ["--model", this.config.model] : []),
       ...(this.config.maxTurns ? ["--max-turns", String(this.config.maxTurns)] : []),
       ...args,
     ];
     const result = await run(this.bin, fullArgs, {
       cwd, input: prompt, timeoutMs,
-      env: workerEnv({ CLAUDE_CODE_OAUTH_TOKEN: process.env.CLAUDE_CODE_OAUTH_TOKEN }),
+      env: workerEnv({ CLAUDE_CODE_OAUTH_TOKEN: process.env.CLAUDE_CODE_OAUTH_TOKEN, GH_CONFIG_DIR: this.ghConfigDir }),
     });
     if (result.timedOut) throw new Error(`Claude Code timed out after ${Math.round(timeoutMs / 60_000)} minutes`);
     const parsed = parseResult(result.stdout);
@@ -189,7 +237,8 @@ export class ClaudeCodeBuilder implements Builder {
   async review(input: { cwd: string; task: string; diff: string; checks: string }): Promise<Review> {
     const prompt = `## Task\n${input.task}\n\n## Runner checks\n${input.checks}\n\n## Diff\n\`\`\`diff\n${input.diff}\n\`\`\``;
     const result = await this.call(input.cwd, prompt, [
-      "--tools", "Read,Grep,Glob", "--permission-mode", "dontAsk", "--no-session-persistence",
+      // Project settings are skipped: the builder could have written hooks or instructions into them.
+      "--tools", "Read,Grep,Glob", "--permission-mode", "dontAsk", "--no-session-persistence", "--setting-sources", "user",
       "--append-system-prompt", REVIEW_RULES, "--json-schema", JSON.stringify(REVIEW_SCHEMA),
     ], 30 * 60_000);
     return parseReview(result.structured_output);
@@ -203,7 +252,7 @@ export class ClaudeCodeBuilder implements Builder {
       JSON.stringify(input.items),
     ].join("\n\n");
     const result = await this.call(homedir(), prompt, [
-      "--tools", "", "--permission-mode", "dontAsk", "--no-session-persistence",
+      "--tools", "", "--permission-mode", "dontAsk", "--no-session-persistence", "--setting-sources", "user",
       "--append-system-prompt", TRIAGE_RULES, "--json-schema", JSON.stringify(TRIAGE_SCHEMA),
     ], 20 * 60_000);
     return parseTriage(result.structured_output, new Set(input.items.map(item => item.id)), new Set(input.repos.map(r => r.toLowerCase())));

@@ -3,17 +3,25 @@ import path from "node:path";
 import { run, workerEnv, type RunResult } from "./proc.js";
 
 export interface DiffStat {
-  files: { path: string; added: number; removed: number }[];
+  files: { path: string; added: number; removed: number; binary: boolean }[];
   changedLines: number;
 }
 
+/** Binary changes can't be counted in lines; weigh them heavily so they can't slip under size limits. */
+export const BINARY_FILE_WEIGHT = 100;
+
+/** Never run repository hooks or fsmonitor commands from runner-side git calls. */
+const SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
+
 /**
- * Git operations for one repository. A shared clone per repo holds objects;
- * each job gets its own worktree and branch. The GitHub token is sent per
- * command as an HTTP header and is never written to .git/config or exposed to builders.
+ * Git for one repository, split so the GitHub token never meets builder-controlled files:
+ * - a bare clone that only the runner touches: fetches, diffs, gate inputs and pushes happen here;
+ * - a throwaway clone per job (objects shared read-only) where the builder works.
+ * The runner copies the job's commit into the bare clone, then judges and pushes that exact commit.
  */
 export class Repo {
-  readonly clonePath: string;
+  readonly barePath: string;
+  private static locks = new Map<string, Promise<unknown>>();
 
   constructor(
     private home: string,
@@ -22,8 +30,9 @@ export class Repo {
     private token: string,
     /** Overridable for tests (a local bare repository). */
     readonly remote = `https://github.com/${owner}/${repo}.git`,
+    private workRoot = path.join(home, "work"),
   ) {
-    this.clonePath = path.join(home, "repos", owner, repo);
+    this.barePath = path.join(home, "repos", owner, `${repo}.git`);
   }
 
   private authArgs(): string[] {
@@ -32,8 +41,8 @@ export class Repo {
   }
 
   private async git(args: string[], cwd: string, auth = false): Promise<RunResult> {
-    const result = await run("git", [...(auth ? this.authArgs() : []), ...args], {
-      cwd, env: workerEnv(), timeoutMs: 10 * 60_000,
+    const result = await run("git", [...SAFE, ...(auth ? this.authArgs() : []), ...args], {
+      cwd, env: workerEnv({ GIT_CONFIG_NOSYSTEM: "1" }), timeoutMs: 15 * 60_000,
     });
     if (result.code !== 0) {
       const message = (result.stderr || result.stdout).replaceAll(this.token, "***").trim();
@@ -42,76 +51,102 @@ export class Repo {
     return result;
   }
 
-  async sync(defaultBranch: string): Promise<void> {
-    if (!existsSync(path.join(this.clonePath, ".git"))) {
-      mkdirSync(path.dirname(this.clonePath), { recursive: true });
-      await this.git(["clone", "--no-checkout", this.remote, this.clonePath], path.dirname(this.clonePath), true);
-    }
-    await this.git(["fetch", "--prune", "origin", `+refs/heads/${defaultBranch}:refs/remotes/origin/${defaultBranch}`], this.clonePath, true);
+  /** Serialises operations on the shared bare clone (fetch, clone-from, push) across concurrent jobs. */
+  private exclusive<T>(work: () => Promise<T>): Promise<T> {
+    const key = this.barePath;
+    const previous = Repo.locks.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(work);
+    Repo.locks.set(key, next.catch(() => undefined));
+    return next;
   }
 
-  worktreePath(branch: string): string {
-    return path.join(this.home, "worktrees", this.owner, this.repo, branch.replaceAll("/", "__"));
-  }
-
-  /** Creates (or recreates) a clean worktree for `branch` from the default branch. */
-  async createWorktree(branch: string, defaultBranch: string): Promise<string> {
-    const dir = this.worktreePath(branch);
-    await this.removeWorktree(branch);
-    mkdirSync(path.dirname(dir), { recursive: true });
-    await this.git(["worktree", "add", "--force", "-B", branch, dir, `origin/${defaultBranch}`], this.clonePath);
-    return dir;
-  }
-
-  async removeWorktree(branch: string): Promise<void> {
-    const dir = this.worktreePath(branch);
-    if (existsSync(dir)) {
-      await this.git(["worktree", "remove", "--force", dir], this.clonePath).catch(() => rmSync(dir, { recursive: true, force: true }));
-    }
-    await this.git(["worktree", "prune"], this.clonePath).catch(() => undefined);
-  }
-
-  /** Commits anything the builder left uncommitted. Returns true if the branch differs from base. */
-  async commitPending(dir: string, message: string, defaultBranch: string): Promise<boolean> {
-    const status = await this.git(["status", "--porcelain"], dir);
-    if (status.stdout.trim()) {
-      await this.git(["add", "-A"], dir);
-      await this.git(["commit", "--no-verify", "-m", message], dir);
-    }
-    const ahead = await this.git(["rev-list", "--count", `origin/${defaultBranch}..HEAD`], dir);
-    return Number(ahead.stdout.trim()) > 0;
-  }
-
-  async diffStat(dir: string, defaultBranch: string): Promise<DiffStat> {
-    const result = await this.git(["diff", "--numstat", `origin/${defaultBranch}...HEAD`], dir);
-    const files = result.stdout.trim().split("\n").filter(Boolean).map(line => {
-      const [added, removed, ...rest] = line.split("\t");
-      // Binary files report "-"; count them as one changed line each.
-      return { path: rest.join("\t"), added: added === "-" ? 1 : Number(added), removed: removed === "-" ? 0 : Number(removed) };
+  /** Fetches the default branch and returns its commit. */
+  sync(defaultBranch: string): Promise<string> {
+    return this.exclusive(async () => {
+      if (!existsSync(path.join(this.barePath, "HEAD"))) {
+        mkdirSync(path.dirname(this.barePath), { recursive: true });
+        await this.git(["clone", "--bare", "--quiet", this.remote, this.barePath], path.dirname(this.barePath), true);
+      }
+      await this.git(["fetch", "--quiet", "--no-tags", "origin", `+refs/heads/${defaultBranch}:refs/heads/${defaultBranch}`], this.barePath, true);
+      return (await this.git(["rev-parse", `refs/heads/${defaultBranch}^{commit}`], this.barePath)).stdout.trim();
     });
-    return { files, changedLines: files.reduce((sum, f) => sum + f.added + f.removed, 0) };
   }
 
-  async diff(dir: string, defaultBranch: string, maxBytes = 150_000): Promise<string> {
-    const result = await run("git", ["diff", `origin/${defaultBranch}...HEAD`], { cwd: dir, env: workerEnv(), maxBytes: maxBytes * 2 });
+  workspacePath(name: string): string {
+    return path.join(this.workRoot, this.owner, this.repo, name.replaceAll("/", "__"));
+  }
+
+  /** A fresh clone at `baseSha` on a new local branch. Builders get this directory and nothing else. */
+  createWorkspace(branch: string, baseSha: string): Promise<string> {
+    return this.exclusive(async () => {
+      const dir = this.workspacePath(branch);
+      rmSync(dir, { recursive: true, force: true });
+      mkdirSync(path.dirname(dir), { recursive: true });
+      await this.git(["clone", "--quiet", "--shared", "--no-checkout", this.barePath, dir], path.dirname(dir));
+      await this.git(["checkout", "--quiet", "-B", branch, baseSha], dir);
+      return dir;
+    });
+  }
+
+  async removeWorkspace(name: string): Promise<void> {
+    rmSync(this.workspacePath(name), { recursive: true, force: true });
+  }
+
+  /** Commits anything left uncommitted in a workspace (no hooks run). */
+  async commitPending(dir: string, message: string): Promise<void> {
+    const status = await this.git(["status", "--porcelain"], dir);
+    if (!status.stdout.trim()) return;
+    await this.git(["add", "-A"], dir);
+    await this.git(["commit", "--quiet", "--no-verify", "-m", message], dir);
+  }
+
+  /** Copies the workspace's HEAD into the runner's bare clone and returns that commit. */
+  capture(dir: string, branch: string): Promise<string> {
+    return this.exclusive(async () => {
+      const ref = `refs/isobot/${branch}`;
+      await this.git(["fetch", "--quiet", "--no-tags", "--force", dir, `+HEAD:${ref}`], this.barePath);
+      return (await this.git(["rev-parse", `${ref}^{commit}`], this.barePath)).stdout.trim();
+    });
+  }
+
+  /** Diff stats between two commits, computed in the runner's clone. Renames are split so paths are real. */
+  async diffStat(baseSha: string, sha: string): Promise<DiffStat> {
+    const result = await this.git(["diff", "--numstat", "--no-renames", "-z", baseSha, sha], this.barePath);
+    const files = result.stdout.split("\0").filter(Boolean).map(record => {
+      const [added, removed, ...rest] = record.split("\t");
+      const binary = added === "-";
+      return { path: rest.join("\t"), added: binary ? 0 : Number(added), removed: binary ? 0 : Number(removed), binary };
+    });
+    return { files, changedLines: files.reduce((sum, f) => sum + (f.binary ? BINARY_FILE_WEIGHT : f.added + f.removed), 0) };
+  }
+
+  async diff(baseSha: string, sha: string, maxBytes = 150_000): Promise<string> {
+    const result = await run("git", [...SAFE, "diff", "--no-renames", baseSha, sha], { cwd: this.barePath, env: workerEnv(), maxBytes: maxBytes * 2 });
     const text = result.stdout;
     return text.length > maxBytes ? `${text.slice(0, maxBytes)}\n… diff truncated (${text.length} bytes) …` : text;
   }
 
-  async head(dir: string): Promise<string> {
-    return (await this.git(["rev-parse", "HEAD"], dir)).stdout.trim();
+  /** Commits between base and sha (0 means the builder changed nothing). */
+  async ahead(baseSha: string, sha: string): Promise<number> {
+    return Number((await this.git(["rev-list", "--count", `${baseSha}..${sha}`], this.barePath)).stdout.trim());
   }
 
-  async push(dir: string, branch: string): Promise<void> {
-    await this.git(["push", "--force-with-lease", "origin", `HEAD:refs/heads/${branch}`], dir, true);
+  /** Pushes exactly `sha` to `branch` on GitHub. isobot owns isobot/* branches, so it may overwrite them. */
+  push(sha: string, branch: string): Promise<void> {
+    return this.exclusive(async () => {
+      await this.git(["push", "--quiet", "--force", "origin", `${sha}:refs/heads/${branch}`], this.barePath, true);
+    });
   }
 
-  /** A clean checkout of the default branch at a commit, for release commands. */
-  async checkoutAt(sha: string, label: string): Promise<string> {
-    const dir = path.join(this.home, "worktrees", this.owner, this.repo, `release__${label}`);
-    if (existsSync(dir)) await this.git(["worktree", "remove", "--force", dir], this.clonePath).catch(() => rmSync(dir, { recursive: true, force: true }));
-    mkdirSync(path.dirname(dir), { recursive: true });
-    await this.git(["worktree", "add", "--force", "--detach", dir, sha], this.clonePath);
-    return dir;
+  /** A clean checkout of a commit, for release commands. */
+  checkoutAt(sha: string, name: string): Promise<string> {
+    return this.exclusive(async () => {
+      const dir = this.workspacePath(name);
+      rmSync(dir, { recursive: true, force: true });
+      mkdirSync(path.dirname(dir), { recursive: true });
+      await this.git(["clone", "--quiet", "--shared", "--no-checkout", this.barePath, dir], path.dirname(dir));
+      await this.git(["checkout", "--quiet", "--detach", sha], dir);
+      return dir;
+    });
   }
 }

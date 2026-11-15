@@ -1,13 +1,15 @@
 #!/usr/bin/env node
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { ClaudeCodeBuilder } from "./builder.js";
 import { configuredRepos, loadConfig, loadEnvironment, type Environment, type RunnerConfig } from "./config.js";
 import { Repo } from "./git.js";
 import { GitHub } from "./github.js";
 import { Notifier } from "./notify.js";
 import { Pipeline } from "./pipeline.js";
-import { killAllChildren, run } from "./proc.js";
+import { killAllChildren, run, setGitIdentity } from "./proc.js";
 import { Store } from "./store.js";
 import { DiscordSource, EmailSource, GitHubSource, triage, type Source } from "./triage.js";
 
@@ -29,14 +31,28 @@ interface Runtime {
   notifier: Notifier;
 }
 
+/** The isobot checkout running this code; builders must never modify it. */
+const ISOBOT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+function globalGit(key: string): string {
+  try { return execFileSync("git", ["config", "--global", key], { encoding: "utf8" }).trim(); } catch { return ""; }
+}
+
 function runtime(): Runtime {
   loadEnvFiles();
   const config = loadConfig();
   const env = loadEnvironment();
   mkdirSync(env.home, { recursive: true });
+  // Builders don't see the global git config (credential helpers); give them its identity only.
+  setGitIdentity(process.env.ISOBOT_GIT_NAME ?? globalGit("user.name"), process.env.ISOBOT_GIT_EMAIL ?? globalGit("user.email"));
   const store = new Store(path.join(env.home, "runner.sqlite"));
   const github = new GitHub(env.githubToken);
-  const builder = new ClaudeCodeBuilder(config.builder, env.claudeBin);
+  const builder = new ClaudeCodeBuilder(config.builder, {
+    // Builders may read the shared clones (their workspaces borrow objects) but not secrets or state.
+    secrets: ["runner.env", "runner.sqlite", "runner.sqlite-wal", "runner.sqlite-shm", "logs", "runner.lock", "paused"]
+      .map(entry => path.join(env.home, entry)).concat(path.resolve(process.cwd(), ".env.runner")),
+    noWrite: [path.join(env.home, "repos"), ISOBOT_ROOT],
+  }, env.claudeBin);
   const notifier = new Notifier(env.discordWebhookUrl);
   const pipeline = new Pipeline({
     config, env, store, github, builder, notifier,
@@ -160,6 +176,7 @@ async function main(): Promise<void> {
     case "run":
       return loop(rt);
     case "once": {
+      acquireLock(rt.env);
       rt.pipeline.recover();
       const claimed = await rt.pipeline.discover();
       console.log(`[once] claimed ${claimed.length} issue(s)`);
@@ -168,6 +185,7 @@ async function main(): Promise<void> {
       return;
     }
     case "triage": {
+      acquireLock(rt.env);
       const report = await triage(rt);
       console.log(JSON.stringify(report, null, 2));
       return;

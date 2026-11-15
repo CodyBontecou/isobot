@@ -51,6 +51,8 @@ export interface RunnerConfig {
     settings: Record<string, unknown>;
   };
   labels: Labels;
+  /** GitHub logins (besides the token's owner) whose issues may merge without a human. */
+  trustedAuthors?: string[];
   /** Discord category name → owner/repo, for triage of community messages. */
   discordCategories: Record<string, string>;
   defaults: RepoPolicy;

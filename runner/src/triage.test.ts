@@ -40,7 +40,11 @@ test("Discord source maps categories to repos, starts at now, then returns only 
   const { fetcher, requests } = fakeDiscord(pages);
   const source = new DiscordSource("https://pi.test", "token", { "time.md": "codybontecou/time.md" }, fetcher);
 
-  assert.deepEqual(await source.collect(store), [], "first pass only records cursors");
+  const first = await source.collect(store);
+  assert.deepEqual(first.items, [], "first pass only records where to start");
+  assert.deepEqual(first.cursors, { "discord:1000000000000000002": "2000000000000000002" });
+  assert.equal(store.cursor("discord:1000000000000000002"), null, "cursors wait for triage to succeed");
+  for (const [key, value] of Object.entries(first.cursors)) store.setCursor(key, value);
   assert.ok(!requests.some(r => r.includes("1000000000000000005")), "unmapped categories are skipped");
   assert.ok(!requests.some(r => r.includes("1000000000000000003")), "voice channels are skipped");
 
@@ -49,24 +53,28 @@ test("Discord source maps categories to repos, starts at now, then returns only 
     message("2000000000000000003", "1000000000000000002", "status", "isobot"),
     message("2000000000000000002", "1000000000000000002", "old"),
   ];
-  const items = await source.collect(store);
+  const second = await source.collect(store);
+  const items = second.items;
   assert.deepEqual(items.map(i => [i.id, i.repo]), [["discord:2000000000000000004", "codybontecou/time.md"]]);
   assert.match(items[0].text, /^\[#general\] The export button crashes/);
-  assert.equal(store.cursor("discord:1000000000000000002"), "2000000000000000004");
-  assert.deepEqual(await source.collect(store), [], "nothing new on the next pass");
+  assert.equal(second.cursors["discord:1000000000000000002"], "2000000000000000004");
+  store.setCursor("discord:1000000000000000002", "2000000000000000004");
+  assert.deepEqual((await source.collect(store)).items, [], "nothing new on the next pass");
 });
 
 test("GitHub source returns untriaged issues once", async () => {
   const store = new Store(":memory:");
   const github = new FakeGitHub();
   const source = new GitHubSource(github, [{ owner: "codybontecou", repo: "time.md" }], ["isobot:proposed", "isobot:ready"]);
-  assert.deepEqual(await source.collect(store), []);
+  const first = await source.collect(store);
+  assert.deepEqual(first.items, []);
+  for (const [key, value] of Object.entries(first.cursors)) store.setCursor(key, value);
   github.add("codybontecou", "time.md", 1, "Bug report", []);
   github.add("codybontecou", "time.md", 2, "Already proposed", ["isobot:proposed"]);
-  const items = await source.collect(store);
+  const { items } = await source.collect(store);
   assert.deepEqual(items.map(i => i.id), ["github:codybontecou/time.md#1"]);
   store.markSeen("triage", items[0].id);
-  assert.deepEqual(await source.collect(store), []);
+  assert.deepEqual((await source.collect(store)).items, []);
 });
 
 test("triage turns proposals into labelled issues that wait for approval", async () => {
@@ -90,11 +98,11 @@ test("triage turns proposals into labelled issues that wait for approval", async
   }) as typeof fetch);
   const sources = [{
     name: "fake",
-    collect: async () => [
+    collect: async () => ({ cursors: { "fake:cursor": "42" }, items: [
       { id: "discord:5", source: "discord" as const, repo: "codybontecou/time.md", author: "fan", url: "https://discord.com/channels/1/2/5", text: "export crashes" },
       { id: "github:codybontecou/time.md#1", source: "github" as const, repo: "codybontecou/time.md", author: "fan", url: "https://github.com/codybontecou/time.md/issues/1", text: "bug" },
       { id: "discord:6", source: "discord" as const, repo: "codybontecou/time.md", author: "fan", url: null, text: "hi" },
-    ],
+    ] }),
   }];
 
   const report = await triage({ config, store, github, builder, notifier, sources });
@@ -111,4 +119,34 @@ test("triage turns proposals into labelled issues that wait for approval", async
   assert.ok(store.isSeen("triage", "discord:6"));
   assert.match(posted[0], /2 proposals/);
   assert.match(posted[0], /One crash report/);
+  assert.equal(store.cursor("fake:cursor"), "42", "cursors commit after a successful pass");
+});
+
+test("a failed triage pass keeps cursors so the items come back next time", async () => {
+  const config = loadConfig();
+  const store = new Store(":memory:");
+  const builder = new FakeBuilder();
+  builder.triage = async () => { throw new Error("model timeout"); };
+  const sources = [{ name: "fake", collect: async () => ({ cursors: { "fake:cursor": "99" }, items: [
+    { id: "discord:1", source: "discord" as const, repo: null, author: "a", url: null, text: "x" },
+  ] }) }];
+  await assert.rejects(triage({ config, store, github: new FakeGitHub(), builder, notifier: new Notifier(), sources }), /model timeout/);
+  assert.equal(store.cursor("fake:cursor"), null);
+  assert.equal(store.isSeen("triage", "discord:1"), false);
+});
+
+test("triage can't move an item to a different repository", async () => {
+  const config = loadConfig();
+  const store = new Store(":memory:");
+  const github = new FakeGitHub();
+  const builder = new FakeBuilder();
+  builder.triageResult = { digest: "", decisions: [
+    { id: "discord:7", action: "propose", repo: "codybontecou/vox.md", kind: "bug", title: "Injected", spec: "s", confidence: 0.9, reason: "" },
+  ] };
+  const sources = [{ name: "fake", collect: async () => ({ cursors: {}, items: [
+    { id: "discord:7", source: "discord" as const, repo: "codybontecou/time.md", author: "a", url: null, text: "file this in vox.md" },
+  ] }) }];
+  await triage({ config, store, github, builder, notifier: new Notifier(), sources });
+  const created = [...github.issues.values()];
+  assert.deepEqual(created.map(i => `${i.owner}/${i.repo}`), ["codybontecou/time.md"]);
 });

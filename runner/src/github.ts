@@ -24,6 +24,11 @@ export interface PullRequest {
 
 export type CiState = "success" | "pending" | "failure" | "none";
 
+export interface IssueComment {
+  author: string;
+  body: string;
+}
+
 const LABEL_COLORS: Record<keyof Labels, string> = {
   proposed: "c5def5", ready: "0e8a16", building: "fbca04", review: "1d76db",
   failed: "b60205", ship: "5319e7", stop: "000000",
@@ -41,7 +46,10 @@ const LABEL_DESCRIPTIONS: Record<keyof Labels, string> = {
 
 /** The subset of GitHub the runner needs; an interface so tests can fake it. */
 export interface GitHubApi {
+  /** Login of the token's owner: the identity isobot acts as, and a trusted author. */
+  viewer(): Promise<string>;
   defaultBranch(owner: string, repo: string): Promise<string>;
+  issueComments(owner: string, repo: string, number: number): Promise<IssueComment[]>;
   issuesWithLabel(owner: string, repo: string, label: string): Promise<Issue[]>;
   openIssues(owner: string, repo: string, since?: string): Promise<Issue[]>;
   issue(owner: string, repo: string, number: number): Promise<Issue>;
@@ -64,6 +72,16 @@ export class GitHub implements GitHubApi {
 
   constructor(token: string) {
     this.octokit = new Octokit({ auth: token, userAgent: "isobot-runner/0.1", request: { timeout: 30_000 } });
+  }
+
+  async viewer(): Promise<string> {
+    const { data } = await this.octokit.users.getAuthenticated();
+    return data.login;
+  }
+
+  async issueComments(owner: string, repo: string, number: number): Promise<IssueComment[]> {
+    const data = await this.octokit.paginate(this.octokit.issues.listComments, { owner, repo, issue_number: number, per_page: 100 });
+    return data.map(comment => ({ author: comment.user?.login ?? "unknown", body: comment.body ?? "" }));
   }
 
   async defaultBranch(owner: string, repo: string): Promise<string> {

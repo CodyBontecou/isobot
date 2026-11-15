@@ -10,15 +10,16 @@ new Discord, GitHub and email activity into proposals. Design:
 
 1. You add `isobot:ready` (or create a ticket with `@isobot` in Discord).
 2. Within a minute the runner swaps it to `isobot:building` and comments.
-3. A Claude Code builder implements it on `isobot/<number>-<slug>` in a fresh
-   worktree and commits.
+3. A Claude Code builder implements it on `isobot/<number>-<slug>` in a throwaway
+   clone and commits.
 4. The runner runs the repo's `checks`. Failures go back to the builder
    (up to `maxFixRounds`).
 5. A separate read-only Claude Code reviewer judges the diff. Change requests go
    back to the builder (up to `maxReviewRounds`).
 6. The runner pushes and opens a PR with the summary, check results and review.
 7. If every gate passes and the repo's autonomy is `merge`, it waits for GitHub
-   CI and squash-merges. Otherwise it labels `isobot:review` and explains why.
+   CI, re-checks the gates, and squash-merges exactly the reviewed commit.
+   Otherwise it labels `isobot:review` and explains why.
 8. After a merge (by isobot or by you): `release.onMerge` commands run. If the
    repo has `release.onShip`, the issue waits for you to add `isobot:ship`.
 
@@ -80,3 +81,13 @@ target repo):
 Release commands run on a clean checkout of the merge commit with the runner's
 scrubbed environment, so tools that need credentials (App Store Connect API
 keys, Wrangler) must find them in their own config on the machine.
+
+## Builder sandbox
+
+Builders run with Claude Code's shell sandbox on. It allows writes to the
+workspace, the temp directory and common toolchain caches (DerivedData,
+CoreSimulator, SwiftPM, npm, Gradle…), and blocks reads of credential folders
+and runner state. If a build needs another location, add it under
+`builder.settings.sandbox.filesystem.allowWrite` in `runner/config/isobot.json`.
+Builders don't get your global git config or `gh` login, so private package
+dependencies that need credentials won't resolve inside a build.

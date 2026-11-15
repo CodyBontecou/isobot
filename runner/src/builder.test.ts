@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { defaultDenyPaths, parseResult, parseReview, parseTriage } from "./builder.js";
+import { builderSettings, defaultDenyPaths, parseResult, parseReview, parseTriage } from "./builder.js";
 
 test("parses the CLI's JSON result, including after stray diagnostics", () => {
   const payload = { type: "result", subtype: "success", is_error: false, session_id: "s1", result: "done", structured_output: { a: 1 } };
@@ -29,6 +29,24 @@ test("triage keeps only known items and repositories", () => {
   }, new Set(["discord:1", "discord:2", "discord:3"]), new Set(["codybontecou/time.md"]));
   assert.deepEqual(result.decisions.map(d => [d.id, d.action]), [["discord:1", "propose"], ["discord:2", "ignore"], ["discord:3", "ignore"]]);
   assert.equal(result.digest, "summary");
+});
+
+test("builder settings sandbox the shell and deny secrets with absolute rule paths", () => {
+  const settings = builderSettings({ sandbox: { filesystem: { allowWrite: ["/extra"] } } }, { secrets: ["/state/runner.env"], noWrite: ["/code/isobot"] }, "/Users/me") as {
+    sandbox: { enabled: boolean; allowUnsandboxedCommands: boolean; filesystem: { allowWrite: string[]; denyRead: string[]; denyWrite: string[] } };
+    permissions: { deny: string[] };
+  };
+  assert.equal(settings.sandbox.enabled, true);
+  assert.equal(settings.sandbox.allowUnsandboxedCommands, false);
+  assert.ok(settings.sandbox.filesystem.allowWrite.includes("/extra"));
+  assert.ok(settings.sandbox.filesystem.allowWrite.includes("/Users/me/Library/Developer/Xcode/DerivedData"));
+  assert.ok(settings.sandbox.filesystem.denyRead.includes("/state/runner.env"));
+  assert.ok(settings.sandbox.filesystem.denyWrite.includes("/code/isobot"));
+  assert.ok(settings.permissions.deny.includes("Read(//Users/me/.ssh/**)"), "absolute paths need the // prefix");
+  assert.ok(settings.permissions.deny.includes("Read(//state/runner.env)"));
+  assert.ok(settings.permissions.deny.includes("Edit(//Users/me/.claude/**)"));
+  assert.ok(settings.permissions.deny.includes("Write(//code/isobot/**)"));
+  assert.ok(!settings.permissions.deny.some(rule => /\((?!\/\/)\//.test(rule)), "no single-slash (settings-relative) rules");
 });
 
 test("credential folders are denied to builders", () => {

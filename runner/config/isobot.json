@@ -20,6 +20,7 @@
     "ship": "isobot:ship",
     "stop": "isobot:stop"
   },
+  "trustedAuthors": [],
   "discordCategories": {
     "time.md": "codybontecou/time.md",
     "health.md": "codybontecou/health-md",
@@ -46,12 +47,25 @@
       "**/*auth*/**",
       "**/*purchase*/**",
       "**/*subscription*/**",
-      "**/*privacy*"
+      "**/*privacy*",
+      ".claude/**",
+      "**/CLAUDE.md",
+      "**/AGENTS.md",
+      ".mcp.json",
+      ".codex/**",
+      ".agents/**",
+      ".pi/**",
+      ".gitmodules",
+      "**/.githooks/**",
+      "**/.husky/**"
     ],
     "maxChangedLines": 400,
     "minReviewConfidence": 0.85,
     "requireCi": true,
-    "release": { "onMerge": [], "onShip": [] }
+    "release": {
+      "onMerge": [],
+      "onShip": []
+    }
   },
   "repos": {
     "codybontecou/time.md": {},

@@ -67,6 +67,15 @@ export function sh(commandLine: string, options: RunOptions): Promise<RunResult>
   return run("/bin/sh", ["-c", commandLine], options);
 }
 
+let gitIdentity: Record<string, string> = {};
+
+/** Commit identity for builders, which don't see the global git config (it may hold credential helpers). */
+export function setGitIdentity(name: string, email: string): void {
+  gitIdentity = name && email
+    ? { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email }
+    : {};
+}
+
 const PASSTHROUGH = [
   "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPDIR", "TERM",
   "DEVELOPER_DIR", "JAVA_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT",
@@ -83,6 +92,10 @@ export function workerEnv(extra: Record<string, string | undefined> = {}, base: 
   env.PATH = base.PATH ?? "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin";
   env.CI = "1";
   env.GIT_TERMINAL_PROMPT = "0";
+  // No global/system git config: it can carry credential helpers (e.g. gh's) that would let a builder push.
+  env.GIT_CONFIG_GLOBAL = "/dev/null";
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  Object.assign(env, gitIdentity);
   for (const [key, value] of Object.entries(extra)) if (value !== undefined) env[key] = value;
   return env;
 }
