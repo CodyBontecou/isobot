@@ -64,9 +64,16 @@ export interface TaskSource {
 
 export class Pipeline {
   private running = new Set<string>();
+  /** Set on SIGTERM/SIGINT: builds dying because their processes were killed are interruptions, not failures. */
+  private shuttingDown = false;
   private viewer?: string;
 
   constructor(private deps: PipelineDeps) {}
+
+  /** Call before killing child processes. Running jobs stay "building", and recover() re-queues them on the next start. */
+  beginShutdown(): void {
+    this.shuttingDown = true;
+  }
 
   private get labels() { return this.deps.config.labels; }
 
@@ -281,6 +288,7 @@ export class Pipeline {
       await this.deps.notifier.discord(`✅ **${job.owner}/${job.repo}#${job.number}** ${issue.title}: merged <${pr.url}>`);
       await this.afterMerge(store.get(job.id)!, mergeSha, policy);
     } catch (error) {
+      if (this.shuttingDown) return;
       if (isTransient(error)) await this.retryLater(job, error as Error);
       else await this.fail(job, error as Error);
     } finally {
@@ -422,6 +430,7 @@ export class Pipeline {
   }
 
   private async fail(job: Job, error: Error, notify = true): Promise<void> {
+    if (this.shuttingDown) return;
     const message = error.message.slice(0, 6000);
     console.error(`[build] ${job.id} failed: ${message}`);
     this.deps.store.update(job.id, { state: "failed", lastError: message });

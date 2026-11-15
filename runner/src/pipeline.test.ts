@@ -405,3 +405,18 @@ test("ownerAutonomy never bypasses the other gates", async () => {
   assert.equal(github.merged.length, 0);
   assert.match(github.commentsFor(OWNER, NAME, 33).at(-1)!, /runner checks failed/);
 });
+
+test("a build killed by shutdown stays queued for the next start instead of failing the issue", async () => {
+  const { github, pipeline, store, builder } = setup();
+  github.add(OWNER, NAME, 40, "Long build", ["isobot:ready"]);
+  builder.implement = async () => {
+    pipeline.beginShutdown();
+    throw new Error("Claude Code exited 143 without a result");
+  };
+  await cycle(pipeline);
+  const job = store.get(`${REPO}#40`)!;
+  assert.equal(job.state, "building");
+  assert.ok(!github.get(OWNER, NAME, 40).labels.includes("isobot:failed"));
+  pipeline.recover();
+  assert.equal(store.get(`${REPO}#40`)!.state, "queued");
+});

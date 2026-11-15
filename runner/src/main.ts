@@ -115,6 +115,7 @@ async function loop(rt: Runtime): Promise<void> {
     if (stopping) return;
     stopping = true;
     console.log(`[runner] ${signal}: stopping; interrupted builds restart from scratch next time`);
+    rt.pipeline.beginShutdown();
     killAllChildren();
     setTimeout(() => process.exit(0), 2000).unref();
   };
