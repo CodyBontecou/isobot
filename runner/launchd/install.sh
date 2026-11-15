@@ -37,7 +37,10 @@ sed -e "s#__NODE__#$NODE#g" -e "s#__RUNNER__#$RUNNER#g" -e "s#__PATH__#$TOOL_PAT
   "$RUNNER/launchd/$LABEL.plist" > "$PLIST"
 plutil -lint "$PLIST" >/dev/null
 
+# bootout returns before the old instance has fully stopped; bootstrap then fails with error 5.
 launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
-launchctl bootstrap "$DOMAIN" "$PLIST"
+i=0
+while launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 && [ $i -lt 30 ]; do sleep 1; i=$((i + 1)); done
+launchctl bootstrap "$DOMAIN" "$PLIST" || { sleep 3; launchctl bootstrap "$DOMAIN" "$PLIST"; }
 echo "Installed $LABEL. Logs: $ISOBOT_HOME/logs/runner.log"
 echo "Status: node \"$RUNNER/dist/main.js\" status   Pause: node \"$RUNNER/dist/main.js\" pause"
