@@ -7,6 +7,8 @@
   "compatibility_flags": ["nodejs_compat"],
   "services": [{ "binding": "DISCORD_BRIDGE", "service": "isobot-discord-bridge" }],
   "routes": [{ "pattern": "pi.isolated.tech", "custom_domain": true }],
+  "workers_dev": true,
+  "preview_urls": false,
   "ai": { "binding": "AI" },
   "vars": {
     "SUPPORT_GITHUB_REPOSITORY": "CodyBontecou/myself.md",
