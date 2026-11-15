@@ -1,5 +1,6 @@
 import { Octokit } from "@octokit/rest";
 import type { Labels } from "./config.js";
+import { RUNNER_MARKER } from "./notes.js";
 
 export interface Issue {
   owner: string;
@@ -25,6 +26,7 @@ export interface PullRequest {
 export type CiState = "success" | "pending" | "failure" | "none";
 
 export interface IssueComment {
+  id: number;
   author: string;
   body: string;
 }
@@ -121,7 +123,7 @@ export class GitHub implements GitHubApi {
 
   async issueComments(owner: string, repo: string, number: number): Promise<IssueComment[]> {
     const data = await this.octokit.paginate(this.octokit.issues.listComments, { owner, repo, issue_number: number, per_page: 100 });
-    return data.map(comment => ({ author: comment.user?.login ?? "unknown", body: comment.body ?? "" }));
+    return data.map(comment => ({ id: comment.id, author: comment.user?.login ?? "unknown", body: comment.body ?? "" }));
   }
 
   async defaultBranch(owner: string, repo: string): Promise<string> {
@@ -162,8 +164,15 @@ export class GitHub implements GitHubApi {
     }
   }
 
+  /** Every runner comment carries RUNNER_MARKER so it is never mistaken for a note from the owner. */
   async comment(owner: string, repo: string, number: number, body: string): Promise<void> {
-    await this.octokit.issues.createComment({ owner, repo, issue_number: number, body: body.slice(0, 65_000) });
+    await this.octokit.issues.createComment({ owner, repo, issue_number: number, body: `${body.slice(0, 64_000)}\n\n${RUNNER_MARKER}` });
+  }
+
+  /** A comment written on the owner's behalf (`runner say`): no runner marker, so it counts as a note. */
+  async note(owner: string, repo: string, number: number, body: string): Promise<string> {
+    const { data } = await this.octokit.issues.createComment({ owner, repo, issue_number: number, body: body.slice(0, 65_000) });
+    return data.html_url;
   }
 
   async createIssue(owner: string, repo: string, title: string, body: string, labels: string[]): Promise<Issue> {

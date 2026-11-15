@@ -51,10 +51,41 @@ doesn't propose your whole backlog.
 | `once` | Build whatever is approved right now, then exit |
 | `triage` | One triage pass, printed as JSON |
 | `doctor` | Configuration, connectivity, sandbox and heartbeat checks |
+| `say <repo#n> <text>` | Send isobot a note about a job, as if you'd replied in its Discord thread |
 
 Logs: `~/Library/Application Support/isobot/logs/runner.log` (rotated at
 10 MB, three kept). State: `runner.sqlite` and `heartbeat.json` beside it.
 Workspaces are removed after each job and on start; clones in `repos/` are reused.
+
+## Discord
+
+With `ISOBOT_DISCORD_BOT_TOKEN` and `ISOBOT_DISCORD_CHANNEL_ID` in `runner.env` (the bridge's bot,
+in your staff channel), each job gets **one status card** in the channel. The runner edits it as
+the job moves (Build → Checks → Review → PR → Merge → Release → Ship), with fix and review rounds,
+how long it's been running, and Issue / PR buttons. The detail goes in a **thread under the
+card**: the builder's summaries, check results, the review verdict, why isobot left the merge to
+you, release output. Runner-wide messages (started, cycle failing, usage-limit pause, triage
+digests) stay in the channel. With only `ISOBOT_DISCORD_WEBHOOK_URL`, you get the old one-line
+messages and no threads.
+
+**Talking back.** Reply in a job's thread. The bridge relays replies from allowlisted users
+(`ISOBOT_ALLOWED_USERS`, or the bot's owner) to the job's GitHub issue and reacts 📨. The runner
+treats your comments on the issue as **notes**, wherever they came from: the thread, the issue
+itself, or `npm run runner -- say time.md#12 "use the system font"`.
+
+- **While it builds**, a note goes to the builder (same Claude session) before the next check or
+  review round, at most five per build. The task the reviewer sees includes your notes.
+- **On an open PR**, a note queues a revision: the runner checks out the PR branch, resumes the
+  builder's session with your note, re-runs checks and review, and updates the same PR. If the
+  repo merges automatically, a note that hasn't been applied yet blocks the merge.
+- **After it's merged, closed or failed**, the thread says how to continue: add `isobot:ready`
+  to build again (your notes go with it), or open a new issue.
+
+Only comments written by your account (or `trustedAuthors`) count. The runner's own comments,
+triage proposals and relays of community `#help` threads never do. The bridge posts with its
+`GITHUB_TOKEN`, so that token must belong to you (or a `trustedAuthors` account); otherwise the
+thread says the reply was ignored. Set `ISOBOT_RUNNER_CHANNEL_ID` on the bridge to only relay
+from that channel.
 
 ## When things go wrong
 

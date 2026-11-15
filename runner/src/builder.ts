@@ -243,10 +243,17 @@ export class ClaudeCodeBuilder implements Builder {
     const prompt = input.sessionId
       ? `${input.feedback}\n\nFix these problems, commit, and summarise what you changed.`
       : `${input.task}\n\n## Previous attempt feedback\n${input.feedback}\n\nThe branch already contains a previous attempt. Fix these problems, commit, and summarise.`;
-    const result = await this.call(input.cwd, prompt, [
-      "--permission-mode", "bypassPermissions", "--append-system-prompt", BUILDER_RULES,
-      ...(input.sessionId ? ["--resume", input.sessionId] : []),
-    ], this.config.timeoutMinutes * 60_000);
+    let result: CliResult;
+    try {
+      result = await this.call(input.cwd, prompt, [
+        "--permission-mode", "bypassPermissions", "--append-system-prompt", BUILDER_RULES,
+        ...(input.sessionId ? ["--resume", input.sessionId] : []),
+      ], this.config.timeoutMinutes * 60_000);
+    } catch (error) {
+      // A revision of an older PR can outlive its session (cleaned up, or a different machine): start fresh.
+      if (input.sessionId && /no conversation found/i.test((error as Error).message)) return this.revise({ ...input, sessionId: null });
+      throw error;
+    }
     return this.agentRun(result);
   }
 

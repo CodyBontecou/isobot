@@ -23,6 +23,8 @@ export interface Job {
   lastError: string | null;
   /** Earliest time a queued job may start (retry backoff), ISO or null. */
   notBefore: string | null;
+  /** Queued to revise its open PR with the owner's notes, rather than build from scratch. */
+  revising: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -30,7 +32,7 @@ export interface Job {
 interface Row {
   id: string; owner: string; repo: string; number: number; title: string; state: JobState;
   branch: string | null; pr_number: number | null; session_id: string | null; attempts: number;
-  last_error: string | null; created_at: string; updated_at: string; not_before: string | null;
+  last_error: string | null; created_at: string; updated_at: string; not_before: string | null; revising: number | null;
 }
 
 /** Local durable state. GitHub labels are the visible queue; this records progress and cursors. */
@@ -57,6 +59,7 @@ export class Store {
     `);
     const columns = (this.db.prepare("PRAGMA table_info(jobs)").all() as { name: string }[]).map(c => c.name);
     if (!columns.includes("not_before")) this.db.exec("ALTER TABLE jobs ADD COLUMN not_before TEXT");
+    if (!columns.includes("revising")) this.db.exec("ALTER TABLE jobs ADD COLUMN revising INTEGER NOT NULL DEFAULT 0");
   }
 
   /** Puts a job back in the queue to retry after `delayMs` (transient failure). */
@@ -103,22 +106,26 @@ export class Store {
     this.db.prepare(`INSERT INTO jobs (id, owner, repo, number, title, state, attempts, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, 'queued', 0, ?, ?)
       ON CONFLICT(id) DO UPDATE SET state = 'queued', title = excluded.title, attempts = 0, last_error = NULL,
-        session_id = NULL, pr_number = NULL, branch = NULL, not_before = NULL, updated_at = excluded.updated_at`)
+        session_id = NULL, pr_number = NULL, branch = NULL, not_before = NULL, revising = 0, updated_at = excluded.updated_at`)
       .run(id, owner, repo, number, title, now, now);
+    // A fresh approval gets a fresh Discord card and thread.
+    this.db.prepare("DELETE FROM cursors WHERE key = ?").run(`discord:${id}`);
     this.event(id, "queued", title);
     return this.get(id);
   }
 
-  update(id: string, fields: Partial<Pick<Job, "state" | "branch" | "prNumber" | "sessionId" | "attempts" | "lastError" | "title">>): Job {
+  update(id: string, fields: Partial<Pick<Job, "state" | "branch" | "prNumber" | "sessionId" | "attempts" | "lastError" | "title" | "revising">>): Job {
     const columns: Record<string, string> = {
       state: "state", branch: "branch", prNumber: "pr_number", sessionId: "session_id",
-      attempts: "attempts", lastError: "last_error", title: "title",
+      attempts: "attempts", lastError: "last_error", title: "title", revising: "revising",
     };
+    // A revision lasts until the job leaves the build (PR updated, merged, failed, stopped).
+    if (fields.state && !ACTIVE_STATES.includes(fields.state) && fields.revising === undefined) fields = { ...fields, revising: false };
     const sets: string[] = [];
     const values: (string | number | null)[] = [];
     for (const [key, value] of Object.entries(fields)) {
       sets.push(`${columns[key]} = ?`);
-      values.push(value as string | number | null);
+      values.push(typeof value === "boolean" ? Number(value) : value as string | number | null);
     }
     sets.push("updated_at = ?");
     values.push(new Date().toISOString(), id);
@@ -132,6 +139,13 @@ export class Store {
   inState(...states: JobState[]): Job[] {
     const marks = states.map(() => "?").join(", ");
     return (this.db.prepare(`SELECT * FROM jobs WHERE state IN (${marks}) ORDER BY created_at`).all(...states) as unknown as Row[]).map(toJob);
+  }
+
+  /** Jobs that finished (or wait on a human after merging) within the last `hours`, newest first. */
+  recentlyFinished(hours: number, limit = 10): Job[] {
+    const since = new Date(Date.now() - hours * 3_600_000).toISOString();
+    return (this.db.prepare(`SELECT * FROM jobs WHERE state IN ('merged', 'released', 'awaiting_ship', 'shipped', 'closed', 'failed', 'stopped')
+      AND updated_at >= ? ORDER BY updated_at DESC LIMIT ?`).all(since, limit) as unknown as Row[]).map(toJob);
   }
 
   all(limit = 50): Job[] {
@@ -175,6 +189,6 @@ function toJob(row: Row): Job {
   return {
     id: row.id, owner: row.owner, repo: row.repo, number: row.number, title: row.title, state: row.state,
     branch: row.branch, prNumber: row.pr_number, sessionId: row.session_id, attempts: row.attempts,
-    lastError: row.last_error, notBefore: row.not_before ?? null, createdAt: row.created_at, updatedAt: row.updated_at,
+    lastError: row.last_error, notBefore: row.not_before ?? null, revising: Boolean(row.revising), createdAt: row.created_at, updatedAt: row.updated_at,
   };
 }

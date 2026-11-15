@@ -72,6 +72,19 @@ export class Repo {
     });
   }
 
+  /** Fetches a pushed branch (an open PR's head) into the runner's clone and returns its commit. */
+  fetchBranch(branch: string): Promise<string> {
+    return this.exclusive(async () => {
+      const ref = `refs/isobot/${branch}`;
+      await this.git(["fetch", "--quiet", "--no-tags", "--force", "origin", `+refs/heads/${branch}:${ref}`], this.barePath, true);
+      return (await this.git(["rev-parse", `${ref}^{commit}`], this.barePath)).stdout.trim();
+    });
+  }
+
+  async mergeBase(a: string, b: string): Promise<string> {
+    return (await this.git(["merge-base", a, b], this.barePath)).stdout.trim();
+  }
+
   workspacePath(name: string): string {
     return path.join(this.workRoot, this.owner, this.repo, name.replaceAll("/", "__"));
   }

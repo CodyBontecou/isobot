@@ -2,12 +2,14 @@ import type { AgentRun, Builder, Review, TriageItem, TriageResult } from "./buil
 import type { Labels } from "./config.js";
 import type { DiffStat } from "./git.js";
 import type { CiState, GitHubApi, Issue, IssueComment, PullRequest } from "./github.js";
+import { RUNNER_MARKER } from "./notes.js";
 import type { RepoOps } from "./pipeline.js";
 
 /** In-memory GitHub for tests. */
 export class FakeGitHub implements GitHubApi {
   issues = new Map<string, Issue>();
-  comments: { key: string; body: string; author?: string }[] = [];
+  comments: { id: number; key: string; body: string; author?: string }[] = [];
+  private nextComment = 1;
   pulls = new Map<number, PullRequest & { owner: string; repo: string; branch: string; body: string }>();
   merged: number[] = [];
   ci: CiState = "success";
@@ -30,7 +32,12 @@ export class FakeGitHub implements GitHubApi {
   }
 
   commentsFor(owner: string, repo: string, number: number): string[] {
-    return this.comments.filter(c => c.key === `${owner}/${repo}#${number}`).map(c => c.body);
+    return this.comments.filter(c => c.key === `${owner}/${repo}#${number}`).map(c => c.body.replace(`\n\n${RUNNER_MARKER}`, ""));
+  }
+
+  /** A comment by someone other than the runner (the owner by default), as GitHub would list it. */
+  addComment(owner: string, repo: string, number: number, body: string, author = this.login): void {
+    this.comments.push({ id: this.nextComment++, key: `${owner}/${repo}#${number}`, body, author });
   }
 
   async viewer(): Promise<string> { return this.login; }
@@ -41,7 +48,7 @@ export class FakeGitHub implements GitHubApi {
   }
   async isPublic(owner: string, repo: string): Promise<boolean> { return this.publicRepos.has(`${owner}/${repo}`); }
   async issueComments(owner: string, repo: string, number: number): Promise<IssueComment[]> {
-    return this.comments.filter(c => c.key === `${owner}/${repo}#${number}`).map(c => ({ author: c.author ?? this.login, body: c.body }));
+    return this.comments.filter(c => c.key === `${owner}/${repo}#${number}`).map(c => ({ id: c.id, author: c.author ?? this.login, body: c.body }));
   }
   async defaultBranch(): Promise<string> { return "main"; }
   async issuesWithLabel(owner: string, repo: string, label: string): Promise<Issue[]> {
@@ -60,7 +67,7 @@ export class FakeGitHub implements GitHubApi {
     issue.labels = issue.labels.filter(l => l !== label);
   }
   async comment(owner: string, repo: string, number: number, body: string): Promise<void> {
-    this.comments.push({ key: `${owner}/${repo}#${number}`, body });
+    this.comments.push({ id: this.nextComment++, key: `${owner}/${repo}#${number}`, body: `${body}\n\n${RUNNER_MARKER}` });
   }
   async createIssue(owner: string, repo: string, title: string, body: string, labels: string[]): Promise<Issue> {
     const number = this.issues.size + 1;
@@ -91,6 +98,32 @@ export class FakeGitHub implements GitHubApi {
   async ensureLabels(_owner: string, _repo: string, _labels: Labels): Promise<void> {}
 }
 
+/** Records Discord REST calls the Notifier makes; messages get ids 1000, 1001… */
+export class FakeDiscord {
+  calls: { method: string; path: string; body: Record<string, unknown> }[] = [];
+  private next = 1000;
+  fail404 = new Set<string>();
+
+  readonly fetch = (async (url: string | URL, init?: RequestInit) => {
+    const path = String(url).replace("https://discord.com/api/v10", "");
+    const method = init?.method ?? "GET";
+    this.calls.push({ method, path, body: init?.body ? JSON.parse(String(init.body)) : {} });
+    if (this.fail404.has(path)) return new Response("{}", { status: 404 });
+    return Response.json({ id: String(this.next++) });
+  }) as typeof fetch;
+
+  /** Text posted to a channel or thread, in order. */
+  posts(channelId: string): string[] {
+    return this.calls.filter(c => c.method === "POST" && c.path === `/channels/${channelId}/messages` && typeof c.body.content === "string" && c.body.content)
+      .map(c => c.body.content as string);
+  }
+
+  /** Every card body (create or edit), newest last. */
+  cards(): { description: string; title: string }[] {
+    return this.calls.filter(c => Array.isArray(c.body.embeds)).map(c => (c.body.embeds as { description: string; title: string }[])[0]);
+  }
+}
+
 /** Git double: records calls; `changes` controls whether the builder produced a diff. */
 export class FakeRepo implements RepoOps {
   calls: string[] = [];
@@ -107,6 +140,8 @@ export class FakeRepo implements RepoOps {
   async diffStat(): Promise<DiffStat> { return this.diff_; }
   async diff(): Promise<string> { return "diff --git a/x b/x"; }
   async push(sha: string, branch: string): Promise<void> { this.calls.push(`push ${sha} ${branch}`); }
+  async fetchBranch(branch: string): Promise<string> { this.calls.push(`fetch ${branch}`); return `pr-head-${branch}`; }
+  async mergeBase(a: string, b: string): Promise<string> { this.calls.push(`merge-base ${a} ${b}`); return "base"; }
   async checkoutAt(sha: string, name: string): Promise<string> { this.calls.push(`checkout ${sha} ${name}`); return "/tmp/release"; }
 }
 
@@ -114,16 +149,20 @@ export class FakeBuilder implements Builder {
   reviews: Review[] = [];
   implementCalls = 0;
   reviseFeedback: string[] = [];
+  reviseSessions: (string | null)[] = [];
+  reviewTasks: string[] = [];
   triageResult: TriageResult = { decisions: [], digest: "" };
   triageItems: TriageItem[] = [];
   implementResult: AgentRun = { ok: true, sessionId: "session-1", summary: "Added the feature and tests." };
 
   async implement(_input: { cwd: string; task: string }): Promise<AgentRun> { this.implementCalls++; return this.implementResult; }
-  async revise(input: { feedback: string }): Promise<AgentRun> {
+  async revise(input: { feedback: string; sessionId: string | null }): Promise<AgentRun> {
     this.reviseFeedback.push(input.feedback);
+    this.reviseSessions.push(input.sessionId);
     return { ok: true, sessionId: "session-1", summary: "Fixed." };
   }
-  async review(): Promise<Review> {
+  async review(input: { task: string }): Promise<Review> {
+    this.reviewTasks.push(input.task);
     return this.reviews.shift() ?? { verdict: "approve", confidence: 0.95, risk: "low", summary: "Looks right.", concerns: [] };
   }
   async triage(input: { items: TriageItem[] }): Promise<TriageResult> {

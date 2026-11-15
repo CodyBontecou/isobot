@@ -1,4 +1,5 @@
 import { Events, type AnyThreadChannel, type Client, type Message } from "discord.js";
+import { runnerJobIssue } from "../discord/runnerThreads.js";
 import { fetchReplyContext, fetchThreadStarterContext, type ReplyContext } from "../lib/context.js";
 import { channelToRepo, listMappedKeys } from "../config/repos.js";
 import { runAgent } from "../agent/runAgent.js";
@@ -49,6 +50,8 @@ export function registerTicketMention(client: Client): void {
 
       const inThread = message.channel.isThread();
       const thread = inThread ? (message.channel as AnyThreadChannel) : null;
+      // In a runner job thread, a mention is a reply to the build (runnerThreadReply), not a new ticket.
+      if (thread && await runnerJobIssue(thread, client.user.id)) return;
 
       if (!inThread && !message.reference?.messageId) {
         await message.reply({

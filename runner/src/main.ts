@@ -8,6 +8,7 @@ import { ClaudeCodeBuilder } from "./builder.js";
 import { configuredRepos, loadConfig, loadEnvironment, type Environment, type RunnerConfig } from "./config.js";
 import { Repo } from "./git.js";
 import { GitHub } from "./github.js";
+import { TERMINAL_MARKER } from "./notes.js";
 import { Notifier } from "./notify.js";
 import { Pipeline } from "./pipeline.js";
 import { runChecks } from "./checks.js";
@@ -58,7 +59,7 @@ function runtime(): Runtime {
   const shimDir = ensureShims(env.home);
   const builder = new ClaudeCodeBuilder(config.builder, { secrets, noWrite: [path.join(env.home, "repos"), shimDir, ISOBOT_ROOT] }, env.claudeBin, shimDir);
   const extraWrite = ((config.builder.settings?.sandbox as { filesystem?: { allowWrite?: string[] } } | undefined)?.filesystem?.allowWrite) ?? [];
-  const notifier = new Notifier(env.discordWebhookUrl);
+  const notifier = new Notifier({ webhookUrl: env.discordWebhookUrl, bot: env.discordBot, store, jobUrl: env.jobUrl });
   const pipeline = new Pipeline({
     config, env, store, github, builder, notifier,
     repo: (owner, repo) => new Repo(env.home, owner, repo, env.githubToken),
@@ -76,6 +77,16 @@ function runtime(): Runtime {
   for (const account of env.imap) sources.push(new EmailSource(account));
   if (config.appStore) sources.push(new AppStoreSource(config.appStore));
   return { config, env, store, github, pipeline, sources, builder, notifier };
+}
+
+/** `owner/repo#12`, or `repo#12` for a configured repository. */
+function resolveIssue(config: RunnerConfig, target: string): { owner: string; repo: string; number: number } | null {
+  const match = /^(?:([\w.-]+)\/)?([\w.-]+)#(\d+)$/.exec(target);
+  if (!match) return null;
+  const [, owner, repo, number] = match;
+  if (owner) return { owner, repo, number: Number(number) };
+  const found = configuredRepos(config).filter(r => r.repo.toLowerCase() === repo.toLowerCase());
+  return found.length === 1 ? { ...found[0], number: Number(number) } : null;
 }
 
 function lowerKeys(map: Record<string, string>): Record<string, string> {
@@ -211,7 +222,13 @@ async function doctor(rt: Runtime): Promise<boolean> {
     await client.logout().catch(() => undefined);
     report(ok === true, `Email ${account.user} (${account.mailbox}${account.query ? `, matching ${account.query}` : ""})`, ok === true ? "signed in" : (ok as Error).message);
   }
-  console.log(rt.env.discordWebhookUrl ? "➖ Discord notifications enabled" : "➖ Discord notifications disabled (set ISOBOT_DISCORD_WEBHOOK_URL)");
+  if (rt.env.discordBot) {
+    const response = await fetch(`https://discord.com/api/v10/channels/${rt.env.discordBot.channelId}`, {
+      headers: { Authorization: `Bot ${rt.env.discordBot.token}` }, signal: AbortSignal.timeout(15_000),
+    }).catch(() => null);
+    const channel = response?.ok ? await response.json() as { name?: string } : null;
+    report(Boolean(channel), "Discord job cards and threads", channel ? `#${channel.name}` : response ? `HTTP ${response.status}: the bot needs View Channel, Send Messages, Create Public Threads and Send Messages in Threads` : "unreachable");
+  } else console.log(rt.env.discordWebhookUrl ? "➖ Discord notifications through a webhook (set ISOBOT_DISCORD_BOT_TOKEN and ISOBOT_DISCORD_CHANNEL_ID for job threads)" : "➖ Discord notifications disabled");
   report(existsSync("/usr/bin/sandbox-exec"), "Check sandbox (sandbox-exec) available");
   const beat = readHeartbeat(rt.env.home);
   const age = heartbeatAge(beat);
@@ -235,7 +252,8 @@ const HELP = `isobot runner
   status              Show recent jobs
   setup               Create the isobot labels in every configured repository
   doctor              Check Claude Code, GitHub, Pi and optional sources
-  pause | resume      Stop or restart new work (running builds finish)`;
+  pause | resume      Stop or restart new work (running builds finish)
+  say <repo#n> <text> Send isobot a note about a job, like replying in its Discord thread`;
 
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "help";
@@ -286,6 +304,20 @@ async function main(): Promise<void> {
     case "resume":
       rmSync(pausedFile(rt.env), { force: true });
       return console.log("resumed");
+    case "say": {
+      const [target, ...words] = process.argv.slice(3);
+      const ref = target && resolveIssue(rt.config, target);
+      const text = words.join(" ").trim();
+      if (!ref || !text) {
+        console.error("Usage: say <owner/repo#n | repo#n> <text>");
+        process.exitCode = 2;
+        return;
+      }
+      const url = await rt.github.note(ref.owner, ref.repo, ref.number, `${text}\n\n${TERMINAL_MARKER}`);
+      const job = rt.store.get(Store.jobId(ref.owner, ref.repo, ref.number));
+      console.log(`noted on ${url}${job ? ` (job is ${job.state.replace("_", " ")}; the runner picks it up on its next pass)` : " (no isobot job for this issue yet)"}`);
+      return;
+    }
     default:
       console.error(`Unknown command: ${command}\n\n${HELP}`);
       process.exitCode = 2;

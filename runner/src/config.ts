@@ -107,6 +107,10 @@ export interface Environment {
   piUrl?: string;
   piToken?: string;
   discordWebhookUrl?: string;
+  /** Bot token and channel for job status cards and threads (takes precedence over the webhook). */
+  discordBot?: { token: string; channelId: string };
+  /** Optional link to a job in isobot's UI, with `{id}` for the job id. */
+  jobUrl?: string;
   /** Mailboxes to triage, from ISOBOT_IMAP_* and ISOBOT_IMAP_*_2 … _9. */
   imap: ImapAccount[];
   claudeBin: string;
@@ -217,6 +221,15 @@ function imapAccounts(env: NodeJS.ProcessEnv): ImapAccount[] {
   return accounts;
 }
 
+function discordBot(env: NodeJS.ProcessEnv): Environment["discordBot"] {
+  const token = env.ISOBOT_DISCORD_BOT_TOKEN;
+  const channelId = env.ISOBOT_DISCORD_CHANNEL_ID;
+  if (!token && !channelId) return undefined;
+  if (!token || !channelId) throw new Error("set both ISOBOT_DISCORD_BOT_TOKEN and ISOBOT_DISCORD_CHANNEL_ID, or neither");
+  if (!/^\d{15,25}$/.test(channelId)) throw new Error("ISOBOT_DISCORD_CHANNEL_ID must be a Discord channel id (digits)");
+  return { token, channelId };
+}
+
 export function loadEnvironment(env: NodeJS.ProcessEnv = process.env): Environment {
   const githubToken = env.ISOBOT_GITHUB_TOKEN ?? env.GITHUB_TOKEN;
   if (!githubToken) throw new Error("ISOBOT_GITHUB_TOKEN (or GITHUB_TOKEN) is required");
@@ -231,6 +244,8 @@ export function loadEnvironment(env: NodeJS.ProcessEnv = process.env): Environme
     piUrl: piUrl?.replace(/\/$/, ""),
     piToken: env.ISOBOT_PI_TOKEN,
     discordWebhookUrl: env.ISOBOT_DISCORD_WEBHOOK_URL,
+    discordBot: discordBot(env),
+    jobUrl: env.ISOBOT_JOB_URL,
     imap,
     claudeBin: env.ISOBOT_CLAUDE_BIN ?? "claude",
   };

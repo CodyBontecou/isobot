@@ -20,6 +20,10 @@ The Container process requires these environment variables:
   server.
 - `ISOBOT_ALLOWED_USERS`: optional comma-separated Discord user IDs. The
   application owner/team remains the default allowlist.
+- `ISOBOT_RUNNER_CHANNEL_ID`: optional. Replies from allowlisted users in runner job threads
+  (threads under the runner's status cards) are relayed to the job's GitHub issue for the runner
+  to act on ([runner.md](runner.md#discord)); set this to only relay from that channel. Mentioning
+  isobot in a job thread is a reply to the build, not a new ticket.
 
 The Container bridge no longer needs an OpenAI API key. Its HTTP health check and
 `/gh/webhook` endpoint are exposed by the `isobot-discord-bridge` Worker. Update

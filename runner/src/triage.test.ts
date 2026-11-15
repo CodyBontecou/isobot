@@ -92,10 +92,10 @@ test("triage turns proposals into labelled issues that wait for approval", async
     ],
   };
   const posted: string[] = [];
-  const notifier = new Notifier("https://discord.test/webhook", (async (_url: string, init: RequestInit) => {
+  const notifier = new Notifier({ webhookUrl: "https://discord.test/webhook", fetcher: (async (_url: string, init: RequestInit) => {
     posted.push(JSON.parse(String(init.body)).content);
     return new Response(null, { status: 204 });
-  }) as typeof fetch);
+  }) as typeof fetch });
   const sources = [{
     name: "fake",
     collect: async () => ({ cursors: { "fake:cursor": "42" }, items: [
@@ -240,10 +240,10 @@ function voxTriage(decisions: { id: string; repo: string; title: string; confide
     decisions: decisions.map(d => ({ ...d, action: "propose" as const, kind: "bug" as const, spec: "Spec", reason: "owner asked" })),
   };
   const posted: string[] = [];
-  const notifier = new Notifier("https://discord.test/webhook", (async (_url: string, init: RequestInit) => {
+  const notifier = new Notifier({ webhookUrl: "https://discord.test/webhook", fetcher: (async (_url: string, init: RequestInit) => {
     posted.push(JSON.parse(String(init.body)).content);
     return new Response(null, { status: 204 });
-  }) as typeof fetch);
+  }) as typeof fetch });
   const sources = [{
     name: "fake",
     collect: async () => ({ cursors: {}, items: [
