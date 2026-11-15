@@ -13,15 +13,13 @@ export interface CreatedIssue {
   url: string;
 }
 
-const CODEX_IMPLEMENT_INSTRUCTION = "@codex implement this";
+/**
+ * Issues from community forum posts are proposals: anyone can post in the forum,
+ * so the isobot runner builds them only after the owner adds `isobot:ready`.
+ */
+export const PROPOSED_LABEL = "isobot:proposed";
 
 let octokit: Octokit | null = null;
-
-function appendCodexInstruction(body: string): string {
-  if (body.includes(CODEX_IMPLEMENT_INSTRUCTION)) return body;
-  const trimmed = body.trimEnd();
-  return trimmed ? `${trimmed}\n\n${CODEX_IMPLEMENT_INSTRUCTION}` : CODEX_IMPLEMENT_INSTRUCTION;
-}
 
 function client(): Octokit {
   if (octokit) return octokit;
@@ -36,8 +34,8 @@ export async function createIssue(input: CreateIssueInput): Promise<CreatedIssue
     owner: input.owner,
     repo: input.repo,
     title: input.title,
-    body: appendCodexInstruction(input.body),
-    labels: input.labels,
+    body: input.body,
+    labels: [...new Set([...(input.labels ?? []), PROPOSED_LABEL])],
   });
   return { number: data.number, url: data.html_url };
 }

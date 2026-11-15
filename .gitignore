@@ -17,3 +17,6 @@ ios/.build/
 ios/DerivedData/
 *.xcuserstate
 xcuserdata/
+
+runner/dist/
+.env.runner

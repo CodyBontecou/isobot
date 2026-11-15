@@ -1,0 +1,64 @@
+{
+  "pollSeconds": 60,
+  "triageMinutes": 30,
+  "maxConcurrentJobs": 2,
+  "maxProposalsPerTriage": 5,
+  "builder": {
+    "kind": "claude",
+    "timeoutMinutes": 60,
+    "maxTurns": 300,
+    "maxFixRounds": 3,
+    "maxReviewRounds": 2,
+    "settings": {}
+  },
+  "labels": {
+    "proposed": "isobot:proposed",
+    "ready": "isobot:ready",
+    "building": "isobot:building",
+    "review": "isobot:review",
+    "failed": "isobot:failed",
+    "ship": "isobot:ship",
+    "stop": "isobot:stop"
+  },
+  "discordCategories": {
+    "time.md": "codybontecou/time.md",
+    "health.md": "codybontecou/health-md",
+    "gitsync.md": "codybontecou/Sync.md",
+    "sync.md": "codybontecou/Sync.md",
+    "instarep.ly": "codybontecou/Instarep.ly",
+    "iso.me": "codybontecou/isome",
+    "vox.md": "codybontecou/vox.md"
+  },
+  "defaults": {
+    "autonomy": "pr",
+    "checks": [],
+    "protectedPaths": [
+      ".github/**",
+      "**/.env*",
+      "**/*.entitlements",
+      "**/Info.plist",
+      "**/*.storekit",
+      "**/ExportOptions*.plist",
+      "**/fastlane/**",
+      "**/wrangler.json*",
+      "**/wrangler.toml",
+      "**/migrations/**",
+      "**/*auth*/**",
+      "**/*purchase*/**",
+      "**/*subscription*/**",
+      "**/*privacy*"
+    ],
+    "maxChangedLines": 400,
+    "minReviewConfidence": 0.85,
+    "requireCi": true,
+    "release": { "onMerge": [], "onShip": [] }
+  },
+  "repos": {
+    "codybontecou/time.md": {},
+    "codybontecou/health-md": {},
+    "codybontecou/Sync.md": {},
+    "codybontecou/Instarep.ly": {},
+    "codybontecou/isome": {},
+    "codybontecou/vox.md": {}
+  }
+}

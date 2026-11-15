@@ -20,7 +20,7 @@ function json(value: unknown, status = 200): Response {
   return Response.json(value, { status });
 }
 
-test("creates only in mapped repo and appends deterministic source, quote, marker and Codex instruction", async () => {
+test("creates only in mapped repo, appends deterministic source, quote and marker, and queues the build", async () => {
   const calls: { url: URL; init?: RequestInit }[] = [];
   const fetcher: typeof fetch = async (request, init) => {
     assert.equal(typeof request, "string");
@@ -38,8 +38,9 @@ test("creates only in mapped repo and appends deterministic source, quote, marke
   assert.equal(query.get("since"), "2026-10-06T00:00:00.000Z");
   const posted = JSON.parse(String(calls[1].init?.body));
   assert.equal(posted.title, "Fix syncing");
-  assert.deepEqual(posted.labels, ["bug"]);
-  assert.equal(posted.body, `${input.body}\n\n### Original Discord message\n\n> First line\n> \n> Second line\n\nSource: [Discord message](${input.parent.jumpUrl})\n\n${marker}\n\n@codex implement this`);
+  assert.deepEqual(posted.labels, ["bug", "isobot:ready"]);
+  assert.equal(posted.body, `${input.body}\n\n### Original Discord message\n\n> First line\n> \n> Second line\n\nSource: [Discord message](${input.parent.jumpUrl})\n\n${marker}`);
+  assert.ok(!posted.body.includes("@codex"));
   assert.ok(calls.every(call => call.init?.redirect === "manual"));
   assert.ok(calls[1].init?.signal instanceof AbortSignal);
 });
