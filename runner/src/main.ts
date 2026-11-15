@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { ImapFlow } from "imapflow";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -72,7 +73,7 @@ function runtime(): Runtime {
   const sources: Source[] = [new GitHubSource(github, configuredRepos(config), labels)];
   if (env.piUrl && env.piToken) sources.push(new DiscordSource(env.piUrl, env.piToken, lowerKeys(config.discordCategories)));
   if (env.piUrl && env.piToken && config.vox) sources.push(new VoxSource(env.piUrl, env.piToken, config.vox.conversation));
-  if (env.imap) sources.push(new EmailSource(env.imap));
+  for (const account of env.imap) sources.push(new EmailSource(account));
   if (config.appStore) sources.push(new AppStoreSource(config.appStore));
   return { config, env, store, github, pipeline, sources, builder, notifier };
 }
@@ -202,7 +203,13 @@ async function doctor(rt: Runtime): Promise<boolean> {
     await response?.body?.cancel();
     report(Boolean(response?.ok), `App Store reviews for ${Object.keys(rt.config.appStore.apps).length} apps in ${rt.config.appStore.countries.length} storefronts`, response ? `HTTP ${response.status}` : "unreachable");
   } else console.log("➖ App Store review triage disabled (set appStore in the runner config)");
-  console.log(rt.env.imap ? `➖ Email triage enabled for ${rt.env.imap.user}` : "➖ Email triage disabled (set ISOBOT_IMAP_*)");
+  if (rt.env.imap.length === 0) console.log("➖ Email triage disabled (runner/scripts/add-mail-account.sh <address>)");
+  for (const account of rt.env.imap) {
+    const client = new ImapFlow({ host: account.host, port: account.port, secure: true, logger: false, auth: { user: account.user, pass: account.password } });
+    const ok = await client.connect().then(() => client.mailboxOpen(account.mailbox, { readOnly: true })).then(() => true, (error: Error) => error);
+    await client.logout().catch(() => undefined);
+    report(ok === true, `Email ${account.user} (${account.mailbox}${account.query ? `, matching ${account.query}` : ""})`, ok === true ? "signed in" : (ok as Error).message);
+  }
   console.log(rt.env.discordWebhookUrl ? "➖ Discord notifications enabled" : "➖ Discord notifications disabled (set ISOBOT_DISCORD_WEBHOOK_URL)");
   report(existsSync("/usr/bin/sandbox-exec"), "Check sandbox (sandbox-exec) available");
   const beat = readHeartbeat(rt.env.home);

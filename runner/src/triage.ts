@@ -1,7 +1,7 @@
 import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
 import type { Builder, TriageDecision, TriageItem } from "./builder.js";
-import { configuredRepos, type AppStoreConfig, type Environment, type RunnerConfig, type VoxConfig } from "./config.js";
+import { configuredRepos, type AppStoreConfig, type ImapAccount, type RunnerConfig, type VoxConfig } from "./config.js";
 import type { GitHubApi } from "./github.js";
 import type { Notifier } from "./notify.js";
 import type { Store } from "./store.js";
@@ -147,9 +147,11 @@ export class GitHubSource implements Source {
 
 /** New mail in one IMAP mailbox (e.g. Gmail with an app password). Read-only: never marks mail as seen. */
 export class EmailSource implements Source {
-  name = "email";
+  name: string;
 
-  constructor(private imap: NonNullable<Environment["imap"]>) {}
+  constructor(private imap: ImapAccount) {
+    this.name = `email ${imap.user}`;
+  }
 
   async collect(store: Store): Promise<Collected> {
     const client = new ImapFlow({
@@ -169,22 +171,27 @@ export class EmailSource implements Source {
         return { items, cursors };
       }
       if (latest <= Number(cursor)) return { items, cursors };
-      let highest = Number(cursor);
       // At most 100 messages per pass; the cursor stops at the last one read, so the rest come next time.
       const last = Math.min(latest, Number(cursor) + 100);
-      for await (const message of client.fetch(`${Number(cursor) + 1}:${last}`, { uid: true, source: true }, { uid: true })) {
-        if (message.uid <= Number(cursor) || message.uid > last) continue;
-        highest = Math.max(highest, message.uid);
-        if (!message.source || store.isSeen("triage", `email:${message.uid}`)) continue;
-        const parsed = await simpleParser(message.source.subarray(0, 256 * 1024));
-        const from = parsed.from?.value?.[0];
-        items.push({
-          id: `email:${message.uid}`, source: "email", repo: null, url: null,
-          author: from ? `${from.name ?? ""} <${from.address ?? ""}>`.trim() : "unknown",
-          text: `Subject: ${parsed.subject ?? "(none)"}\n\n${(parsed.text ?? "").slice(0, 3000)}`,
-        });
+      const range = `${Number(cursor) + 1}:${last}`;
+      // On Gmail, a search narrows the range to what matches the account's query.
+      const uids = this.imap.query ? await client.search({ uid: range, gmraw: this.imap.query }, { uid: true }) : null;
+      const wanted = uids === null ? range : (uids || []).filter(uid => uid > Number(cursor) && uid <= last).join(",");
+      if (wanted) {
+        for await (const message of client.fetch(wanted, { uid: true, source: true }, { uid: true })) {
+          if (message.uid <= Number(cursor) || message.uid > last) continue;
+          const id = `email:${this.imap.user.toLowerCase()}:${mailbox.uidValidity}:${message.uid}`;
+          if (!message.source || store.isSeen("triage", id)) continue;
+          const parsed = await simpleParser(message.source.subarray(0, 256 * 1024));
+          const from = parsed.from?.value?.[0];
+          items.push({
+            id, source: "email", repo: null, url: null,
+            author: from ? `${from.name ?? ""} <${from.address ?? ""}>`.trim() : "unknown",
+            text: `Subject: ${parsed.subject ?? "(none)"}\n\n${(parsed.text ?? "").slice(0, 3000)}`,
+          });
+        }
       }
-      cursors[key] = String(highest);
+      cursors[key] = String(last);
     } finally {
       await client.logout().catch(() => undefined);
     }

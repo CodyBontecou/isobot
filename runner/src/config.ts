@@ -107,7 +107,8 @@ export interface Environment {
   piUrl?: string;
   piToken?: string;
   discordWebhookUrl?: string;
-  imap?: { host: string; port: number; user: string; password: string; mailbox: string };
+  /** Mailboxes to triage, from ISOBOT_IMAP_* and ISOBOT_IMAP_*_2 … _9. */
+  imap: ImapAccount[];
   claudeBin: string;
 }
 
@@ -184,6 +185,38 @@ export function configuredRepos(config: RunnerConfig): { owner: string; repo: st
     .map(key => { const [owner, repo] = key.split("/"); return { owner, repo }; });
 }
 
+export interface ImapAccount {
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+  mailbox: string;
+  /** Gmail search (X-GM-RAW) a message must match to reach triage; empty reads everything. */
+  query: string;
+}
+
+/** Personal Gmail is mostly not product feedback: read the Primary tab and mail to the product domain. */
+export const DEFAULT_GMAIL_QUERY = "-from:me (category:primary OR to:isolated.tech)";
+
+function imapAccounts(env: NodeJS.ProcessEnv): ImapAccount[] {
+  const accounts: ImapAccount[] = [];
+  for (const suffix of ["", "_2", "_3", "_4", "_5", "_6", "_7", "_8", "_9"]) {
+    const get = (name: string) => env[`ISOBOT_IMAP_${name}${suffix}`]?.trim() || undefined;
+    const user = get("USER");
+    const password = get("PASSWORD")?.replace(/\s+/g, "");
+    if (!user || !password) continue;
+    const host = get("HOST") ?? (/@(gmail|googlemail)\.com$/i.test(user) ? "imap.gmail.com" : undefined);
+    if (!host) throw new Error(`ISOBOT_IMAP_HOST${suffix} is required for ${user}`);
+    accounts.push({
+      host, user, password,
+      port: Number(get("PORT") ?? 993),
+      mailbox: get("MAILBOX") ?? "INBOX",
+      query: env[`ISOBOT_IMAP_QUERY${suffix}`] ?? (host === "imap.gmail.com" ? DEFAULT_GMAIL_QUERY : ""),
+    });
+  }
+  return accounts;
+}
+
 export function loadEnvironment(env: NodeJS.ProcessEnv = process.env): Environment {
   const githubToken = env.ISOBOT_GITHUB_TOKEN ?? env.GITHUB_TOKEN;
   if (!githubToken) throw new Error("ISOBOT_GITHUB_TOKEN (or GITHUB_TOKEN) is required");
@@ -191,13 +224,7 @@ export function loadEnvironment(env: NodeJS.ProcessEnv = process.env): Environme
   if (piUrl && !/^https:\/\//.test(piUrl) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//.test(`${piUrl}/`)) {
     throw new Error("ISOBOT_PI_URL must use HTTPS");
   }
-  const imap = env.ISOBOT_IMAP_HOST && env.ISOBOT_IMAP_USER && env.ISOBOT_IMAP_PASSWORD ? {
-    host: env.ISOBOT_IMAP_HOST,
-    port: Number(env.ISOBOT_IMAP_PORT ?? 993),
-    user: env.ISOBOT_IMAP_USER,
-    password: env.ISOBOT_IMAP_PASSWORD,
-    mailbox: env.ISOBOT_IMAP_MAILBOX ?? "INBOX",
-  } : undefined;
+  const imap = imapAccounts(env);
   return {
     home: env.ISOBOT_HOME ?? path.join(homedir(), "Library", "Application Support", "isobot"),
     githubToken,

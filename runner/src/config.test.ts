@@ -46,7 +46,7 @@ test("environment requires a GitHub token and HTTPS Pi URL", () => {
   const env = loadEnvironment({ GITHUB_TOKEN: "t", ISOBOT_PI_URL: "https://pi.isolated.tech/", ISOBOT_HOME: "/tmp/x" });
   assert.equal(env.piUrl, "https://pi.isolated.tech");
   assert.equal(env.home, "/tmp/x");
-  assert.equal(env.imap, undefined);
+  assert.deepEqual(env.imap, []);
 });
 
 test("vox config is validated", () => {
@@ -75,4 +75,18 @@ test("ownerAutonomy merge needs checks, like autonomy merge", () => {
   assert.throws(() => validateConfig(config), /ownerAutonomy "merge" needs at least one check command/);
   config.repos["codybontecou/time.md"] = { ownerAutonomy: "merge", checks: ["make test"] };
   assert.doesNotThrow(() => validateConfig(config));
+});
+
+test("several mailboxes load from numbered IMAP variables, Gmail by default", () => {
+  const env = loadEnvironment({
+    GITHUB_TOKEN: "t",
+    ISOBOT_IMAP_USER: "a@gmail.com", ISOBOT_IMAP_PASSWORD: "abcd efgh ijkl mnop",
+    ISOBOT_IMAP_USER_2: "b@example.com", ISOBOT_IMAP_PASSWORD_2: "x", ISOBOT_IMAP_HOST_2: "imap.example.com",
+    ISOBOT_IMAP_USER_3: "c@gmail.com",
+  });
+  assert.deepEqual(env.imap, [
+    { host: "imap.gmail.com", port: 993, user: "a@gmail.com", password: "abcdefghijklmnop", mailbox: "INBOX", query: "-from:me (category:primary OR to:isolated.tech)" },
+    { host: "imap.example.com", port: 993, user: "b@example.com", password: "x", mailbox: "INBOX", query: "" },
+  ], "an account without a password is skipped");
+  assert.throws(() => loadEnvironment({ GITHUB_TOKEN: "t", ISOBOT_IMAP_USER: "a@example.com", ISOBOT_IMAP_PASSWORD: "x" }), /ISOBOT_IMAP_HOST/);
 });
