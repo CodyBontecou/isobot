@@ -9,6 +9,11 @@ interface RepoTarget {
 
 const EVENTS = ["issues", "issue_comment"];
 
+const LEGACY_URLS = [
+  "https://isobot-discord-bridge.costream.workers.dev/gh/webhook",
+  "https://isobot.fly.dev/gh/webhook",
+];
+
 async function main(): Promise<void> {
   const token = process.env.GITHUB_TOKEN;
   if (!token) throw new Error("GITHUB_TOKEN is required");
@@ -23,7 +28,7 @@ async function main(): Promise<void> {
     try {
       const { data: hooks } = await octokit.repos.listWebhooks({ owner: r.owner, repo: r.repo });
       const existing = hooks.find((h) => h.config?.url === url)
-        ?? hooks.find((h) => h.config?.url === "https://isobot.fly.dev/gh/webhook");
+        ?? hooks.find((h) => LEGACY_URLS.includes(h.config?.url ?? ""));
       const config = { url, content_type: "json" as const, secret, insecure_ssl: "0" };
       if (existing) {
         await octokit.repos.updateWebhook({
