@@ -32,6 +32,12 @@ export interface RepoPolicy {
   };
   /** Extra guidance appended to the builder prompt for this repo. */
   notes?: string;
+  /**
+   * Autonomy for work that came from the owner: issues carrying the auto label,
+   * added by the owner's own account (by hand, or by the runner for the owner's
+   * Vox.md notes). Defaults to `autonomy`. Every merge gate still applies.
+   */
+  ownerAutonomy?: Autonomy;
 }
 
 export interface RunnerConfig {
@@ -91,6 +97,8 @@ export interface Labels {
   failed: string;
   ship: string;
   stop: string;
+  /** Owner-originated work: lets the repo's ownerAutonomy apply. Only counts when the owner added it. */
+  auto: string;
 }
 
 export interface Environment {
@@ -117,7 +125,7 @@ export function validateConfig(config: RunnerConfig): void {
   if (!(config.triageMinutes >= 5)) fail("triageMinutes must be at least 5");
   if (!(config.maxConcurrentJobs >= 1 && config.maxConcurrentJobs <= 8)) fail("maxConcurrentJobs must be 1-8");
   if (config.builder?.kind !== "claude") fail("builder.kind must be \"claude\"");
-  for (const key of ["proposed", "ready", "building", "review", "failed", "ship", "stop"] as const) {
+  for (const key of ["proposed", "ready", "building", "review", "failed", "ship", "stop", "auto"] as const) {
     if (!config.labels?.[key]) fail(`labels.${key} is required`);
   }
   for (const [category, repo] of Object.entries(config.discordCategories ?? {})) {
@@ -147,6 +155,10 @@ export function validateConfig(config: RunnerConfig): void {
     if (!["off", "pr", "merge"].includes(policy.autonomy)) fail(`${name}: unknown autonomy "${policy.autonomy}"`);
     if (policy.autonomy === "merge" && policy.checks.length === 0) {
       fail(`${name}: autonomy "merge" needs at least one check command; unverified changes are never merged automatically`);
+    }
+    if (policy.ownerAutonomy !== undefined && !["off", "pr", "merge"].includes(policy.ownerAutonomy)) fail(`${name}: unknown ownerAutonomy "${policy.ownerAutonomy}"`);
+    if (policy.ownerAutonomy === "merge" && policy.checks.length === 0) {
+      fail(`${name}: ownerAutonomy "merge" needs at least one check command; unverified changes are never merged automatically`);
     }
     if (!(policy.minReviewConfidence > 0 && policy.minReviewConfidence <= 1)) fail(`${name}: minReviewConfidence must be in (0, 1]`);
     void partial;

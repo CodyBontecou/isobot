@@ -95,6 +95,24 @@ Release commands run on a clean checkout of the merge commit with the runner's
 scrubbed environment, so tools that need credentials (App Store Connect API
 keys, Wrangler) must find them in their own config on the machine.
 
+## End to end for your own work
+
+A repository can give your own work more autonomy than community reports with
+`ownerAutonomy`:
+
+```json
+"codybontecou/vox.md": { "autonomy": "pr", "ownerAutonomy": "merge", "checks": ["./scripts/test-project-contracts.sh"] }
+```
+
+Work counts as yours when the issue has `isobot:auto` **added by your account**.
+The runner adds it to proposals it auto-approves from your Vox.md notes. Add it
+yourself to an issue you write. A collaborator or bot adding it changes nothing,
+and removing it at any point (or adding `isobot:stop`) drops back to `autonomy`.
+Every merge gate still applies: runner checks, the reviewer, GitHub CI, the line
+limit, protected paths and unchanged issue text. `ownerAutonomy: "merge"` needs
+checks, like `autonomy: "merge"`. After an automatic merge, `release.onMerge`
+runs, and `release.onShip` still waits for `isobot:ship`.
+
 ## Vox.md notes
 
 Your own voice notes can feed triage directly. In Vox.md, make a capture preset
@@ -111,7 +129,7 @@ open-ended ideas. `hints` tells the model how product names come out of
 speech-to-text.
 
 With `autoApprove: true`, proposals at or above `minAutoApproveConfidence`
-(default 0.7) are filed as `isobot:ready` and build immediately; less certain
+(default 0.7) are filed as `isobot:ready` plus `isobot:auto` and build immediately; less certain
 ones wait as `isobot:proposed`. Only the `vox` source can self-approve, and repo
 autonomy still decides whether a PR merges. Add `isobot:stop` to cancel one.
 Because the conversation exists only for isobot, the first pass takes notes that

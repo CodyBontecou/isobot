@@ -18,7 +18,8 @@
     "review": "isobot:review",
     "failed": "isobot:failed",
     "ship": "isobot:ship",
-    "stop": "isobot:stop"
+    "stop": "isobot:stop",
+    "auto": "isobot:auto"
   },
   "trustedAuthors": [],
   "discordCategories": {
@@ -111,6 +112,10 @@
     "codybontecou/GitSync.md": {},
     "codybontecou/Instarep.ly": {},
     "codybontecou/whereday": {},
-    "codybontecou/vox.md": {}
+    "codybontecou/vox.md": {
+      "ownerAutonomy": "merge",
+      "checks": ["./scripts/test-project-contracts.sh"],
+      "notes": "SwiftUI iOS/Mac/Watch app plus an Android app under apps/android. GitHub Apple CI runs the full xcodebuild test suite on every PR."
+    }
   }
 }

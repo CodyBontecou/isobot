@@ -31,7 +31,7 @@ export interface IssueComment {
 
 const LABEL_COLORS: Record<keyof Labels, string> = {
   proposed: "c5def5", ready: "0e8a16", building: "fbca04", review: "1d76db",
-  failed: "b60205", ship: "5319e7", stop: "000000",
+  failed: "b60205", ship: "5319e7", stop: "000000", auto: "0b7285",
 };
 
 const LABEL_DESCRIPTIONS: Record<keyof Labels, string> = {
@@ -42,6 +42,7 @@ const LABEL_DESCRIPTIONS: Record<keyof Labels, string> = {
   failed: "isobot could not finish; see the latest comment",
   ship: "Approve isobot to run the ship (App Store) step",
   stop: "Stop isobot from touching this issue",
+  auto: "From the owner: isobot may take it end to end (only counts when the owner adds it)",
 };
 
 /** The subset of GitHub the runner needs; an interface so tests can fake it. */

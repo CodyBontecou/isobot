@@ -68,3 +68,11 @@ test("App Store config is validated", () => {
   assert.throws(() => validateConfig({ ...ok, appStore: { apps: { "123456": "vox.md" }, countries: ["us"] } }), /owner\/repo/);
   assert.throws(() => validateConfig({ ...ok, appStore: { apps: { "123456": "codybontecou/vox.md" }, countries: ["USA"] } }), /country codes/);
 });
+
+test("ownerAutonomy merge needs checks, like autonomy merge", () => {
+  const config = loadConfig();
+  config.repos["codybontecou/time.md"] = { ownerAutonomy: "merge", checks: [] };
+  assert.throws(() => validateConfig(config), /ownerAutonomy "merge" needs at least one check command/);
+  config.repos["codybontecou/time.md"] = { ownerAutonomy: "merge", checks: ["make test"] };
+  assert.doesNotThrow(() => validateConfig(config));
+});

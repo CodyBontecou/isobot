@@ -134,6 +134,17 @@ export class Pipeline {
     for (const job of this.deps.store.inState("building")) this.deps.store.update(job.id, { state: "queued" });
   }
 
+  /**
+   * Work the owner asked for: the auto label, added by the runner's own account. Only that account can
+   * apply it meaningfully (the owner by hand, or the runner for the owner's Vox.md notes), so a
+   * collaborator or bot adding it changes nothing.
+   */
+  async ownerOriginated(issue: Issue): Promise<boolean> {
+    if (!hasLabel(issue, this.labels.auto)) return false;
+    const by = await this.deps.github.labeledBy(issue.owner, issue.repo, issue.number, this.labels.auto);
+    return Boolean(by) && by!.toLowerCase() === (await this.viewerLogin()).toLowerCase();
+  }
+
   private async isTrusted(login: string): Promise<boolean> {
     const viewer = await this.viewerLogin();
     return [viewer, ...(this.deps.config.trustedAuthors ?? [])].some(a => a.toLowerCase() === login.toLowerCase());
@@ -226,7 +237,12 @@ export class Pipeline {
 
       const gateNow = async (): Promise<GateDecision> => {
         const current = await github.issue(job.owner, job.repo, job.number);
-        const decision = evaluateGate({ policy, diff, checks, review: review!, issueLabels: current.labels, stopLabel: this.labels.stop });
+        const owner = await this.ownerOriginated(current);
+        const effective = owner ? { ...policy, autonomy: policy.ownerAutonomy ?? policy.autonomy } : policy;
+        const decision = evaluateGate({ policy: effective, diff, checks, review: review!, issueLabels: current.labels, stopLabel: this.labels.stop });
+        if (!owner && policy.autonomy !== "merge" && policy.ownerAutonomy === "merge") {
+          decision.reasons.push(`it isn't marked as yours; when you add \`${this.labels.auto}\` yourself, isobot merges once every gate passes`);
+        }
         if (!source.trusted) decision.reasons.push(`the issue was written by @${source.author}, who isn't trusted to merge without you`);
         if ((await this.taskFor(current)).fingerprint !== source.fingerprint) decision.reasons.push("the issue text changed while isobot was building");
         if (current.state === "closed") decision.reasons.push("the issue was closed");

@@ -263,7 +263,7 @@ test("confident proposals from the owner's Vox notes are filed ready to build; n
   const report = await run();
   assert.deepEqual(report.proposals.map(p => [p.title, p.approved]), [["Community ask", false], ["One-tap recording", true], ["Unclear tweak", false]]);
   const byTitle = (title: string) => [1, 2, 3].map(n => github.get("codybontecou", "vox.md", n)).find(issue => issue.title === title)!;
-  assert.deepEqual(byTitle("One-tap recording").labels, ["isobot:ready", "bug"]);
+  assert.deepEqual(byTitle("One-tap recording").labels, ["isobot:ready", "isobot:auto", "bug"], "the owner's notes are marked for end-to-end work");
   assert.match(byTitle("One-tap recording").body, /\*\*Source:\*\* the owner's Vox.md voice note/);
   assert.match(byTitle("One-tap recording").body, /Auto-approved .*isobot:stop/);
   assert.deepEqual(byTitle("Unclear tweak").labels, ["isobot:proposed", "bug"], "low confidence still waits");

@@ -367,3 +367,41 @@ test("branch slugs are short and safe", () => {
   assert.equal(slug("!!!"), "change");
   assert.ok(slug("a".repeat(100)).length <= 40);
 });
+
+test("owner-originated work (auto label added by the owner) merges under ownerAutonomy; anything else stops at a PR", async () => {
+  const configure = (config: RunnerConfig) => {
+    config.repos[REPO] = { autonomy: "pr", ownerAutonomy: "merge", checks: ["make test"] };
+  };
+  const owner = setup(configure);
+  owner.github.add(OWNER, NAME, 30, "Remote-only routes", ["isobot:ready", "isobot:auto"]);
+  await cycle(owner.pipeline);
+  assert.deepEqual(owner.github.merged, [100], "the owner's own work goes end to end");
+
+  const plain = setup(configure);
+  plain.github.add(OWNER, NAME, 31, "Community ask", ["isobot:ready"]);
+  await cycle(plain.pipeline);
+  assert.equal(plain.github.merged.length, 0);
+  assert.match(plain.github.commentsFor(OWNER, NAME, 31).at(-1)!, /autonomy is "pr"[\s\S]*add `isobot:auto` yourself/);
+
+  const forged = setup(configure);
+  forged.github.add(OWNER, NAME, 32, "Sneaky", ["isobot:ready", "isobot:auto"]);
+  forged.github.labelers.set(`${REPO}#32:isobot:auto`, "collaborator");
+  await cycle(forged.pipeline);
+  assert.equal(forged.github.merged.length, 0, "only the owner's account can mark work as the owner's");
+  assert.equal(forged.store.get(`${REPO}#32`)!.state, "pr_open");
+});
+
+test("ownerAutonomy never bypasses the other gates", async () => {
+  const { github, pipeline } = setup(config => {
+    config.repos[REPO] = { autonomy: "pr", ownerAutonomy: "merge", checks: ["make test"] };
+  }, [
+    { configured: true, passed: false, results: [{ command: "make test", ok: false, output: "boom" }] },
+    { configured: true, passed: false, results: [{ command: "make test", ok: false, output: "boom" }] },
+    { configured: true, passed: false, results: [{ command: "make test", ok: false, output: "boom" }] },
+    { configured: true, passed: false, results: [{ command: "make test", ok: false, output: "boom" }] },
+  ]);
+  github.add(OWNER, NAME, 33, "Broken", ["isobot:ready", "isobot:auto"]);
+  await cycle(pipeline);
+  assert.equal(github.merged.length, 0);
+  assert.match(github.commentsFor(OWNER, NAME, 33).at(-1)!, /runner checks failed/);
+});

@@ -445,6 +445,6 @@ async function propose(deps: TriageDeps, decision: TriageDecision, item: TriageI
     : item.source === "appstore" ? `\n\n**Source:** App Store review (${item.rating}/5 stars)${link}`
     : `\n\n**Source:** ${item.source} message${who}${link}`;
   const issue = await deps.github.createIssue(owner, repo, decision.title, `${decision.spec}${source}${footer}`,
-    [approved ? labels.ready : labels.proposed, ...(kindLabel ? [kindLabel] : [])]);
+    [...(approved ? [labels.ready, labels.auto] : [labels.proposed]), ...(kindLabel ? [kindLabel] : [])]);
   return { title: decision.title, url: issue.url, approved };
 }
