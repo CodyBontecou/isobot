@@ -38,7 +38,7 @@ line or commit the file. They are injected at runtime, not baked into the image.
 `ISOBOT_ALLOWED_USERS` defaults to the existing application owner/team behavior.
 
 ```sh
-curl --fail https://isobot-discord-bridge.costream.workers.dev/health
+curl --fail https://isobot.isolated.tech/health
 cd bridge
 npx wrangler tail --format pretty
 npx wrangler containers list
@@ -47,7 +47,7 @@ npx wrangler containers list
 ## GitHub webhooks and cutover
 
 The canonical webhook URL is
-`https://isobot-discord-bridge.costream.workers.dev/gh/webhook`.
+`https://isobot.isolated.tech/gh/webhook`.
 `npm run webhooks:register` updates an existing Fly hook in place, rather than
 creating a duplicate, and exits unsuccessfully if any repository update fails.
 It requires `GITHUB_TOKEN` with webhook administration permissions and the

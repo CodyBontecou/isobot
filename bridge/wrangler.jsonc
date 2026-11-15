@@ -59,6 +59,9 @@
   "observability": {
     "enabled": true
   },
+  "routes": [
+    { "pattern": "isobot.isolated.tech", "custom_domain": true }
+  ],
   "workers_dev": true,
   "preview_urls": false
 }

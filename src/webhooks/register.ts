@@ -14,7 +14,7 @@ async function main(): Promise<void> {
   if (!token) throw new Error("GITHUB_TOKEN is required");
   const secret = process.env.GITHUB_WEBHOOK_SECRET;
   if (!secret) throw new Error("GITHUB_WEBHOOK_SECRET is required");
-  const url = process.env.WEBHOOK_URL ?? "https://isobot-discord-bridge.costream.workers.dev/gh/webhook";
+  const url = process.env.WEBHOOK_URL ?? "https://isobot.isolated.tech/gh/webhook";
 
   const repos = dedupeRepos(Object.values(reposJson) as RepoTarget[]);
   const octokit = new Octokit({ auth: token, userAgent: "isobot/0.1" });

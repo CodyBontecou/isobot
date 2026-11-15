@@ -80,7 +80,7 @@ npm run deploy
 Deploy the Discord bridge with `npm run bridge:deploy` after configuring the
 bridge Worker secrets. See [Container operations](bridge/README.md). Keep the old
 Fly machine stopped. GitHub webhooks use
-`https://isobot-discord-bridge.costream.workers.dev/gh/webhook`;
+`https://isobot.isolated.tech/gh/webhook`;
 `npm run webhooks:register` migrates existing Fly hooks in place.
 
 ## Discord history from Pi

@@ -16,7 +16,7 @@ See [Discord history through Pi](discord-history.md).
 
 ## Discord bridge migration — October 29, 2026
 
-- Bridge: `https://isobot-discord-bridge.costream.workers.dev`.
+- Bridge: `https://isobot.isolated.tech`.
 - Worker version: `c6cab0fc-ca2c-4c49-a178-b9c8362c2e23`.
 - Container: Durable Object scheduling policy, named image `base`, instance size
   `lite`, fixed Durable Object identity `production`.
@@ -51,7 +51,7 @@ and its [linked harness example](https://github.com/cloudflare/agents/tree/main/
 | ChatGPT connection | OAuth sign-in and completed inference verified; automatic refresh enabled |
 | Console GitHub login | OAuth configured; CodyBontecou signed in and session reload verified |
 | Durable Objects | `Assistant`, `Isobot`, `DeliveryInbox`, `ChatGPTAuth`, `AccountAuth` with SQLite migrations v1–v5 |
-| Discord bridge / sync | Cloudflare Container, `https://isobot-discord-bridge.costream.workers.dev` |
+| Discord bridge / sync | Cloudflare Container, `https://isobot.isolated.tech` |
 | Previous Fly image (rollback only) | `isobot:deployment-01M4B5GSST5WBQFF8MXG6QDDQ6` |
 | Discord identity | `isobot#9767` |
 
