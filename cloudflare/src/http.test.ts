@@ -47,6 +47,14 @@ test("HTTP prompt routes authenticate, validate and preserve conversation routin
             bindings.ISOBOT_API_TOKEN = undefined;
             bindings.PROMPT_API_TOKEN = undefined;
           }
+          bindings.DiscordAssistant = { getByName(name) {
+            calls.push({method:'discordNamespace',name});return bindings.Assistant.getByName(name);
+          } };
+          bindings.DISCORD_BRIDGE = { async fetch(req) {
+            calls.push({method:'discordRead',name:new URL(req.url).pathname});
+            if(req.headers.get('Authorization')!=='Bearer test-isobot-token') throw new Error('Wrong bridge credential');
+            return Response.json({messages:[],scope:'test'});
+          } };
           const response = await worker.fetch(request, bindings);
           const headers = new Headers(response.headers);
           headers.set('X-Test-Agent-Calls', JSON.stringify(calls));
@@ -191,6 +199,20 @@ test("HTTP prompt routes authenticate, validate and preserve conversation routin
       const response = await request("/api/prompt", { body: { prompt: "unanswered", requestId: "no-answer" } });
       assert.equal(response.status, 200);
       assert.deepEqual(await response.json(), { conversation: "default", requestId: "no-answer", operationId: "no-answer", status: "unanswered", text: "", reason: "No model answer was available" });
+    });
+    await t.test("Discord tools require owner credentials and use a separate conversation namespace", async () => {
+      for (const token of [null, "ordinary-account-token"]) {
+        for(const path of ["/api/discord/prompt", "/api/discord/search?query=calendar", "/api/discord/conversation"]) {
+          const response=await request(path,{token,method:path.endsWith("prompt")?"POST":"GET",...(path.endsWith("prompt")?{body:{prompt:"hello"}}:{})});
+          assert.equal(response.status,401);assert.deepEqual(calls(response),[]);
+        }
+      }
+      const answer=await request("/api/discord/prompt",{body:{prompt:"hello",conversation:"pi-terminal",requestId:"read-test"}});
+      assert.equal(answer.status,200);assert.equal(calls(answer)[0].method,"discordNamespace");
+      const read=await request("/api/discord/search?query=calendar",{method:"GET"});
+      assert.equal(read.status,200);assert.deepEqual(calls(read),[{method:"discordRead",name:"/api/discord/search"}]);
+      const write=await request("/api/discord/search?query=calendar",{method:"POST"});
+      assert.equal(write.status,405);assert.deepEqual(calls(write),[]);
     });
     await t.test("legacy ask keeps default routing and its existing response body", async () => {
       const response = await request("/api/ask", { body: { prompt: "Hello" } });

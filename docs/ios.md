@@ -84,7 +84,7 @@ paging and exports for each representation. The resources view includes the
 server's pricing sources and measurement notes. File drafts stay in memory;
 offline and background editing are not implemented.
 
-The app connects to `https://isobot-pi.costream.workers.dev` by default. Use
+The app connects to `https://pi.isolated.tech` by default. Use
 **Server settings** before connecting to choose another Worker HTTPS origin.
 Localhost HTTP is accepted for development. The server and conversation choices
 are preferences; no authentication secrets are included in the app's source.
@@ -107,7 +107,7 @@ can be reused. No deployment is performed by building or running the app.
 The GitHub OAuth app still uses the HTTPS callback:
 
 ```text
-https://isobot-pi.costream.workers.dev/auth/github/callback
+https://pi.isolated.tech/auth/github/callback
 ```
 
 Keep `AUTH_ORIGIN`, `GITHUB_OAUTH_ALLOWED_IDS`, `GITHUB_OAUTH_CLIENT_ID` and

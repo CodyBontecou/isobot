@@ -17,8 +17,8 @@ Register an app in [GitHub's OAuth app settings](https://github.com/settings/app
 | Field | Value |
 | --- | --- |
 | Application name | `isobot Pi` |
-| Homepage URL | `https://isobot-pi.costream.workers.dev/console` |
-| Authorization callback URL | `https://isobot-pi.costream.workers.dev/auth/github/callback` |
+| Homepage URL | `https://pi.isolated.tech/console` |
+| Authorization callback URL | `https://pi.isolated.tech/auth/github/callback` |
 
 Device flow is not required. Copy the Client ID and generate a client secret
 on the app's settings page. GitHub documents the registration process in
@@ -43,7 +43,7 @@ its ChatGPT model connection.
 
 ## Create a Vox token
 
-Sign in to [the console](https://isobot-pi.costream.workers.dev/console?conversation=vox),
+Sign in to [the console](https://pi.isolated.tech/console?conversation=vox),
 then open the account's API token controls. Give the token a name such as
 `Vox iPhone`, choose read/write access, and choose an expiry. The default is
 90 days; 30 days, one year and no expiry are also supported.
@@ -75,7 +75,7 @@ configured origin. Logout invalidates the stored session immediately.
 | `POST /auth/logout` | Revoke the current browser session |
 
 Token management requires a browser session. Mutating requests also require
-`Origin: https://isobot-pi.costream.workers.dev` and `X-CSRF-Token` from the session
+`Origin: https://pi.isolated.tech` and `X-CSRF-Token` from the session
 response. A creation body is `{ "name": "Vox iPhone", "scopes": ["read", "write"],
 "expiresInDays": 90 }`. The expiry accepts `30`, `90`, `365`, or `null`. Private
 responses use `Cache-Control: no-store`; credentials stay out of custom logs.

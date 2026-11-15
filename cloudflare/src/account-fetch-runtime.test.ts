@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { build } from "esbuild";
 import { Miniflare, convertV4MiniflareOptions, type V4MiniflareOptions } from "miniflare";
 
-const origin = "https://isobot-pi.costream.workers.dev";
+const origin = "https://pi.isolated.tech";
 const exchangeUrl = "https://github.com/login/oauth/access_token";
 const identityUrl = "https://api.github.com/user";
 const clientId = "synthetic-workers-client";

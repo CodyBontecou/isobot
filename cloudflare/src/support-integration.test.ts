@@ -262,6 +262,143 @@ test("support ownership, snapshot approval, retry identity and archive cleanup",
       },
     );
     await t.test(
+      "initial approved snapshots are atomic, encrypted, owner-only and retry-safe",
+      async () => {
+        const owner = "initial-logs-fixture",
+          content = "redacted fixture logs";
+        const initialSnapshot = {
+          id: "first-logs",
+          category: "logs",
+          capturedAt: Date.now(),
+          content,
+          digest: createHash("sha256").update(content).digest("hex"),
+          accepted: true,
+        };
+        const input = {
+          action: "create",
+          id: "with-initial-logs",
+          title: "Please investigate",
+          initialSnapshot,
+        };
+        assert.equal(
+          (
+            await call(owner, {
+              ...input,
+              initialSnapshot: { ...initialSnapshot, accepted: false },
+            })
+          ).status,
+          403,
+        );
+        assert.equal(
+          (
+            await call(owner, {
+              ...input,
+              initialSnapshot: { ...initialSnapshot, digest: "wrong" },
+            })
+          ).status,
+          409,
+        );
+        assert.equal((await call(owner, input, "agent-a")).status, 403);
+        const empty = await ok(owner, { action: "list" });
+        assert.deepEqual(empty.conversations, []);
+        const created = await ok(owner, input);
+        assert.equal((created.messages as unknown[]).length, 1);
+        assert.equal(
+          (created.attachments as { digest: string }[])[0]?.digest,
+          initialSnapshot.digest,
+        );
+        await ok(owner, input);
+        const changed = {
+          ...initialSnapshot,
+          content: "different",
+          digest: createHash("sha256").update("different").digest("hex"),
+        };
+        assert.equal(
+          (await call(owner, { ...input, initialSnapshot: changed })).status,
+          409,
+        );
+        const jobs = await runtime.dispatchFetch("https://test/__jobs", {
+          method: "POST",
+          body: JSON.stringify({ owner }),
+        });
+        const queued = (await jobs.json()) as { kind: string }[];
+        assert.equal(queued.filter((job) => job.kind === "pi").length, 1);
+        const stored = await runtime.dispatchFetch(
+          "https://test/__read_attachment",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              owner,
+              conversationId: input.id,
+              generation: 1,
+              id: initialSnapshot.id,
+            }),
+          },
+        );
+        assert.equal(stored.status, 200);
+        assert.ok(JSON.stringify(await stored.json()).includes(content));
+      },
+    );
+    await t.test(
+      "message snapshots are owner-only, generation-fenced and queue one reply",
+      async () => {
+        const owner = "message-logs-fixture";
+        await ok(owner, {
+          action: "create",
+          id: "message-logs",
+          title: "First question",
+        });
+        const content = "quietly included logs";
+        const snapshot = {
+          id: "followup-logs",
+          category: "logs",
+          capturedAt: Date.now(),
+          content,
+          digest: createHash("sha256").update(content).digest("hex"),
+          accepted: true,
+          generation: 1,
+        };
+        const input = {
+          action: "send",
+          conversationId: "message-logs",
+          id: "followup-message",
+          text: "Follow-up question",
+          snapshot,
+        };
+        assert.equal((await call(owner, input, "agent-a")).status, 403);
+        assert.equal(
+          (
+            await call(owner, {
+              ...input,
+              snapshot: { ...snapshot, generation: 2 },
+            })
+          ).status,
+          409,
+        );
+        const sent = await ok(owner, input);
+        assert.equal((sent.attachments as unknown[]).length, 1);
+        assert.equal((sent.messages as unknown[]).length, 2);
+        await ok(owner, input);
+        const changed = { ...snapshot, id: "different-logs" };
+        assert.equal(
+          (await call(owner, { ...input, snapshot: changed })).status,
+          409,
+        );
+        const read = await ok(owner, {
+          action: "read",
+          conversationId: "message-logs",
+        });
+        assert.equal((read.attachments as unknown[]).length, 1);
+        assert.equal((read.messages as unknown[]).length, 2);
+        const response = await runtime.dispatchFetch("https://test/__jobs", {
+          method: "POST",
+          body: JSON.stringify({ owner }),
+        });
+        const jobs = (await response.json()) as { kind: string }[];
+        assert.equal(jobs.filter((job) => job.kind === "pi").length, 2);
+      },
+    );
+    await t.test(
       "creation sends the title once and queues Pi and Discord",
       async () => {
         const owner = "initial-prompt-fixture",

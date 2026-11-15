@@ -1,13 +1,19 @@
 import http from "node:http";
+import { handleDiscordHistory } from "../discord/http.js";
 import type { Client } from "discord.js";
 import { verifySignature } from "./verify.js";
 import { handleEvent } from "./handlers.js";
 
 export function startWebhookServer(client: Client, secret: string, port: number): http.Server {
   const server = http.createServer((req, res) => {
+    if (req.url?.startsWith("/api/discord/")) {
+      void handleDiscordHistory(req, res, client);
+      return;
+    }
     if (req.method === "GET" && req.url === "/health") {
-      res.writeHead(200, { "Content-Type": "text/plain" });
-      res.end("ok");
+      const ready = client.isReady();
+      res.writeHead(ready ? 200 : 503, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.end(JSON.stringify({ ok: ready, discordReady: ready, bot: client.user?.tag ?? null, uptimeSeconds: Math.floor(process.uptime()) }));
       return;
     }
     if (req.method !== "POST" || req.url !== "/gh/webhook") {

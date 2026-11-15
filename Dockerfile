@@ -12,4 +12,5 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
 COPY src/config/repos.json ./dist/config/repos.json
+EXPOSE 8080
 CMD ["node", "dist/index.js"]
