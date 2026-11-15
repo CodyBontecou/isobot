@@ -135,6 +135,33 @@ test("a failed triage pass keeps cursors so the items come back next time", asyn
   assert.equal(store.isSeen("triage", "discord:1"), false);
 });
 
+test("proposals in public repos omit who said it and never link email", async () => {
+  const config = loadConfig();
+  const store = new Store(":memory:");
+  const github = new FakeGitHub();
+  github.publicRepos.add("codybontecou/time.md");
+  const builder = new FakeBuilder();
+  let publicRepos: string[] | undefined;
+  builder.triage = async input => {
+    publicRepos = (input as { publicRepos?: string[] }).publicRepos;
+    return { digest: "", decisions: [
+      { id: "discord:8", action: "propose", repo: "codybontecou/time.md", kind: "bug", title: "A", spec: "s", confidence: 0.9, reason: "" },
+      { id: "email:9", action: "propose", repo: "codybontecou/time.md", kind: "bug", title: "B", spec: "s", confidence: 0.8, reason: "" },
+    ] };
+  };
+  const sources = [{ name: "fake", collect: async () => ({ cursors: {}, items: [
+    { id: "discord:8", source: "discord" as const, repo: "codybontecou/time.md", author: "Jane Doe", url: "https://discord.com/channels/1/2/8", text: "x" },
+    { id: "email:9", source: "email" as const, repo: null, author: "Jane <jane@example.com>", url: "mailto:jane@example.com", text: "y" },
+  ] }) }];
+  await triage({ config, store, github, builder, notifier: new Notifier(), sources });
+  assert.ok(publicRepos?.includes("codybontecou/time.md"), "the model is told which repos are public");
+  const bodies = [...github.issues.values()].map(i => i.body).join("\n");
+  assert.ok(!bodies.includes("Jane"), "no names in public proposals");
+  assert.ok(!bodies.includes("jane@example.com"), "no email addresses");
+  assert.match(bodies, /\*\*Source:\*\* discord message: https:\/\/discord.com/);
+  assert.match(bodies, /\*\*Source:\*\* email message\n/);
+});
+
 test("triage can't move an item to a different repository", async () => {
   const config = loadConfig();
   const store = new Store(":memory:");

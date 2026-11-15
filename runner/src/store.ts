@@ -21,6 +21,8 @@ export interface Job {
   sessionId: string | null;
   attempts: number;
   lastError: string | null;
+  /** Earliest time a queued job may start (retry backoff), ISO or null. */
+  notBefore: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -28,7 +30,7 @@ export interface Job {
 interface Row {
   id: string; owner: string; repo: string; number: number; title: string; state: JobState;
   branch: string | null; pr_number: number | null; session_id: string | null; attempts: number;
-  last_error: string | null; created_at: string; updated_at: string;
+  last_error: string | null; created_at: string; updated_at: string; not_before: string | null;
 }
 
 /** Local durable state. GitHub labels are the visible queue; this records progress and cursors. */
@@ -53,6 +55,34 @@ export class Store {
       );
       CREATE TABLE IF NOT EXISTS seen (source TEXT NOT NULL, item TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY (source, item));
     `);
+    const columns = (this.db.prepare("PRAGMA table_info(jobs)").all() as { name: string }[]).map(c => c.name);
+    if (!columns.includes("not_before")) this.db.exec("ALTER TABLE jobs ADD COLUMN not_before TEXT");
+  }
+
+  /** Puts a job back in the queue to retry after `delayMs` (transient failure). */
+  requeue(id: string, delayMs: number, reason: string, countAttempt = true): Job {
+    const job = this.get(id);
+    if (!job) throw new Error(`Job ${id} disappeared`);
+    this.db.prepare("UPDATE jobs SET state = 'queued', not_before = ?, last_error = ?, attempts = ?, updated_at = ? WHERE id = ?")
+      .run(new Date(Date.now() + delayMs).toISOString(), reason.slice(0, 4000), countAttempt ? job.attempts : Math.max(0, job.attempts - 1), new Date().toISOString(), id);
+    this.event(id, "retry", reason);
+    return this.get(id)!;
+  }
+
+  /** Queued jobs whose backoff has passed. */
+  runnable(now = new Date()): Job[] {
+    return this.inState("queued").filter(job => !job.notBefore || job.notBefore <= now.toISOString());
+  }
+
+  /** Global build pause (e.g. Claude usage limit) until an ISO time. */
+  pausedUntil(): string | null {
+    const value = this.cursor("builds:paused_until");
+    return value && value > new Date().toISOString() ? value : null;
+  }
+
+  pauseBuilds(untilMs: number, reason: string): void {
+    this.setCursor("builds:paused_until", new Date(untilMs).toISOString());
+    this.event(null, "builds_paused", reason);
   }
 
   static jobId(owner: string, repo: string, number: number): string {
@@ -73,7 +103,7 @@ export class Store {
     this.db.prepare(`INSERT INTO jobs (id, owner, repo, number, title, state, attempts, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, 'queued', 0, ?, ?)
       ON CONFLICT(id) DO UPDATE SET state = 'queued', title = excluded.title, attempts = 0, last_error = NULL,
-        session_id = NULL, pr_number = NULL, branch = NULL, updated_at = excluded.updated_at`)
+        session_id = NULL, pr_number = NULL, branch = NULL, not_before = NULL, updated_at = excluded.updated_at`)
       .run(id, owner, repo, number, title, now, now);
     this.event(id, "queued", title);
     return this.get(id);
@@ -145,6 +175,6 @@ function toJob(row: Row): Job {
   return {
     id: row.id, owner: row.owner, repo: row.repo, number: row.number, title: row.title, state: row.state,
     branch: row.branch, prNumber: row.pr_number, sessionId: row.session_id, attempts: row.attempts,
-    lastError: row.last_error, createdAt: row.created_at, updatedAt: row.updated_at,
+    lastError: row.last_error, notBefore: row.not_before ?? null, createdAt: row.created_at, updatedAt: row.updated_at,
   };
 }

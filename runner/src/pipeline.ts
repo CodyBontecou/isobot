@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import type { Builder, Review } from "./builder.js";
-import { failureFeedback, formatChecks, runChecks } from "./checks.js";
+import { isTransient, UsageLimitError } from "./errors.js";
+import { failureFeedback, formatChecks } from "./checks.js";
 import { configuredRepos, policyFor, type Environment, type RepoPolicy, type RunnerConfig } from "./config.js";
 import type { DiffStat } from "./git.js";
 import type { CiState, GitHubApi, Issue, IssueComment, PullRequest } from "./github.js";
 import type { Notifier } from "./notify.js";
-import { evaluateGate, type CheckReport, type GateDecision } from "./policy.js";
+import { evaluateGate, matchesGlob, type CheckReport, type GateDecision } from "./policy.js";
 import type { Job, Store } from "./store.js";
 
 /** The git operations the pipeline needs; `Repo` implements it, tests fake it. */
@@ -30,12 +31,24 @@ export interface PipelineDeps {
   builder: Builder;
   notifier: Notifier;
   repo(owner: string, repo: string): RepoOps;
-  /** Overridable for tests. */
-  checks?: (cwd: string, commands: string[], timeoutMs?: number) => Promise<CheckReport>;
+  /**
+   * Runs commands in a directory. `sandbox: true` for builder-written code (checks): the
+   * implementation must confine it (see sandbox.ts). Release commands run unsandboxed.
+   */
+  checks(cwd: string, commands: string[], options: { timeoutMs?: number; sandbox: boolean }): Promise<CheckReport>;
   sleep?: (ms: number) => Promise<void>;
 }
 
-const MAX_ATTEMPTS = 3;
+/**
+ * Never pushed by isobot: a pushed branch's workflows run in GitHub Actions with the
+ * repository's secrets before any review or merge.
+ */
+export const UNPUSHABLE_PATHS = [".github/workflows/**", ".github/actions/**", ".gitlab-ci.yml", ".circleci/**", "bitrise.yml", "codemagic.yaml", ".buildkite/**"];
+
+/** Backoff for transient failures, by attempt number. */
+const RETRY_DELAYS_MS = [5 * 60_000, 15 * 60_000, 45 * 60_000, 2 * 60 * 60_000];
+
+const MAX_ATTEMPTS = 5;
 const CI_WAIT_MS = 45 * 60_000;
 /** How long a new PR may go without any CI reporting before "no CI" is final. */
 const CI_GRACE_MS = 5 * 60_000;
@@ -72,6 +85,13 @@ export class Pipeline {
       for (const issue of issues) {
         try {
           if (hasLabel(issue, this.labels.stop)) continue;
+          // Approval is the trust boundary: only you (or trustedAuthors) may start a build.
+          const approver = await github.labeledBy(owner, repo, issue.number, this.labels.ready);
+          if (!approver || !(await this.isTrusted(approver))) {
+            await github.removeLabel(owner, repo, issue.number, this.labels.ready);
+            await github.comment(owner, repo, issue.number, `isobot only builds issues approved by its owner; \`${this.labels.ready}\` was added by @${approver ?? "unknown"}.`);
+            continue;
+          }
           const job = store.enqueue(owner, repo, issue.number, issue.title);
           await github.removeLabel(owner, repo, issue.number, this.labels.ready);
           if (!job) {
@@ -95,7 +115,8 @@ export class Pipeline {
   /** Starts queued jobs up to the concurrency limit. Returns the promises for the jobs it started. */
   startQueued(): Promise<void>[] {
     const started: Promise<void>[] = [];
-    for (const job of this.deps.store.inState("queued")) {
+    if (this.deps.store.pausedUntil()) return started;
+    for (const job of this.deps.store.runnable()) {
       if (this.running.size >= this.deps.config.maxConcurrentJobs) break;
       if (this.running.has(job.id)) continue;
       this.running.add(job.id);
@@ -113,16 +134,20 @@ export class Pipeline {
     for (const job of this.deps.store.inState("building")) this.deps.store.update(job.id, { state: "queued" });
   }
 
+  private async isTrusted(login: string): Promise<boolean> {
+    const viewer = await this.viewerLogin();
+    return [viewer, ...(this.deps.config.trustedAuthors ?? [])].some(a => a.toLowerCase() === login.toLowerCase());
+  }
+
   /** Builds the task text from the issue, preferring isobot's own vetted proposal over a reporter's raw text. */
   async taskFor(issue: Issue): Promise<TaskSource> {
     const viewer = await this.viewerLogin();
-    const trustedAuthors = new Set([viewer, ...(this.deps.config.trustedAuthors ?? [])].map(a => a.toLowerCase()));
     const comments: IssueComment[] = await this.deps.github.issueComments(issue.owner, issue.repo, issue.number);
     const proposal = comments.filter(c => c.author.toLowerCase() === viewer.toLowerCase() && c.body.includes(PROPOSAL_MARKER)).at(-1);
     const policy = policyFor(this.deps.config, `${issue.owner}/${issue.repo}`);
     const task = buildTask(proposal ? { ...issue, body: proposal.body } : issue, policy);
     const fingerprint = createHash("sha256").update(`${issue.title}\n${issue.body}\n${proposal?.body ?? ""}`).digest("hex");
-    return { task, trusted: trustedAuthors.has(issue.author.toLowerCase()), author: issue.author, fingerprint };
+    return { task, trusted: await this.isTrusted(issue.author), author: issue.author, fingerprint };
   }
 
   private async viewerLogin(): Promise<string> {
@@ -187,6 +212,10 @@ export class Pipeline {
       if (!review) throw new Error("review did not run");
 
       const diff = await repo.diffStat(baseSha, sha);
+      const unpushable = diff.files.filter(file => UNPUSHABLE_PATHS.some(glob => matchesGlob(file.path, glob))).map(file => file.path);
+      if (unpushable.length) {
+        return this.fail(job, new Error(`the change edits CI configuration (${unpushable.join(", ")}). isobot never pushes those, because a pushed branch's workflows run with this repository's secrets. Make that change yourself, or reword the issue so it doesn't need one.`));
+      }
       await repo.push(sha, branch);
       const body = prBody({ issue, run: run.summary, checks, review, diff });
       const existing = await github.findPull(job.owner, job.repo, branch);
@@ -236,9 +265,36 @@ export class Pipeline {
       await this.deps.notifier.discord(`✅ **${job.owner}/${job.repo}#${job.number}** ${issue.title}: merged <${pr.url}>`);
       await this.afterMerge(store.get(job.id)!, mergeSha, policy);
     } catch (error) {
-      await this.fail(job, error as Error);
+      if (isTransient(error)) await this.retryLater(job, error as Error);
+      else await this.fail(job, error as Error);
     } finally {
       if (workspace) await repo.removeWorkspace(branch).catch(() => undefined);
+    }
+  }
+
+  /** Infrastructure trouble (network, GitHub, model limits) is retried, not blamed on the issue. */
+  private async retryLater(job: Job, error: Error): Promise<void> {
+    const { store, github } = this.deps;
+    const current = store.get(job.id)!;
+    if (error instanceof UsageLimitError) {
+      const until = Date.now() + (error.retryAfterMs ?? 60 * 60_000);
+      if (!store.pausedUntil()) {
+        await this.deps.notifier.discord(`⏸ Claude usage limit reached; isobot builds pause until ${new Date(until).toISOString().slice(11, 16)} UTC.`);
+      }
+      store.pauseBuilds(until, error.message);
+      store.requeue(job.id, until - Date.now(), error.message, false);
+      console.warn(`[build] ${job.id}: usage limit; builds paused until ${new Date(until).toISOString()}`);
+      return;
+    }
+    if (current.attempts >= MAX_ATTEMPTS) return this.fail(job, new Error(`still failing after ${MAX_ATTEMPTS} attempts: ${error.message}`));
+    const delay = error instanceof Error && "retryAfterMs" in error && typeof error.retryAfterMs === "number"
+      ? error.retryAfterMs
+      : RETRY_DELAYS_MS[Math.min(current.attempts - 1, RETRY_DELAYS_MS.length - 1)];
+    store.requeue(job.id, delay, error.message);
+    console.warn(`[build] ${job.id}: transient failure, retrying in ${Math.round(delay / 60_000)} min: ${error.message}`);
+    if (current.attempts === 1) {
+      await github.comment(job.owner, job.repo, job.number,
+        `⏳ isobot hit a temporary problem (${error.message.slice(0, 200)}) and will retry automatically.`).catch(() => undefined);
     }
   }
 
@@ -319,7 +375,7 @@ export class Pipeline {
     const name = `release__${job.number}-${label}`;
     const dir = await repo.checkoutAt(sha, name);
     try {
-      return await this.checks(dir, commands, 90 * 60_000);
+      return await this.deps.checks(dir, commands, { timeoutMs: 90 * 60_000, sandbox: false });
     } finally {
       await repo.removeWorkspace(name).catch(() => undefined);
     }
@@ -338,8 +394,9 @@ export class Pipeline {
     }
   }
 
-  private checks(cwd: string, commands: string[], timeoutMs?: number): Promise<CheckReport> {
-    return (this.deps.checks ?? runChecks)(cwd, commands, timeoutMs);
+  /** Checks run builder-written code, so always sandboxed. */
+  private checks(cwd: string, commands: string[]): Promise<CheckReport> {
+    return this.deps.checks(cwd, commands, { sandbox: true });
   }
 
   private async stop(job: Job, issue: Issue): Promise<void> {

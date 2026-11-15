@@ -227,6 +227,12 @@ export async function triage(deps: TriageDeps): Promise<TriageReport> {
   }
 
   const repos = configuredRepos(deps.config).map(r => `${r.owner}/${r.repo}`);
+  const publicRepos: string[] = [];
+  for (const name of repos) {
+    const [owner, repo] = name.split("/");
+    // Unknown visibility is treated as public: the safer assumption for what a proposal may contain.
+    if (await deps.github.isPublic(owner, repo).catch(() => true)) publicRepos.push(name);
+  }
   const byId = new Map(items.map(item => [item.id, item]));
   const proposals: TriageReport["proposals"] = [];
   const digests: string[] = [];
@@ -236,7 +242,7 @@ export async function triage(deps: TriageDeps): Promise<TriageReport> {
   // If a chunk fails, cursors stay put and the next pass retries; `seen` marks keep finished items from repeating.
   for (let start = 0; start < items.length; start += TRIAGE_CHUNK) {
     const chunk = items.slice(start, start + TRIAGE_CHUNK);
-    const result = await deps.builder.triage({ items: chunk, repos, maxProposals: Math.max(budget, 0) });
+    const result = await deps.builder.triage({ items: chunk, repos, publicRepos, maxProposals: Math.max(budget, 0) });
     if (result.digest) digests.push(result.digest);
     const ranked = result.decisions.filter(d => d.action === "propose").sort((a, b) => b.confidence - a.confidence);
     for (const decision of ranked) {
@@ -245,7 +251,8 @@ export async function triage(deps: TriageDeps): Promise<TriageReport> {
       // An item from a known repository stays there, whatever the (untrusted) text persuaded the model.
       if (item.repo && item.repo.toLowerCase() !== decision.repo?.toLowerCase()) decision.repo = item.repo;
       try {
-        proposals.push(await propose(deps, decision, item));
+        const isPublic = publicRepos.some(r => r.toLowerCase() === decision.repo!.toLowerCase());
+        proposals.push(await propose(deps, decision, item, isPublic));
         budget--;
       } catch (error) {
         console.warn(`[triage] proposal for ${decision.id} failed: ${(error as Error).message}`);
@@ -267,7 +274,7 @@ export async function triage(deps: TriageDeps): Promise<TriageReport> {
   return { items: items.length, proposals, digest: result.digest };
 }
 
-async function propose(deps: TriageDeps, decision: TriageDecision, item: TriageItem): Promise<{ title: string; url: string }> {
+async function propose(deps: TriageDeps, decision: TriageDecision, item: TriageItem, isPublic: boolean): Promise<{ title: string; url: string }> {
   const [owner, repo] = decision.repo!.split("/");
   const labels = deps.config.labels;
   const kindLabel = decision.kind === "bug" ? "bug" : decision.kind === "feature" ? "enhancement" : null;
@@ -278,7 +285,10 @@ async function propose(deps: TriageDeps, decision: TriageDecision, item: TriageI
     await deps.github.addLabels(owner, repo, number, [labels.proposed]);
     return { title: decision.title, url: item.url! };
   }
-  const source = item.url ? `\n\n**Source:** ${item.source} message from ${item.author}: ${item.url}` : `\n\n**Source:** ${item.source} from ${item.author}`;
+  // Public repos never get who said it; email links and senders never leave the runner.
+  const who = isPublic ? "" : ` from ${item.author}`;
+  const link = item.url && item.source !== "email" ? `: ${item.url}` : "";
+  const source = `\n\n**Source:** ${item.source} message${who}${link}`;
   const issue = await deps.github.createIssue(owner, repo, decision.title, `${decision.spec}${source}${footer}`,
     [labels.proposed, ...(kindLabel ? [kindLabel] : [])]);
   return { title: decision.title, url: issue.url };

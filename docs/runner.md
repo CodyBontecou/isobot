@@ -46,15 +46,28 @@ doesn't propose your whole backlog.
 
 | Command (`node runner/dist/main.js …` or `npm run runner -- …`) | Does |
 | --- | --- |
-| `status` | Recent jobs and their states |
+| `status` | Whether the runner is alive (heartbeat), what it's building, pauses, recent jobs |
 | `pause` / `resume` | Stop or restart claiming new work |
 | `once` | Build whatever is approved right now, then exit |
 | `triage` | One triage pass, printed as JSON |
-| `doctor` | Configuration and connectivity checks |
+| `doctor` | Configuration, connectivity, sandbox and heartbeat checks |
 
-Logs: `~/Library/Application Support/isobot/logs/runner.log`. State:
-`runner.sqlite` beside it. Worktrees are removed after each job; clones in
-`repos/` are reused.
+Logs: `~/Library/Application Support/isobot/logs/runner.log` (rotated at
+10 MB, three kept). State: `runner.sqlite` and `heartbeat.json` beside it.
+Workspaces are removed after each job and on start; clones in `repos/` are reused.
+
+## When things go wrong
+
+- **Temporary problems** (network, GitHub outages, Claude overload) put the
+  issue back in the queue with backoff (5 min, 15 min, 45 min, 2 h) and one
+  comment; after five attempts it's marked `isobot:failed`.
+- **Claude usage limit**: all builds pause until the limit resets (or an hour),
+  without using up attempts. `status` shows the pause.
+- **Claude Code signed out**: treated as temporary; `doctor` says so.
+- **Crash or reboot**: launchd restarts the runner; interrupted builds start
+  again from a clean workspace.
+- **Sleep**: while a build runs the runner holds a `caffeinate` assertion, so
+  the Mac doesn't idle-sleep mid-build.
 
 `npm run smoke --prefix runner` runs a complete build (real Claude Code, real
 git, real checks) against a throwaway local repository and an in-memory GitHub,
@@ -91,3 +104,9 @@ and runner state. If a build needs another location, add it under
 `builder.settings.sandbox.filesystem.allowWrite` in `runner/config/isobot.json`.
 Builders don't get your global git config or `gh` login, so private package
 dependencies that need credentials won't resolve inside a build.
+
+The runner's own check commands run under an equivalent macOS sandbox profile
+that also blocks the keychain. SwiftPM and xcodebuild sandbox package manifests
+themselves, which macOS can't nest, so inside isobot's sandboxes `swift` and
+`xcodebuild` are wrapped to turn that inner sandbox off (the outer one already
+confines the build).

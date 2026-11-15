@@ -1,11 +1,24 @@
-import { sh, tail, workerEnv } from "./proc.js";
+import { run, sh, tail, workerEnv } from "./proc.js";
 import type { CheckReport } from "./policy.js";
+import { sandboxed } from "./sandbox.js";
 
-/** Runs the repository's configured checks in the worktree. Stops at the first failure. */
-export async function runChecks(cwd: string, commands: string[], timeoutMs = 45 * 60_000): Promise<CheckReport> {
+export interface CheckOptions {
+  timeoutMs?: number;
+  /** Seatbelt profile: set for builder-written code (checks); unset for release commands on merged code. */
+  sandboxProfile?: string;
+  /** Directory of tool wrappers (shims.ts) prepended to PATH for sandboxed runs. */
+  shimDir?: string;
+}
+
+/** Runs commands in `cwd` in order, stopping at the first failure. */
+export async function runChecks(cwd: string, commands: string[], options: CheckOptions = {}): Promise<CheckReport> {
   const results: CheckReport["results"] = [];
+  const timeoutMs = options.timeoutMs ?? 45 * 60_000;
   for (const command of commands) {
-    const result = await sh(command, { cwd, env: workerEnv(), timeoutMs });
+    const env = options.sandboxProfile && options.shimDir ? workerEnv({ PATH: `${options.shimDir}:${process.env.PATH ?? ""}` }) : workerEnv();
+    const result = options.sandboxProfile
+      ? await run(...sandboxed(command, options.sandboxProfile), { cwd, env, timeoutMs })
+      : await sh(command, { cwd, env: workerEnv(), timeoutMs });
     const ok = result.code === 0 && !result.timedOut;
     const output = tail(`${result.stdout}\n${result.stderr}`.trim(), 6000);
     results.push({ command, ok, output: result.timedOut ? `Timed out.\n${output}` : output });

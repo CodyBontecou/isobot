@@ -9,7 +9,11 @@ import { Repo } from "./git.js";
 import { GitHub } from "./github.js";
 import { Notifier } from "./notify.js";
 import { Pipeline } from "./pipeline.js";
+import { runChecks } from "./checks.js";
+import { Awake, heartbeatAge, readHeartbeat, rotateLog, writeHeartbeat } from "./ops.js";
 import { killAllChildren, run, setGitIdentity } from "./proc.js";
+import { sandboxProfile } from "./sandbox.js";
+import { ensureShims } from "./shims.js";
 import { Store } from "./store.js";
 import { DiscordSource, EmailSource, GitHubSource, triage, type Source } from "./triage.js";
 
@@ -47,16 +51,22 @@ function runtime(): Runtime {
   setGitIdentity(process.env.ISOBOT_GIT_NAME ?? globalGit("user.name"), process.env.ISOBOT_GIT_EMAIL ?? globalGit("user.email"));
   const store = new Store(path.join(env.home, "runner.sqlite"));
   const github = new GitHub(env.githubToken);
-  const builder = new ClaudeCodeBuilder(config.builder, {
-    // Builders may read the shared clones (their workspaces borrow objects) but not secrets or state.
-    secrets: ["runner.env", "runner.sqlite", "runner.sqlite-wal", "runner.sqlite-shm", "logs", "runner.lock", "paused"]
-      .map(entry => path.join(env.home, entry)).concat(path.resolve(process.cwd(), ".env.runner")),
-    noWrite: [path.join(env.home, "repos"), ISOBOT_ROOT],
-  }, env.claudeBin);
+  // Builders and checks may read the shared clones (workspaces borrow their objects) but not secrets or state.
+  const secrets = ["runner.env", "runner.sqlite", "runner.sqlite-wal", "runner.sqlite-shm", "logs", "runner.lock", "paused", "heartbeat.json"]
+    .map(entry => path.join(env.home, entry)).concat(path.resolve(process.cwd(), ".env.runner"));
+  const shimDir = ensureShims(env.home);
+  const builder = new ClaudeCodeBuilder(config.builder, { secrets, noWrite: [path.join(env.home, "repos"), shimDir, ISOBOT_ROOT] }, env.claudeBin, shimDir);
+  const extraWrite = ((config.builder.settings?.sandbox as { filesystem?: { allowWrite?: string[] } } | undefined)?.filesystem?.allowWrite) ?? [];
   const notifier = new Notifier(env.discordWebhookUrl);
   const pipeline = new Pipeline({
     config, env, store, github, builder, notifier,
     repo: (owner, repo) => new Repo(env.home, owner, repo, env.githubToken),
+    // Checks execute builder-written code, so they get the same confinement as the builder's shell.
+    checks: (cwd, commands, options) => runChecks(cwd, commands, {
+      timeoutMs: options.timeoutMs,
+      sandboxProfile: options.sandbox ? sandboxProfile({ workspace: cwd, secrets, allowWrite: extraWrite }) : undefined,
+      shimDir,
+    }),
   });
   const labels = Object.values(config.labels);
   const sources: Source[] = [new GitHubSource(github, configuredRepos(config), labels)];
@@ -89,6 +99,14 @@ function acquireLock(env: Environment): void {
 async function loop(rt: Runtime): Promise<void> {
   acquireLock(rt.env);
   rt.pipeline.recover();
+  // Nothing is running yet, so any workspace left behind is from a crash.
+  rmSync(path.join(rt.env.home, "work"), { recursive: true, force: true });
+  const awake = new Awake();
+  const logFile = path.join(rt.env.home, "logs", "runner.log");
+  let lastTriageAt: string | null = null;
+  let triageRunning = false;
+  let lastCycleError: string | null = null;
+  let lastAlert = 0;
   let stopping = false;
   const shutdown = (signal: string) => {
     if (stopping) return;
@@ -102,24 +120,45 @@ async function loop(rt: Runtime): Promise<void> {
 
   let lastTriage = 0;
   console.log(`[runner] started: ${configuredRepos(rt.config).map(r => `${r.owner}/${r.repo}`).join(", ")}; sources: ${rt.sources.map(s => s.name).join(", ")}`);
+  await rt.notifier.discord("🟢 isobot runner started");
   while (!stopping) {
-    if (existsSync(pausedFile(rt.env))) {
-      await sleep(rt.config.pollSeconds * 1000);
-      continue;
-    }
-    try {
-      await rt.pipeline.discover();
-      rt.pipeline.startQueued();
-      await rt.pipeline.followUp();
-      if (Date.now() - lastTriage > rt.config.triageMinutes * 60_000) {
-        lastTriage = Date.now();
-        // Triage runs in the background so a slow pass never delays builds.
-        void triage(rt).then(report => {
-          if (report.items) console.log(`[triage] ${report.items} items, ${report.proposals.length} proposals`);
-        }).catch(error => console.warn(`[triage] failed: ${(error as Error).message}`));
+    const manuallyPaused = existsSync(pausedFile(rt.env));
+    if (!manuallyPaused) {
+      try {
+        await rt.pipeline.discover();
+        rt.pipeline.startQueued();
+        await rt.pipeline.followUp();
+        lastCycleError = null;
+        if (!triageRunning && Date.now() - lastTriage > rt.config.triageMinutes * 60_000) {
+          lastTriage = Date.now();
+          triageRunning = true;
+          // Triage runs in the background so a slow pass never delays builds; one pass at a time.
+          void triage(rt).then(report => {
+            lastTriageAt = new Date().toISOString();
+            if (report.items) console.log(`[triage] ${report.items} items, ${report.proposals.length} proposals`);
+          }).catch(error => console.warn(`[triage] failed: ${(error as Error).message}`))
+            .finally(() => { triageRunning = false; });
+        }
+      } catch (error) {
+        lastCycleError = (error as Error).message;
+        console.error("[runner] cycle failed:", lastCycleError);
+        // At most one alert an hour for a repeating cycle failure.
+        if (Date.now() - lastAlert > 60 * 60_000) {
+          lastAlert = Date.now();
+          await rt.notifier.discord(`⚠️ isobot runner cycle failing: ${lastCycleError.slice(0, 300)}`);
+        }
       }
+    }
+    awake.update(rt.pipeline.activeJobs.length > 0);
+    try { rotateLog(logFile); } catch { /* logging must never stop the runner */ }
+    try {
+      writeHeartbeat(rt.env.home, {
+        at: new Date().toISOString(), pid: process.pid, activeJobs: rt.pipeline.activeJobs,
+        queued: rt.store.inState("queued").length, buildsPausedUntil: rt.store.pausedUntil(),
+        manuallyPaused, lastTriageAt, lastCycleError,
+      });
     } catch (error) {
-      console.error("[runner] cycle failed:", (error as Error).message);
+      console.warn("[runner] heartbeat failed:", (error as Error).message);
     }
     await sleep(rt.config.pollSeconds * 1000);
   }
@@ -150,6 +189,13 @@ async function doctor(rt: Runtime): Promise<boolean> {
   } else console.log("➖ Discord triage disabled (set ISOBOT_PI_URL and ISOBOT_PI_TOKEN)");
   console.log(rt.env.imap ? `➖ Email triage enabled for ${rt.env.imap.user}` : "➖ Email triage disabled (set ISOBOT_IMAP_*)");
   console.log(rt.env.discordWebhookUrl ? "➖ Discord notifications enabled" : "➖ Discord notifications disabled (set ISOBOT_DISCORD_WEBHOOK_URL)");
+  report(existsSync("/usr/bin/sandbox-exec"), "Check sandbox (sandbox-exec) available");
+  const beat = readHeartbeat(rt.env.home);
+  const age = heartbeatAge(beat);
+  if (age === null) console.log("➖ Runner heartbeat: none yet (service not started?)");
+  else report(age < rt.config.pollSeconds * 3000, "Runner heartbeat", `${Math.round(age / 1000)}s ago${beat?.lastCycleError ? `, last error: ${beat.lastCycleError.slice(0, 120)}` : ""}`);
+  const pausedUntil = rt.store.pausedUntil();
+  if (pausedUntil) console.log(`⏸  Builds paused until ${pausedUntil} (Claude usage limit)`);
   console.log(`➖ State: ${rt.env.home}${existsSync(pausedFile(rt.env)) ? " (PAUSED)" : ""}`);
   return ok;
 }
@@ -190,11 +236,18 @@ async function main(): Promise<void> {
       console.log(JSON.stringify(report, null, 2));
       return;
     }
-    case "status":
+    case "status": {
+      const beat = readHeartbeat(rt.env.home);
+      const age = heartbeatAge(beat);
+      console.log(age === null ? "runner: no heartbeat (not running?)"
+        : `runner: ${age < rt.config.pollSeconds * 3000 ? "alive" : "STALE"} (heartbeat ${Math.round(age / 1000)}s ago)` +
+          `${beat!.activeJobs.length ? `, building ${beat!.activeJobs.join(", ")}` : ""}${beat!.queued ? `, ${beat!.queued} queued` : ""}` +
+          `${beat!.manuallyPaused ? ", PAUSED" : ""}${rt.store.pausedUntil() ? `, usage-limit pause until ${rt.store.pausedUntil()}` : ""}`);
       for (const job of rt.store.all(30)) {
-        console.log(`${job.updatedAt.slice(0, 16)}  ${job.state.padEnd(13)} ${job.id}  ${job.title}${job.prNumber ? `  PR #${job.prNumber}` : ""}${job.lastError ? `\n      ↳ ${job.lastError.split("\n")[0].slice(0, 160)}` : ""}`);
+        console.log(`${job.updatedAt.slice(0, 16)}  ${job.state.padEnd(13)} ${job.id}  ${job.title}${job.prNumber ? `  PR #${job.prNumber}` : ""}${job.notBefore && job.state === "queued" ? `  (retry after ${job.notBefore.slice(11, 16)})` : ""}${job.lastError ? `\n      ↳ ${job.lastError.split("\n")[0].slice(0, 160)}` : ""}`);
       }
       return;
+    }
     case "setup":
       for (const { owner, repo } of configuredRepos(rt.config)) {
         await rt.github.ensureLabels(owner, repo, rt.config.labels);

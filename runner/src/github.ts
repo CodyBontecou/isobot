@@ -50,6 +50,9 @@ export interface GitHubApi {
   viewer(): Promise<string>;
   defaultBranch(owner: string, repo: string): Promise<string>;
   issueComments(owner: string, repo: string, number: number): Promise<IssueComment[]>;
+  /** Who most recently added `label` to the issue, or null if no such event exists. */
+  labeledBy(owner: string, repo: string, number: number, label: string): Promise<string | null>;
+  isPublic(owner: string, repo: string): Promise<boolean>;
   issuesWithLabel(owner: string, repo: string, label: string): Promise<Issue[]>;
   openIssues(owner: string, repo: string, since?: string): Promise<Issue[]>;
   issue(owner: string, repo: string, number: number): Promise<Issue>;
@@ -69,9 +72,45 @@ export interface GitHubApi {
 export class GitHub implements GitHubApi {
   private octokit: Octokit;
   private branches = new Map<string, string>();
+  private visibility = new Map<string, boolean>();
 
-  constructor(token: string) {
+  constructor(token: string, sleep: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms))) {
     this.octokit = new Octokit({ auth: token, userAgent: "isobot-runner/0.1", request: { timeout: 30_000 } });
+    // Retry transient failures. Writes (create issue/PR/comment, merge) may have happened before a 5xx
+    // or a dropped connection, so they retry only when GitHub explicitly rate-limited the request.
+    this.octokit.hook.wrap("request", async (request, options) => {
+      const idempotent = !["POST", "PATCH", "PUT", "DELETE"].includes(String(options.method).toUpperCase());
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await request(options);
+        } catch (error) {
+          const status = (error as { status?: number }).status;
+          const headers = ((error as { response?: { headers?: Record<string, string> } }).response?.headers) ?? {};
+          const rateLimited = status === 429 || (status === 403 && (headers["x-ratelimit-remaining"] === "0" || Boolean(headers["retry-after"])));
+          const retryable = rateLimited || (idempotent && (status === undefined || status >= 500));
+          if (!retryable || attempt >= 3) throw error;
+          const reset = Number(headers["x-ratelimit-reset"]) * 1000 - Date.now();
+          const wait = Number(headers["retry-after"]) * 1000 || (Number.isFinite(reset) && reset > 0 ? reset : 2000 * 3 ** attempt);
+          if (wait > 120_000) throw error;
+          await sleep(wait);
+        }
+      }
+    });
+  }
+
+  async labeledBy(owner: string, repo: string, number: number, label: string): Promise<string | null> {
+    const events = await this.octokit.paginate(this.octokit.issues.listEvents, { owner, repo, issue_number: number, per_page: 100 });
+    const match = events.filter(e => e.event === "labeled" && (e as { label?: { name?: string } }).label?.name?.toLowerCase() === label.toLowerCase()).at(-1);
+    return match?.actor?.login ?? null;
+  }
+
+  async isPublic(owner: string, repo: string): Promise<boolean> {
+    const key = `${owner}/${repo}`.toLowerCase();
+    if (!this.visibility.has(key)) {
+      const { data } = await this.octokit.repos.get({ owner, repo });
+      this.visibility.set(key, !data.private);
+    }
+    return this.visibility.get(key)!;
   }
 
   async viewer(): Promise<string> {

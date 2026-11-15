@@ -12,6 +12,9 @@ export class FakeGitHub implements GitHubApi {
   merged: number[] = [];
   ci: CiState = "success";
   login = "owner";
+  /** Who added each label, by `owner/repo#n:label`; unset means the token owner. */
+  labelers = new Map<string, string>();
+  publicRepos = new Set<string>();
   private nextPull = 100;
 
   add(owner: string, repo: string, number: number, title: string, labels: string[], body = "Do the thing", author = "owner"): Issue {
@@ -31,6 +34,12 @@ export class FakeGitHub implements GitHubApi {
   }
 
   async viewer(): Promise<string> { return this.login; }
+  async labeledBy(owner: string, repo: string, number: number, label: string): Promise<string | null> {
+    const issue = this.issues.get(`${owner}/${repo}#${number}`);
+    if (!issue?.labels.includes(label)) return null;
+    return this.labelers.get(`${owner}/${repo}#${number}:${label}`) ?? this.login;
+  }
+  async isPublic(owner: string, repo: string): Promise<boolean> { return this.publicRepos.has(`${owner}/${repo}`); }
   async issueComments(owner: string, repo: string, number: number): Promise<IssueComment[]> {
     return this.comments.filter(c => c.key === `${owner}/${repo}#${number}`).map(c => ({ author: c.author ?? this.login, body: c.body }));
   }

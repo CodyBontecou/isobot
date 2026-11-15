@@ -247,6 +247,53 @@ test("a stop label on a human-merged PR skips the release step", async () => {
   assert.ok(!repo.calls.some(c => c.startsWith("checkout")));
 });
 
+test("only a trusted approver can start a build", async () => {
+  const { github, pipeline, store, builder } = setup();
+  github.add(OWNER, NAME, 30, "Sneaky", ["isobot:ready"]);
+  github.labelers.set(`${OWNER}/${NAME}#30:isobot:ready`, "collaborator");
+  await cycle(pipeline);
+  assert.equal(store.get("codybontecou/time.md#30"), null);
+  assert.equal(builder.implementCalls, 0);
+  assert.ok(!github.get(OWNER, NAME, 30).labels.includes("isobot:ready"));
+  assert.match(github.commentsFor(OWNER, NAME, 30)[0], /added by @collaborator/);
+});
+
+test("changes to CI workflows are never pushed", async () => {
+  const { github, pipeline, store, repo } = setup();
+  repo.diff_ = { files: [{ path: ".github/workflows/ci.yml", added: 3, removed: 0, binary: false }], changedLines: 3 };
+  github.add(OWNER, NAME, 31, "Speed up CI", ["isobot:ready"]);
+  await cycle(pipeline);
+  assert.equal(store.get("codybontecou/time.md#31")!.state, "failed");
+  assert.ok(!repo.calls.some(c => c.startsWith("push")));
+  assert.match(github.commentsFor(OWNER, NAME, 31).at(-1)!, /never pushes those/);
+});
+
+test("transient failures retry later instead of failing the issue", async () => {
+  const { github, pipeline, store, builder } = setup();
+  github.add(OWNER, NAME, 32, "Change", ["isobot:ready"]);
+  builder.implement = async () => { throw Object.assign(new Error("Service Unavailable"), { status: 503 }); };
+  await cycle(pipeline);
+  const job = store.get("codybontecou/time.md#32")!;
+  assert.equal(job.state, "queued");
+  assert.ok(job.notBefore && job.notBefore > new Date().toISOString(), "backs off before retrying");
+  assert.ok(!github.get(OWNER, NAME, 32).labels.includes("isobot:failed"));
+  assert.match(github.commentsFor(OWNER, NAME, 32).at(-1)!, /temporary problem/);
+  assert.deepEqual(pipeline.startQueued(), [], "not retried before the backoff");
+});
+
+test("a Claude usage limit pauses all builds without using up attempts", async () => {
+  const { github, pipeline, store, builder } = setup();
+  const { UsageLimitError } = await import("./errors.js");
+  github.add(OWNER, NAME, 33, "Change", ["isobot:ready"]);
+  github.add(OWNER, NAME, 34, "Other", ["isobot:ready"]);
+  builder.implement = async () => { throw new UsageLimitError("usage limit reached", 30 * 60_000); };
+  await pipeline.discover();
+  await Promise.all(pipeline.startQueued());
+  assert.ok(store.pausedUntil(), "builds are paused");
+  assert.equal(store.get("codybontecou/time.md#33")!.attempts, 0);
+  assert.deepEqual(pipeline.startQueued(), [], "nothing starts while paused");
+});
+
 test("GitHub CI failure blocks an automatic merge", async () => {
   const { github, pipeline } = setup(config => {
     config.repos[REPO] = { autonomy: "merge", checks: ["make test"] };
@@ -284,16 +331,16 @@ test("a human merge of a pr_open job triggers the release step", async () => {
   assert.ok(!github.get(OWNER, NAME, 17).labels.includes("isobot:review"));
 });
 
-test("recover re-queues interrupted builds and gives up after three attempts", async () => {
+test("recover re-queues interrupted builds and gives up after five attempts", async () => {
   const { github, pipeline, store } = setup();
   github.add(OWNER, NAME, 18, "Flaky", ["isobot:ready"]);
   await pipeline.discover();
-  store.update("codybontecou/time.md#18", { state: "building", attempts: 3 });
+  store.update("codybontecou/time.md#18", { state: "building", attempts: 5 });
   pipeline.recover();
   assert.equal(store.get("codybontecou/time.md#18")!.state, "queued");
   await Promise.all(pipeline.startQueued());
   assert.equal(store.get("codybontecou/time.md#18")!.state, "failed");
-  assert.match(store.get("codybontecou/time.md#18")!.lastError!, /gave up after 3/);
+  assert.match(store.get("codybontecou/time.md#18")!.lastError!, /gave up after 5/);
 });
 
 test("unconfigured repositories are never touched", async () => {

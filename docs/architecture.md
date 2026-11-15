@@ -49,7 +49,9 @@ Anyone can post in Discord or email you, so their words are data, never
 instructions:
 
 1. Triage reads untrusted content with **no tools** and outputs proposals only.
-2. Proposals never build until **you** add `isobot:ready`. Only tickets you
+   Proposals in public repositories never name or quote people.
+2. Proposals never build until **you** add `isobot:ready`; the runner checks
+   who added the label and ignores approvals from anyone else. Only tickets you
    create yourself (the owner-only `@isobot` mention) start as ready.
 3. For a proposal, builders get isobot's own vetted spec, not the reporter's
    text. Issues by anyone other than you (or `trustedAuthors`) can be built but
@@ -60,6 +62,10 @@ instructions:
    to the workspace and toolchain caches and can't read credential folders or
    runner state. The runner copies the builder's commit into its own clone,
    diffs and judges it there, and pushes that exact commit with git hooks off.
+   The runner's own checks (`npm test`, `xcodebuild test`…) execute
+   builder-written code, so they run under a macOS sandbox profile with the
+   same limits plus no keychain access. Changes to CI workflows are never
+   pushed, because a pushed branch's workflows run with repository secrets.
 5. Merge decisions are deterministic code (`runner/src/policy.ts`), not the
    model's opinion, and are re-checked right before merging. Policy lives in this
    repo, and agent instruction files (`CLAUDE.md`, `AGENTS.md`, `.claude/`) are
