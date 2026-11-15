@@ -1,7 +1,7 @@
 import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
 import type { Builder, TriageDecision, TriageItem } from "./builder.js";
-import { configuredRepos, type Environment, type RunnerConfig, type VoxConfig } from "./config.js";
+import { configuredRepos, type AppStoreConfig, type Environment, type RunnerConfig, type VoxConfig } from "./config.js";
 import type { GitHubApi } from "./github.js";
 import type { Notifier } from "./notify.js";
 import type { Store } from "./store.js";
@@ -255,6 +255,76 @@ export class VoxSource implements Source {
   }
 }
 
+interface FeedLabel { label?: string }
+interface FeedEntry {
+  id?: FeedLabel; title?: FeedLabel; content?: FeedLabel; updated?: FeedLabel;
+  author?: { name?: FeedLabel }; "im:rating"?: FeedLabel; "im:version"?: FeedLabel;
+}
+
+const REVIEW_CHARS = 3000;
+
+/**
+ * App Store reviews from Apple's public customer-reviews feed (newest 50 per storefront, no API
+ * key). The cursor per app and storefront is the highest review id seen; review ids only grow.
+ * First contact only records where to start, like the other sources.
+ */
+export class AppStoreSource implements Source {
+  name = "appstore";
+
+  constructor(private config: AppStoreConfig, private fetcher: typeof fetch = fetch) {}
+
+  async collect(store: Store): Promise<Collected> {
+    const items: TriageItem[] = [];
+    const cursors: Record<string, string> = {};
+    const jobs = Object.entries(this.config.apps).flatMap(([app, repo]) => this.config.countries.map(country => ({ app, repo, country })));
+    await Promise.all(jobs.map(async ({ app, repo, country }) => {
+      const key = `appstore:${app}:${country}`;
+      const cursor = store.cursor(key);
+      let entries: FeedEntry[];
+      try {
+        entries = await this.reviews(app, country);
+      } catch (error) {
+        console.warn(`[triage] appstore ${app}/${country}: ${(error as Error).message}`);
+        return;
+      }
+      const ids = entries.map(e => e.id?.label ?? "").filter(id => /^\d+$/.test(id));
+      const newest = ids.reduce((max, id) => (BigInt(id) > BigInt(max) ? id : max), cursor ?? "0");
+      if (newest !== cursor) cursors[key] = newest;
+      if (cursor === null) return;
+      for (const entry of entries) {
+        const reviewId = entry.id?.label ?? "";
+        if (!/^\d+$/.test(reviewId) || BigInt(reviewId) <= BigInt(cursor)) continue;
+        const id = `appstore:${reviewId}`;
+        if (store.isSeen("triage", id)) continue;
+        const rating = Number(entry["im:rating"]?.label);
+        const meta = [`${rating}/5 stars`, entry["im:version"]?.label && `version ${entry["im:version"].label}`, country.toUpperCase(), entry.updated?.label].filter(Boolean).join(", ");
+        items.push({
+          id, source: "appstore", repo, rating,
+          url: `https://apps.apple.com/${country}/app/id${app}?see-all=reviews`,
+          author: entry.author?.name?.label ?? "App Store reviewer",
+          text: `[App Store review, ${meta}]\n\n${entry.title?.label ?? ""}\n\n${(entry.content?.label ?? "").slice(0, REVIEW_CHARS)}`,
+        });
+      }
+    }));
+    items.sort((a, b) => (BigInt(a.id.split(":")[1]) < BigInt(b.id.split(":")[1]) ? -1 : 1));
+    return { items, cursors };
+  }
+
+  private async reviews(app: string, country: string): Promise<FeedEntry[]> {
+    const response = await this.fetcher(`https://itunes.apple.com/${country}/rss/customerreviews/page=1/id=${app}/sortby=mostrecent/json`, {
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const feed = (await response.json() as { feed?: { entry?: FeedEntry | FeedEntry[] } }).feed;
+    const entries = feed?.entry === undefined ? [] : Array.isArray(feed.entry) ? feed.entry : [feed.entry];
+    // Older feed versions put the app itself first; it has no rating.
+    return entries.filter(entry => entry["im:rating"]);
+  }
+}
+
 export interface TriageDeps {
   config: RunnerConfig;
   store: Store;
@@ -334,9 +404,12 @@ export async function triage(deps: TriageDeps): Promise<TriageReport> {
   deps.store.event(null, "triage", `${items.length} items, ${proposals.length} proposals`);
   const result = { digest: digests.join("\n\n") };
 
+  const lowReviews = items.filter(item => item.source === "appstore" && (item.rating ?? 5) <= 2);
   const lines = [
     `🗂 **isobot triage**: ${items.length} new item${items.length === 1 ? "" : "s"}, ${proposals.length} proposal${proposals.length === 1 ? "" : "s"}.`,
     ...proposals.map(p => `• ${p.approved ? "🏗 " : ""}${p.title} <${p.url}>`),
+    ...(lowReviews.length ? [`⚠️ ${lowReviews.length} App Store review${lowReviews.length === 1 ? "" : "s"} at 2 stars or fewer:`] : []),
+    ...lowReviews.map(r => `• ${"★".repeat(r.rating ?? 0)} ${r.repo}: ${r.text.split("\n\n")[1]?.slice(0, 80) || "(no title)"} <${r.url}>`),
     ...(proposals.some(p => p.approved) ? [`🏗 = auto-approved from your Vox.md notes and queued to build; add \`${labels.stop}\` to cancel one.`] : []),
     ...(proposals.some(p => !p.approved) ? [`Add \`${labels.ready}\` to a proposal to have isobot build it.`] : []),
     result.digest,
@@ -368,7 +441,9 @@ async function propose(deps: TriageDeps, decision: TriageDecision, item: TriageI
   // Public repos never get who said it; email links and senders never leave the runner.
   const who = isPublic ? "" : ` from ${item.author}`;
   const link = item.url && item.source !== "email" ? `: ${item.url}` : "";
-  const source = item.source === "vox" ? "\n\n**Source:** the owner's Vox.md voice note" : `\n\n**Source:** ${item.source} message${who}${link}`;
+  const source = item.source === "vox" ? "\n\n**Source:** the owner's Vox.md voice note"
+    : item.source === "appstore" ? `\n\n**Source:** App Store review (${item.rating}/5 stars)${link}`
+    : `\n\n**Source:** ${item.source} message${who}${link}`;
   const issue = await deps.github.createIssue(owner, repo, decision.title, `${decision.spec}${source}${footer}`,
     [approved ? labels.ready : labels.proposed, ...(kindLabel ? [kindLabel] : [])]);
   return { title: decision.title, url: issue.url, approved };

@@ -15,7 +15,7 @@ import { killAllChildren, run, setGitIdentity } from "./proc.js";
 import { sandboxProfile } from "./sandbox.js";
 import { ensureShims } from "./shims.js";
 import { Store } from "./store.js";
-import { DiscordSource, EmailSource, GitHubSource, VoxSource, triage, type Source } from "./triage.js";
+import { AppStoreSource, DiscordSource, EmailSource, GitHubSource, VoxSource, triage, type Source } from "./triage.js";
 
 function loadEnvFiles(): void {
   const home = process.env.ISOBOT_HOME ?? path.join(process.env.HOME ?? "", "Library", "Application Support", "isobot");
@@ -73,6 +73,7 @@ function runtime(): Runtime {
   if (env.piUrl && env.piToken) sources.push(new DiscordSource(env.piUrl, env.piToken, lowerKeys(config.discordCategories)));
   if (env.piUrl && env.piToken && config.vox) sources.push(new VoxSource(env.piUrl, env.piToken, config.vox.conversation));
   if (env.imap) sources.push(new EmailSource(env.imap));
+  if (config.appStore) sources.push(new AppStoreSource(config.appStore));
   return { config, env, store, github, pipeline, sources, builder, notifier };
 }
 
@@ -195,6 +196,12 @@ async function doctor(rt: Runtime): Promise<boolean> {
       `${response ? `HTTP ${response.status}` : "unreachable"}; ${rt.config.vox.autoApprove ? "auto-approves confident proposals" : "proposals wait for approval"}`);
     await response?.body?.cancel();
   } else console.log("➖ Vox.md triage disabled (set vox in the runner config, plus ISOBOT_PI_URL and ISOBOT_PI_TOKEN)");
+  if (rt.config.appStore) {
+    const [app] = Object.keys(rt.config.appStore.apps);
+    const response = await fetch(`https://itunes.apple.com/us/rss/customerreviews/page=1/id=${app}/sortby=mostrecent/json`, { signal: AbortSignal.timeout(20_000) }).catch(() => null);
+    await response?.body?.cancel();
+    report(Boolean(response?.ok), `App Store reviews for ${Object.keys(rt.config.appStore.apps).length} apps in ${rt.config.appStore.countries.length} storefronts`, response ? `HTTP ${response.status}` : "unreachable");
+  } else console.log("➖ App Store review triage disabled (set appStore in the runner config)");
   console.log(rt.env.imap ? `➖ Email triage enabled for ${rt.env.imap.user}` : "➖ Email triage disabled (set ISOBOT_IMAP_*)");
   console.log(rt.env.discordWebhookUrl ? "➖ Discord notifications enabled" : "➖ Discord notifications disabled (set ISOBOT_DISCORD_WEBHOOK_URL)");
   report(existsSync("/usr/bin/sandbox-exec"), "Check sandbox (sandbox-exec) available");

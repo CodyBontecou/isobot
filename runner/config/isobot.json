@@ -38,6 +38,36 @@
     "maxProposalsPerNote": 3,
     "hints": "\"Vox\", \"box\", \"boxing\" or \"Voxboard\" = Vox.md (codybontecou/vox.md); \"Health and D\" or \"health MD\" = Health.md (codybontecou/health-md); \"time MD\" = time.md; \"where day\", \"iso me\" = whereday; \"git sync\" or \"sync MD\" = GitSync.md; \"insta reply\" = Instarep.ly."
   },
+  "appStore": {
+    "apps": {
+      "6757763969": "codybontecou/health-md",
+      "6758960270": "codybontecou/GitSync.md",
+      "6754865693": "codybontecou/Instarep.ly",
+      "6761960794": "codybontecou/whereday",
+      "6758967337": "codybontecou/vox.md"
+    },
+    "countries": [
+      "us",
+      "gb",
+      "ca",
+      "au",
+      "nz",
+      "ie",
+      "de",
+      "fr",
+      "es",
+      "it",
+      "nl",
+      "se",
+      "ch",
+      "at",
+      "jp",
+      "kr",
+      "br",
+      "mx",
+      "in"
+    ]
+  },
   "defaults": {
     "autonomy": "pr",
     "checks": [],

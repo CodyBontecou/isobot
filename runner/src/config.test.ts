@@ -57,3 +57,14 @@ test("vox config is validated", () => {
   assert.throws(() => validateConfig({ ...ok, vox: { conversation: "isobot", autoApprove: true, minAutoApproveConfidence: 0 } }), /minAutoApproveConfidence/);
   assert.throws(() => validateConfig({ ...ok, vox: { conversation: "isobot", autoApprove: true, maxProposalsPerNote: 0 } }), /maxProposalsPerNote/);
 });
+
+test("App Store config is validated", () => {
+  const config = loadConfig();
+  assert.equal(config.appStore?.apps["6758960270"], "codybontecou/GitSync.md");
+  const ok = { ...config, appStore: { apps: { "123456": "codybontecou/vox.md" }, countries: ["us"] } } as RunnerConfig;
+  assert.doesNotThrow(() => validateConfig(ok));
+  assert.throws(() => validateConfig({ ...ok, appStore: { apps: {}, countries: ["us"] } }), /at least one app/);
+  assert.throws(() => validateConfig({ ...ok, appStore: { apps: { "vox": "codybontecou/vox.md" }, countries: ["us"] } }), /numeric App Store id/);
+  assert.throws(() => validateConfig({ ...ok, appStore: { apps: { "123456": "vox.md" }, countries: ["us"] } }), /owner\/repo/);
+  assert.throws(() => validateConfig({ ...ok, appStore: { apps: { "123456": "codybontecou/vox.md" }, countries: ["USA"] } }), /country codes/);
+});

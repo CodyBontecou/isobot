@@ -3,7 +3,7 @@
 The runner is isobot's always-on worker. It claims approved GitHub issues,
 builds them with Claude Code in isolated git worktrees, verifies and reviews the
 result, opens a PR, merges when policy allows, runs release steps, and triages
-new Discord, GitHub and email activity into proposals. Design:
+new Discord, GitHub, email and App Store review activity into proposals. Design:
 [architecture.md](architecture.md).
 
 ## What happens to an issue
@@ -116,6 +116,19 @@ ones wait as `isobot:proposed`. Only the `vox` source can self-approve, and repo
 autonomy still decides whether a PR merges. Add `isobot:stop` to cancel one.
 Because the conversation exists only for isobot, the first pass takes notes that
 were already there. Notes arrive at the next triage pass (`triageMinutes`).
+
+## App Store reviews
+
+`appStore` in `runner/config/isobot.json` maps App Store app ids to repositories and lists the
+storefronts to read. Each triage pass reads Apple's public customer-reviews feed (newest 50 per
+storefront; no App Store Connect key), so only reviews with written text show up, not bare star
+ratings. The first pass only records where each storefront stands; after that every new review goes
+to triage. Reviews of 3 stars or fewer, or any review describing a bug, crash or missing feature,
+become proposals when they are concrete enough to act on; the Discord digest also lists every
+review of 2 stars or fewer. Proposals in public repos never name the reviewer.
+
+To add an app, find its id in its `apps.apple.com/.../id<digits>` link and add it under
+`appStore.apps`. Replying to reviews would need an App Store Connect API key; the runner doesn't do it.
 
 ## Builder sandbox
 

@@ -57,8 +57,17 @@ export interface RunnerConfig {
   discordCategories: Record<string, string>;
   /** The owner's Vox.md captures, posted by a Vox HTTP preset to one Pi conversation. */
   vox?: VoxConfig;
+  /** App Store reviews to triage, read from Apple's public customer-reviews feed (no API key). */
+  appStore?: AppStoreConfig;
   defaults: RepoPolicy;
   repos: Record<string, Partial<RepoPolicy>>;
+}
+
+export interface AppStoreConfig {
+  /** App Store app id (the digits in apps.apple.com/app/id…) → owner/repo. */
+  apps: Record<string, string>;
+  /** Storefronts to read, as lowercase two-letter country codes. The feed is per storefront. */
+  countries: string[];
 }
 
 export interface VoxConfig {
@@ -121,6 +130,16 @@ export function validateConfig(config: RunnerConfig): void {
     if (min !== undefined && !(min > 0 && min <= 1)) fail("vox.minAutoApproveConfidence must be in (0, 1]");
     const most = config.vox.maxProposalsPerNote;
     if (most !== undefined && !(Number.isInteger(most) && most >= 1 && most <= 10)) fail("vox.maxProposalsPerNote must be 1-10");
+  }
+  if (config.appStore) {
+    const apps = Object.entries(config.appStore.apps ?? {});
+    if (apps.length === 0) fail("appStore.apps must list at least one app");
+    for (const [id, repo] of apps) {
+      if (!/^\d{6,12}$/.test(id)) fail(`appStore.apps key ${id} must be a numeric App Store id`);
+      if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) fail(`appStore.apps.${id} must be owner/repo`);
+    }
+    const countries = config.appStore.countries ?? [];
+    if (countries.length === 0 || countries.some(c => !/^[a-z]{2}$/.test(c))) fail("appStore.countries must be lowercase two-letter country codes");
   }
   for (const [name, partial] of Object.entries(config.repos ?? {})) {
     if (!/^[\w.-]+\/[\w.-]+$/.test(name)) fail(`repo key ${name} must be owner/repo`);

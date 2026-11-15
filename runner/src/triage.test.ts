@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { loadConfig } from "./config.js";
 import { Notifier } from "./notify.js";
 import { Store } from "./store.js";
-import { DiscordSource, GitHubSource, triage, VoxSource } from "./triage.js";
+import { AppStoreSource, DiscordSource, GitHubSource, triage, VoxSource } from "./triage.js";
 import { FakeBuilder, FakeGitHub } from "./testing.js";
 
 const channels = [
@@ -279,4 +279,57 @@ test("autoApprove off keeps Vox proposals waiting, and one note yields at most m
   assert.deepEqual(report.proposals.map(p => p.title), ["Change 1", "Change 2"]);
   assert.ok(report.proposals.every(p => !p.approved));
   assert.deepEqual(github.get("codybontecou", "vox.md", 1).labels, ["isobot:proposed", "bug"]);
+});
+
+function review(id: number, rating: number, title: string) {
+  return {
+    id: { label: String(id) }, title: { label: title }, content: { label: `${title} body` }, updated: { label: "2026-11-15T10:00:00-07:00" },
+    author: { name: { label: "reviewer" } }, "im:rating": { label: String(rating) }, "im:version": { label: "2.5.4" },
+  };
+}
+
+function fakeFeed(feeds: Record<string, unknown[]>, failing = new Set<string>()) {
+  const requests: string[] = [];
+  const fetcher = (async (url: string) => {
+    requests.push(url);
+    const [, country, app] = url.match(/itunes\.apple\.com\/(\w\w)\/rss\/customerreviews\/page=1\/id=(\d+)\/sortby=mostrecent\/json$/)!;
+    if (failing.has(`${app}:${country}`)) return new Response("busy", { status: 503 });
+    const entries = feeds[`${app}:${country}`] ?? [];
+    // Apple returns a single entry as an object rather than an array.
+    return Response.json({ feed: entries.length === 0 ? {} : { entry: entries.length === 1 ? entries[0] : entries } });
+  }) as typeof fetch;
+  return { fetcher, requests };
+}
+
+test("App Store source records a starting point, then returns only newer reviews per storefront", async () => {
+  const store = new Store(":memory:");
+  const feeds: Record<string, unknown[]> = { "123456:us": [review(10, 5, "Great")], "123456:gb": [] };
+  const { fetcher } = fakeFeed(feeds);
+  const source = new AppStoreSource({ apps: { "123456": "codybontecou/vox.md" }, countries: ["us", "gb"] }, fetcher);
+
+  const first = await source.collect(store);
+  assert.deepEqual(first.items, [], "first contact only records where to start");
+  assert.deepEqual(first.cursors, { "appstore:123456:us": "10", "appstore:123456:gb": "0" });
+  for (const [key, value] of Object.entries(first.cursors)) store.setCursor(key, value);
+
+  feeds["123456:us"] = [{ "im:name": { label: "the app itself" } }, review(12, 1, "Crashes on launch"), review(11, 4, "Nice"), review(10, 5, "Great")];
+  feeds["123456:gb"] = [review(9, 2, "Sync lost my notes")];
+  const second = await source.collect(store);
+  assert.deepEqual(second.items.map(i => [i.id, i.rating, i.repo]), [
+    ["appstore:9", 2, "codybontecou/vox.md"], ["appstore:11", 4, "codybontecou/vox.md"], ["appstore:12", 1, "codybontecou/vox.md"],
+  ], "a storefront with no reviews yet counts every later review; the app entry is skipped");
+  const crash = second.items.find(i => i.id === "appstore:12")!;
+  assert.equal(crash.url, "https://apps.apple.com/us/app/id123456?see-all=reviews");
+  assert.equal(crash.text, "[App Store review, 1/5 stars, version 2.5.4, US, 2026-11-15T10:00:00-07:00]\n\nCrashes on launch\n\nCrashes on launch body");
+  assert.deepEqual(second.cursors, { "appstore:123456:us": "12", "appstore:123456:gb": "9" });
+});
+
+test("an App Store storefront that fails keeps its cursor and doesn't stop the others", async () => {
+  const store = new Store(":memory:");
+  store.setCursor("appstore:123456:us", "5");
+  store.setCursor("appstore:123456:de", "5");
+  const { fetcher } = fakeFeed({ "123456:de": [review(6, 3, "Missing export")] }, new Set(["123456:us"]));
+  const result = await new AppStoreSource({ apps: { "123456": "codybontecou/vox.md" }, countries: ["us", "de"] }, fetcher).collect(store);
+  assert.deepEqual(result.items.map(i => i.id), ["appstore:6"]);
+  assert.deepEqual(result.cursors, { "appstore:123456:de": "6" });
 });
