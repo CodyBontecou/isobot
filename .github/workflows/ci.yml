@@ -15,8 +15,7 @@ concurrency:
 
 jobs:
   test:
-    # macOS so the check-sandbox tests (sandbox-exec) run instead of skipping.
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
@@ -41,3 +40,24 @@ jobs:
           npm run bridge:typecheck
       - name: Test
         run: npm test
+
+  # The check-sandbox tests need sandbox-exec, so they skip on Linux; run them here.
+  # macOS runners can queue for a long time, so this job is kept small.
+  sandbox:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: runner/package-lock.json
+      - run: npm ci --prefix runner
+      - name: Sandbox tests
+        working-directory: runner
+        run: |
+          set -o pipefail
+          node --import tsx --test src/sandbox.test.ts 2>&1 | tee sandbox.log
+          # On macOS these must actually run; a skip would hide a broken sandbox.
+          grep -q "^ℹ skipped 0$" sandbox.log
