@@ -1,0 +1,43 @@
+name: CI
+
+# Guards the runner's merge policy, the bridge and the Pi Worker. No secrets are used or needed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # macOS so the check-sandbox tests (sandbox-exec) run instead of skipping.
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            runner/package-lock.json
+            cloudflare/package-lock.json
+            bridge/package-lock.json
+      - run: npm ci
+      - run: npm ci --prefix runner
+      - run: npm ci --prefix cloudflare
+      - run: npm ci --prefix bridge
+      - name: Typecheck
+        run: |
+          npm run typecheck
+          npm run runner:typecheck
+          npm run agent:typecheck
+          npm run bridge:typecheck
+      - name: Test
+        run: npm test

@@ -85,9 +85,11 @@ Per repository in `runner/config/isobot.json`:
   automatically when every gate passes.
 - Gates for an automatic merge: configured runner checks pass; the independent
   reviewer approves with confidence ≥ `minReviewConfidence` and not high risk;
-  the diff is under `maxChangedLines`; no protected paths (auth, purchases,
-  entitlements, Info.plist, CI, migrations…); no net deletion of test lines; no
-  stop label; issue unchanged and written by a trusted author; GitHub CI green
+  the diff is under `maxChangedLines`; no protected paths (auth, sign-in,
+  credentials, purchases, paywalls, entitlements, Info.plist, CI, migrations…,
+  matched as folders and as file names); no net deletion of test lines and no
+  new skip/ignore/focus markers (`it.skip`, `XCTSkip`, `-skip-testing`,
+  `@Ignore`…) in any file; no stop label; issue unchanged and written by a trusted author; GitHub CI green
   when `requireCi` (a PR with no CI at all counts as not green, so set
   `requireCi: false` for repos without CI).
 - `merge` is rejected by the config loader unless the repo has check commands.
@@ -97,6 +99,22 @@ Per repository in `runner/config/isobot.json`:
 
 Start every repository at `pr`. Promote one to `merge` once its checks are
 trustworthy and a run of isobot PRs needed no changes from you.
+
+## Path to full autonomy
+
+Each step widens what merges without you, so take them in order:
+
+1. Gates you can trust: every merge repo has runner checks that exercise
+   behaviour, not just a build, and this repo's own CI (`.github/workflows/ci.yml`)
+   guards the policy code.
+2. Someone notices when isobot stops: set `ISOBOT_HEARTBEAT_URL` (runner.md).
+3. The real isolation boundary: run the runner as the dedicated `isobot` user on
+   the Mac mini (below), not your personal account.
+4. Promote repositories one at a time: `ownerAutonomy: "merge"`, then `autonomy:
+   "merge"` once a run of isobot PRs needed nothing from you. Repos without
+   tests (Instarep.ly) or runner checks (time.md) stay at `pr` until they have them.
+5. Last: `release.onShip` without the ship label. Keep the App Store step manual
+   until the release train has shipped cleanly for a while.
 
 ## Models
 

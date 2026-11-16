@@ -1,11 +1,14 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { removeDerivedData } from "./cleanup.js";
+import { skipMarkers } from "./policy.js";
 import { run, workerEnv, type RunResult } from "./proc.js";
 
 export interface DiffStat {
   files: { path: string; added: number; removed: number; binary: boolean }[];
   changedLines: number;
+  /** Test-disabling markers the change adds on net (see policy.ts skipMarkers). */
+  skipMarkers?: { path: string; marker: string }[];
 }
 
 /** Binary changes can't be counted in lines; weigh them heavily so they can't slip under size limits. */
@@ -137,7 +140,13 @@ export class Repo {
       const binary = added === "-";
       return { path: rest.join("\t"), added: binary ? 0 : Number(added), removed: binary ? 0 : Number(removed), binary };
     });
-    return { files, changedLines: files.reduce((sum, f) => sum + (f.binary ? BINARY_FILE_WEIGHT : f.added + f.removed), 0) };
+    // Unbounded on purpose: a skip hidden past a truncation point must still block the merge.
+    const patch = await run("git", [...SAFE, "diff", "--no-renames", "--unified=0", "--no-color", baseSha, sha], { cwd: this.barePath, env: workerEnv(), maxBytes: 64 * 1024 * 1024 });
+    return {
+      files,
+      changedLines: files.reduce((sum, f) => sum + (f.binary ? BINARY_FILE_WEIGHT : f.added + f.removed), 0),
+      skipMarkers: skipMarkers(patch.stdout),
+    };
   }
 
   async diff(baseSha: string, sha: string, maxBytes = 150_000): Promise<string> {

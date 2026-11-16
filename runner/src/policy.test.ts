@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { RepoPolicy } from "./config.js";
-import { evaluateGate, matchesGlob, type GateInput } from "./policy.js";
+import path from "node:path";
+import { loadConfig, type RepoPolicy } from "./config.js";
+import { evaluateGate, matchesGlob, skipMarkers, type GateInput } from "./policy.js";
 
 const policy: RepoPolicy = {
   autonomy: "merge", checks: ["npm test"], protectedPaths: [".github/**", "**/*auth*/**", "**/Info.plist"],
@@ -65,4 +66,62 @@ test("every gate blocks on its own", () => {
 test("adding tests is not treated as weakening them", () => {
   const decision = evaluateGate(input({ diff: { files: [{ path: "AppTests/NewTests.swift", added: 30, removed: 2, binary: false }], changedLines: 32 } }));
   assert.equal(decision.merge, true);
+});
+
+test("the default protected paths cover auth, purchase and credential files, not just folders", () => {
+  const globs = loadConfig(path.join(import.meta.dirname, "..", "config", "isobot.json")).defaults.protectedPaths;
+  const isProtected = (file: string) => globs.some(glob => matchesGlob(file, glob));
+  for (const file of [
+    "Sources/AuthManager.swift", "App/PurchaseManager.swift", "IsoMe/Services/StoreManager.swift",
+    "Sync.md/Services/OAuthService.swift", "Sync.md/Services/KeychainService.swift", "cloudflare/src/account-auth.ts",
+    "ios/Isobot/App/GitHubSignIn.swift", "ios/Isobot/App/CredentialStore.swift", "src/auth.ts",
+    "android/app/src/main/kotlin/x/billing/BillingGateway.kt", "InstaReply/PaywallView.swift",
+    "Sync.md/Services/AppUnlock.swift", "app/src/main/AndroidManifest.xml", "App/PrivacyInfo.xcprivacy",
+    "App/HealthAuthorizationView.swift", "LoginScreen.kt",
+  ]) assert.ok(isProtected(file), `${file} should be protected`);
+  for (const file of [
+    "src/view.swift", "HealthProviderCaptureAuthority.kt", "CaptureDateTokenValues.swift", "docs/authors.md", "src/github.ts",
+  ]) assert.ok(!isProtected(file), `${file} should not be protected`);
+});
+
+function patch(file: string, lines: string): string {
+  return `diff --git a/${file} b/${file}\nindex 1..2 100644\n--- a/${file}\n+++ b/${file}\n@@ -1,0 +1,1 @@\n${lines}\n`;
+}
+
+test("skip markers: adding one anywhere counts, moving or removing one doesn't", () => {
+  const added = [
+    ["src/a.test.ts", `+  it.skip("flaky", () => {});`],
+    ["src/b.test.ts", `+test("x", { skip: true }, () => {});`],
+    ["src/c.spec.ts", `+  describe.only("focus", () => {});`],
+    ["src/d.spec.ts", `+  xit("later", () => {});`],
+    ["AppTests/LoginTests.swift", `+    throw XCTSkip("simulator")`],
+    ["AppTests/NewTests.swift", `+  @Test("sync", .disabled("broken")) func f() {}`],
+    ["scripts/test-ios.sh", `+xcodebuild test -skip-testing:AppTests/StoreTests`],
+    ["app/src/test/FooTest.kt", `+    @Ignore`],
+    ["tests/test_x.py", `+@pytest.mark.skip(reason="no")`],
+    ["src/lib.rs", `+#[ignore]`],
+    ["pkg/x_test.go", `+\tt.Skip("later")`],
+  ];
+  for (const [file, line] of added) assert.equal(skipMarkers(patch(file, line)).length, 1, `${file}: ${line}`);
+  assert.deepEqual(skipMarkers(patch("src/a.test.ts", `-  it.skip("flaky", () => {});\n+  it.skip("flaky (renamed)", () => {});`)), []);
+  assert.deepEqual(skipMarkers(patch("src/a.test.ts", `-  it.skip("flaky", () => {});`)), []);
+  assert.deepEqual(skipMarkers(patch("src/view.ts", `+  const skipped = items.filter(i => i.skipped);`)), []);
+  assert.deepEqual(skipMarkers(patch("App/View.swift", `+    image.fit(in: rect)`)), [], "fit( is only a focus marker in JavaScript");
+  assert.deepEqual(skipMarkers(patch("src/layout.ts", `+  layout.fit(rect)`)), [], "a method named fit isn't fit()");
+  assert.deepEqual(skipMarkers(patch("App/Sync.kt", `+  val opts = Options(skip: true)`)), []);
+  assert.deepEqual(skipMarkers(patch("App/Views/Save.swift", `+        .disabled(isSaving)`)), [], "SwiftUI's .disabled modifier");
+  assert.deepEqual(skipMarkers(patch("docs/testing.md", `+Run with -skip-testing:AppTests/Slow`)), [], "docs don't run");
+  const created = `diff --git a/t/new.test.ts b/t/new.test.ts\nnew file mode 100644\nindex 0..1\n--- /dev/null\n+++ b/t/new.test.ts\n@@ -0,0 +1 @@\n+it.skip("later", () => {});\n`;
+  assert.deepEqual(skipMarkers(created), [], "a new file disables nothing that existed");
+  // A content line that happens to look like a file header is still content.
+  assert.equal(skipMarkers(patch("db/q.sql", `--- comment\n+++ x\n+-- it.skip( in sql`)).length, 1);
+});
+
+test("a change that adds a skip marker leaves the merge to a human", () => {
+  const decision = evaluateGate(input({ diff: {
+    files: [{ path: "src/x.test.ts", added: 1, removed: 1, binary: false }], changedLines: 2,
+    skipMarkers: [{ path: "src/x.test.ts", marker: "skip/only/todo" }],
+  } }));
+  assert.equal(decision.merge, false);
+  assert.match(decision.reasons.join(";"), /disables or narrows tests: skip\/only\/todo in src\/x.test.ts/);
 });

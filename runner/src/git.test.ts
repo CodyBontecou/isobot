@@ -120,3 +120,14 @@ test("media goes on an isobot/media branch, one commit per publish, older links 
   assert.equal(git(origin, "show", `${commit}:7/20261116T120000-abc/01-after.png`), "png-bytes");
   assert.equal(git(origin, "ls-tree", "-r", "--name-only", tip), "8/20261116T130000-def/x.png", "each commit holds only its own files");
 });
+
+test("diff stats report test-skipping markers the change adds", async () => {
+  const { repo } = fixture();
+  const base = await repo.sync("main");
+  const dir = await repo.createWorkspace("isobot/3-skip", base);
+  writeFileSync(path.join(dir, "ci", "deploy.yml"), "run: echo deploy\nrun: xcodebuild test -skip-testing:AppTests\n");
+  writeFileSync(path.join(dir, "README.md"), "hello\nno skips here\n");
+  await repo.commitPending(dir, "skip a test");
+  const stat = await repo.diffStat(base, await repo.capture(dir, "isobot/3-skip"));
+  assert.deepEqual(stat.skipMarkers, [{ path: "ci/deploy.yml", marker: "-skip-testing" }]);
+});

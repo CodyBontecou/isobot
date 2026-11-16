@@ -57,6 +57,21 @@ export function readHeartbeat(home: string): Heartbeat | null {
 }
 
 /** Whether a heartbeat is recent enough to believe the runner is alive and cycling. */
+/**
+ * Pings an external dead-man's switch (healthchecks.io, Better Stack, Cronitor…). Only healthy
+ * cycles ping, so a runner that is down, asleep, offline or failing every cycle all look the same
+ * from outside: the pings stop and that service alerts. Never throws.
+ */
+export async function pingHeartbeat(url: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
+  try {
+    const response = await fetchImpl(url, { method: "POST", signal: AbortSignal.timeout(10_000) });
+    await response.body?.cancel();
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 export function heartbeatAge(beat: Heartbeat | null, now = Date.now()): number | null {
   return beat ? now - Date.parse(beat.at) : null;
 }
