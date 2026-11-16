@@ -126,10 +126,9 @@
     "codybontecou/health-md": {
       "checks": [
         "make test-contracts",
-        "make -C apps/apple prepare-healthmd-core-rust",
-        "xcodebuild build-for-testing -project apps/apple/HealthMd.xcodeproj -scheme HealthMd -destination 'generic/platform=iOS Simulator' -quiet CODE_SIGNING_ALLOWED=NO"
+        "make -C apps/apple prepare-healthmd-core-rust"
       ],
-      "notes": "Monorepo: Apple app under apps/apple (HealthMd.xcodeproj), Android under apps/android, Rust core and CLI. PR CI only runs scripts/ci/run.py; the runner compiles the iOS app and its tests; the full Apple CI runs at release."
+      "notes": "Monorepo: Apple app under apps/apple (HealthMd.xcodeproj, scheme HealthMd), Android under apps/android, Rust core and CLI. PR CI only runs scripts/ci/run.py. Before finishing, build the iOS app and its tests yourself (make -C apps/apple prepare-healthmd-core-rust, then xcodebuild build-for-testing -project apps/apple/HealthMd.xcodeproj -scheme HealthMd -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO); the full Apple CI runs at release."
     },
     "codybontecou/GitSync.md": {
       "checks": [
