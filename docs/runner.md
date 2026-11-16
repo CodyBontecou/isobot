@@ -97,6 +97,11 @@ from that channel.
 - **Claude Code signed out**: treated as temporary; `doctor` says so.
 - **Crash or reboot**: launchd restarts the runner; interrupted builds start
   again from a clean workspace.
+- **The whole Mac goes away** (asleep, offline, powered off): set
+  `ISOBOT_HEARTBEAT_URL` to a dead-man's switch such as a healthchecks.io check
+  that alerts to Discord. The runner POSTs to it after every healthy cycle, so
+  silence (including a cycle that fails every time) raises the alert. `doctor`
+  sends a test ping.
 - **Sleep**: while a build runs the runner holds a `caffeinate` assertion, so
   the Mac doesn't idle-sleep mid-build.
 

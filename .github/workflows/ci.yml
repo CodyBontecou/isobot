@@ -1,0 +1,63 @@
+name: CI
+
+# Guards the runner's merge policy, the bridge and the Pi Worker. No secrets are used or needed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            runner/package-lock.json
+            cloudflare/package-lock.json
+            bridge/package-lock.json
+      - run: npm ci
+      - run: npm ci --prefix runner
+      - run: npm ci --prefix cloudflare
+      - run: npm ci --prefix bridge
+      - name: Typecheck
+        run: |
+          npm run typecheck
+          npm run runner:typecheck
+          npm run agent:typecheck
+          npm run bridge:typecheck
+      - name: Test
+        run: npm test
+
+  # The check-sandbox and shell-tool tests need sandbox-exec, so they skip on Linux; run them here.
+  # macOS runners can queue for a long time, so this job is kept small.
+  sandbox:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: runner/package-lock.json
+      - run: npm ci --prefix runner
+      - name: Sandbox tests
+        working-directory: runner
+        run: |
+          set -o pipefail
+          node --import tsx --test src/sandbox.test.ts src/mcp.test.ts 2>&1 | tee sandbox.log
+          # On macOS these must actually run; a skip would hide a broken sandbox.
+          grep -q "^ℹ skipped 0$" sandbox.log

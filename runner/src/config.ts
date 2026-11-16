@@ -149,6 +149,8 @@ export interface Environment {
   /** Mailboxes to triage, from ISOBOT_IMAP_* and ISOBOT_IMAP_*_2 … _9. */
   imap: ImapAccount[];
   claudeBin: string;
+  /** Dead-man's-switch URL pinged after each healthy cycle, so an outside service notices a dead runner. */
+  heartbeatUrl?: string;
 }
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -291,6 +293,8 @@ export function loadEnvironment(env: NodeJS.ProcessEnv = process.env): Environme
   if (piUrl && !/^https:\/\//.test(piUrl) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//.test(`${piUrl}/`)) {
     throw new Error("ISOBOT_PI_URL must use HTTPS");
   }
+  const heartbeatUrl = env.ISOBOT_HEARTBEAT_URL?.trim() || undefined;
+  if (heartbeatUrl && !/^https:\/\//.test(heartbeatUrl)) throw new Error("ISOBOT_HEARTBEAT_URL must use HTTPS");
   const imap = imapAccounts(env);
   return {
     home: env.ISOBOT_HOME ?? path.join(homedir(), "Library", "Application Support", "isobot"),
@@ -302,5 +306,6 @@ export function loadEnvironment(env: NodeJS.ProcessEnv = process.env): Environme
     jobUrl: env.ISOBOT_JOB_URL,
     imap,
     claudeBin: env.ISOBOT_CLAUDE_BIN ?? "claude",
+    heartbeatUrl,
   };
 }

@@ -46,7 +46,67 @@ export function evaluateGate(input: GateInput): GateDecision {
   // Deleting test lines is how an agent "fixes" a failing test; additions are fine.
   const weakenedTests = diff.files.filter(file => TEST_FILE.test(file.path) && file.removed > file.added).map(file => file.path);
   if (weakenedTests.length) reasons.push(`removes more test lines than it adds: ${weakenedTests.slice(0, 5).join(", ")}`);
+  // A same-size edit can still switch tests off; any new skip/ignore/focus marker leaves the merge to a human.
+  const skips = diff.skipMarkers ?? [];
+  if (skips.length) reasons.push(`disables or narrows tests: ${skips.slice(0, 5).map(s => `${s.marker} in ${s.path}`).join(", ")}`);
   return { merge: reasons.length === 0, reasons };
+}
+
+/**
+ * Ways to switch a test off (or, with "only"/"fit", to run just some) across the stacks isobot builds.
+ * Matched on any file, not just test files, because xcodebuild flags and test-runner arguments live
+ * in scripts and Makefiles. False positives only mean a human merges.
+ */
+const JS_FILE = /\.[cm]?[jt]sx?$/i;
+const SKIP_PATTERNS: [string, RegExp, RegExp?][] = [
+  ["skip/only/todo", /\b(?:it|test|describe|context|suite|bench)\s*\.\s*(?:skip|only|todo|skipIf|runIf)\b/],
+  // JavaScript-only spellings: `fit(` or `skip: true` mean something else in Swift or Kotlin.
+  ["xit/fit", /(?<![\w.])[xf](?:it|describe|test|context)\s*\(/, JS_FILE],
+  ["skip option", /\b(?:skip|todo)\s*:\s*(?:true|["'`])/, JS_FILE],
+  ["XCTSkip", /\bXCTSkip(?:If|Unless)?\b/],
+  // Swift Testing traits only; SwiftUI's `.disabled(isLoading)` modifier is everywhere.
+  [".disabled", /@(?:Test|Suite)\s*\(.*\.(?:disabled|enabled\s*\(\s*if)\b/],
+  ["-skip-testing", /-skip-testing\b|-skip-test-configuration\b|-only-testing\b/],
+  ["@Ignore/@Disabled", /@(?:Ignore|Disabled|DisabledIf\w*)\b/],
+  ["Python skip", /\b(?:unittest\.skip\w*|pytest\.mark\.(?:skip\w*|xfail)|pytest\.skip|skipTest)\b/],
+  ["#[ignore]", /#\s*\[\s*ignore\b/],
+  ["t.Skip", /\bt\.Skip(?:Now|f)?\s*\(/],
+  ["test filter", /--(?:testPathIgnorePatterns|exclude-task)\b|\s-x\s+test\b|\bcargo\s+test\b.*\s--skip\b/],
+];
+
+/** Prose mentions `-skip-testing` and friends without running anything. */
+const DOC_FILE = /\.(?:md|markdown|txt|rst|adoc|html?)$|(?:^|\/)docs?\//i;
+
+/**
+ * Markers a unified diff adds on net, per file: occurrences on "+" lines minus those on "-" lines,
+ * so moving an existing skip around doesn't count, but adding one does. Only files that already
+ * existed count: a skip in a brand-new file switches off nothing that ran before.
+ */
+export function skipMarkers(patch: string): { path: string; marker: string }[] {
+  const counts = new Map<string, number>();
+  let file = "";
+  let header = false;
+  let created = false;
+  for (const line of patch.split("\n")) {
+    // File headers sit between "diff --git" and the first hunk; inside hunks "---"/"+++" are content.
+    if (line.startsWith("diff --git ")) { header = true; file = ""; created = false; continue; }
+    if (header) {
+      if (line.startsWith("@@")) header = false;
+      else if (line.startsWith("new file mode") || line === "--- /dev/null") created = true;
+      else if (line.startsWith("+++ ")) file = line.slice(4).replace(/^b\//, "");
+      else if (line.startsWith("--- ") && !file) file = line.slice(4).replace(/^a\//, "");
+      if (file === "/dev/null") file = "";
+      continue;
+    }
+    const sign = line[0] === "+" ? 1 : line[0] === "-" ? -1 : 0;
+    if (!sign || !file || created || DOC_FILE.test(file)) continue;
+    for (const [name, pattern, only] of SKIP_PATTERNS) {
+      if ((only && !only.test(file)) || !pattern.test(line.slice(1))) continue;
+      const key = `${file}\0${name}`;
+      counts.set(key, (counts.get(key) ?? 0) + sign);
+    }
+  }
+  return [...counts].filter(([, n]) => n > 0).map(([key]) => { const [path, marker] = key.split("\0"); return { path, marker }; });
 }
 
 /** Minimal glob: `**` spans directories, `*` stays within one, `?` is one character. Case-insensitive. */

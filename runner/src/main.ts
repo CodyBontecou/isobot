@@ -14,7 +14,7 @@ import { TERMINAL_MARKER } from "./notes.js";
 import { Notifier } from "./notify.js";
 import { Pipeline } from "./pipeline.js";
 import { runChecks } from "./checks.js";
-import { Awake, heartbeatAge, readHeartbeat, rotateLog, writeHeartbeat } from "./ops.js";
+import { Awake, heartbeatAge, pingHeartbeat, readHeartbeat, rotateLog, writeHeartbeat } from "./ops.js";
 import { killAllChildren, run, setGitIdentity, sh, workerEnv } from "./proc.js";
 import { sandboxProfile } from "./sandbox.js";
 import { ensureShims } from "./shims.js";
@@ -199,6 +199,7 @@ async function loop(rt: Runtime): Promise<void> {
         }
       }
     }
+    if (rt.env.heartbeatUrl && !lastCycleError) void pingHeartbeat(rt.env.heartbeatUrl);
     awake.update(rt.pipeline.activeJobs.length > 0);
     try { rotateLog(logFile); } catch { /* logging must never stop the runner */ }
     try {
@@ -265,6 +266,10 @@ async function doctor(rt: Runtime): Promise<boolean> {
     report(Boolean(channel), "Discord job cards and threads", channel ? `#${channel.name}` : response ? `HTTP ${response.status}: the bot needs View Channel, Send Messages, Create Public Threads and Send Messages in Threads` : "unreachable");
   } else console.log(rt.env.discordWebhookUrl ? "➖ Discord notifications through a webhook (set ISOBOT_DISCORD_BOT_TOKEN and ISOBOT_DISCORD_CHANNEL_ID for job threads)" : "➖ Discord notifications disabled");
   report(existsSync("/usr/bin/sandbox-exec"), "Check sandbox (sandbox-exec) available");
+  if (rt.env.heartbeatUrl) {
+    const pinged = await pingHeartbeat(rt.env.heartbeatUrl);
+    report(pinged, "External heartbeat (ISOBOT_HEARTBEAT_URL)", pinged ? "pinged" : "the ping failed; check the URL");
+  } else console.log("➖ External heartbeat disabled: nobody is told if this Mac goes down (set ISOBOT_HEARTBEAT_URL)");
   const beat = readHeartbeat(rt.env.home);
   const age = heartbeatAge(beat);
   if (age === null) console.log("➖ Runner heartbeat: none yet (service not started?)");

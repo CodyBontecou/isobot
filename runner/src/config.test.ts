@@ -43,6 +43,9 @@ test("unknown autonomy levels are rejected", () => {
 test("environment requires a GitHub token and HTTPS Pi URL", () => {
   assert.throws(() => loadEnvironment({}), /GITHUB_TOKEN/);
   assert.throws(() => loadEnvironment({ GITHUB_TOKEN: "t", ISOBOT_PI_URL: "http://pi.example.com" }), /HTTPS/);
+  assert.throws(() => loadEnvironment({ GITHUB_TOKEN: "t", ISOBOT_HEARTBEAT_URL: "http://hc.example/ping" }), /HEARTBEAT_URL must use HTTPS/);
+  assert.equal(loadEnvironment({ GITHUB_TOKEN: "t", ISOBOT_HEARTBEAT_URL: " https://hc.example/ping " }).heartbeatUrl, "https://hc.example/ping");
+  assert.equal(loadEnvironment({ GITHUB_TOKEN: "t" }).heartbeatUrl, undefined);
   const env = loadEnvironment({ GITHUB_TOKEN: "t", ISOBOT_PI_URL: "https://pi.isolated.tech/", ISOBOT_HOME: "/tmp/x" });
   assert.equal(env.piUrl, "https://pi.isolated.tech");
   assert.equal(env.home, "/tmp/x");

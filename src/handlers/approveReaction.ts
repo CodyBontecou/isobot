@@ -29,21 +29,37 @@ import { addLabels, getIssue, removeLabel } from "../github/issues.js";
  * thread or runner job thread. Removing the ✅ before the runner claims the issue withdraws it.
  */
 export function registerApproveReactions(client: Client): void {
-  client.on(Events.MessageReactionAdd, (reaction, user) => void handle(client, reaction, user, true));
-  client.on(Events.MessageReactionRemove, (reaction, user) => void handle(client, reaction, user, false));
+  client.on(Events.MessageReactionAdd, (reaction, user) => void handleApproveReaction(client, reaction, user, true));
+  client.on(Events.MessageReactionRemove, (reaction, user) => void handleApproveReaction(client, reaction, user, false));
 }
 
-async function handle(
-  client: Client,
+/** What the handler reaches outside Discord; tests pass doubles. */
+export interface ApproveDeps {
+  isAllowed(userId: string): boolean;
+  getIssue: typeof getIssue;
+  addLabels: typeof addLabels;
+  removeLabel: typeof removeLabel;
+  isConfiguredRepo(ref: IssueRef): boolean;
+}
+
+const defaultDeps: ApproveDeps = {
+  isAllowed, getIssue, addLabels, removeLabel,
+  isConfiguredRepo: ref => repoToCategoryKey(ref) !== null,
+};
+
+export async function handleApproveReaction(
+  client: Pick<Client, "user">,
   partial: MessageReaction | PartialMessageReaction,
   user: User | PartialUser,
   added: boolean,
+  deps: ApproveDeps = defaultDeps,
 ): Promise<void> {
-  if (user.bot || !isApproveEmoji(partial.emoji) || !isAllowed(user.id)) return;
+  const { getIssue, addLabels, removeLabel } = deps;
+  if (user.bot || !isApproveEmoji(partial.emoji) || !deps.isAllowed(user.id)) return;
   try {
     const reaction = partial.partial ? await partial.fetch() : partial;
     const message = reaction.message.partial ? await reaction.message.fetch() : reaction.message;
-    const ref = await issueForMessage(message, client.user?.id);
+    const ref = await issueForMessage(message, client.user?.id, deps);
     if (!ref) return;
     const tag = `${ref.owner}/${ref.repo}#${ref.number}`;
     const issue = await getIssue(ref);
@@ -76,9 +92,9 @@ async function handle(
 }
 
 /** The configured-repo issue a reacted message stands for, or null. */
-async function issueForMessage(message: Message | PartialMessage, botId: string | undefined): Promise<IssueRef | null> {
+async function issueForMessage(message: Message | PartialMessage, botId: string | undefined, deps: ApproveDeps): Promise<IssueRef | null> {
   const ref = messageIssue(message as Message, botId) ?? await threadIssue(message, botId);
-  return ref && repoToCategoryKey(ref) ? ref : null;
+  return ref && deps.isConfiguredRepo(ref) ? ref : null;
 }
 
 async function threadIssue(message: Message | PartialMessage, botId: string | undefined): Promise<IssueRef | null> {
