@@ -1,0 +1,232 @@
+{
+  "pollSeconds": 60,
+  "triageMinutes": 30,
+  "maxConcurrentJobs": 2,
+  "maxProposalsPerTriage": 5,
+  "builder": {
+    "kind": "claude",
+    "timeoutMinutes": 60,
+    "maxTurns": 300,
+    "maxFixRounds": 3,
+    "maxReviewRounds": 2,
+    "settings": {
+      "permissions": {
+        "deny": [
+          "Skill(create-payment-credential)",
+          "Skill(financial-insights)",
+          "Skill(use-link-identity)"
+        ]
+      }
+    }
+  },
+  "labels": {
+    "proposed": "isobot:proposed",
+    "ready": "isobot:ready",
+    "building": "isobot:building",
+    "review": "isobot:review",
+    "failed": "isobot:failed",
+    "ship": "isobot:ship",
+    "stop": "isobot:stop",
+    "auto": "isobot:auto"
+  },
+  "trustedAuthors": [],
+  "discordCategories": {
+    "time.md": "codybontecou/time.md",
+    "health.md": "codybontecou/health-md",
+    "gitsync.md": "codybontecou/GitSync.md",
+    "sync.md": "codybontecou/GitSync.md",
+    "instarep.ly": "codybontecou/Instarep.ly",
+    "whereday": "codybontecou/whereday",
+    "iso.me": "codybontecou/whereday",
+    "vox.md": "codybontecou/vox.md"
+  },
+  "vox": {
+    "conversation": "isobot",
+    "autoApprove": true,
+    "minAutoApproveConfidence": 0.7,
+    "maxProposalsPerNote": 3,
+    "hints": "\"Vox\", \"box\", \"boxing\" or \"Voxboard\" = Vox.md (codybontecou/vox.md); \"Health and D\" or \"health MD\" = Health.md (codybontecou/health-md); \"time MD\" = time.md; \"where day\", \"iso me\" = whereday; \"git sync\" or \"sync MD\" = GitSync.md; \"insta reply\" = Instarep.ly."
+  },
+  "autoApprove": {
+    "sources": [
+      "discord",
+      "github",
+      "email",
+      "appstore"
+    ],
+    "kinds": [
+      "bug",
+      "feature"
+    ],
+    "minConfidence": 0.8
+  },
+  "appStore": {
+    "apps": {
+      "6757763969": "codybontecou/health-md",
+      "6758960270": "codybontecou/GitSync.md",
+      "6754865693": "codybontecou/Instarep.ly",
+      "6761960794": "codybontecou/whereday",
+      "6758967337": "codybontecou/vox.md"
+    },
+    "countries": [
+      "us",
+      "gb",
+      "ca",
+      "au",
+      "nz",
+      "ie",
+      "de",
+      "fr",
+      "es",
+      "it",
+      "nl",
+      "se",
+      "ch",
+      "at",
+      "jp",
+      "kr",
+      "br",
+      "mx",
+      "in"
+    ]
+  },
+  "defaults": {
+    "autonomy": "pr",
+    "checks": [],
+    "protectedPaths": [
+      ".github/**",
+      "**/.env*",
+      "**/*.entitlements",
+      "**/Info.plist",
+      "**/*.storekit",
+      "**/ExportOptions*.plist",
+      "**/fastlane/**",
+      "**/wrangler.json*",
+      "**/wrangler.toml",
+      "**/migrations/**",
+      "**/*auth*/**",
+      "**/*purchase*/**",
+      "**/*subscription*/**",
+      "**/*privacy*",
+      ".claude/**",
+      "**/CLAUDE.md",
+      "**/AGENTS.md",
+      ".mcp.json",
+      ".codex/**",
+      ".agents/**",
+      ".pi/**",
+      ".gitmodules",
+      "**/.githooks/**",
+      "**/.husky/**"
+    ],
+    "maxChangedLines": 400,
+    "minReviewConfidence": 0.85,
+    "requireCi": true,
+    "release": {
+      "onMerge": [],
+      "onShip": []
+    }
+  },
+  "repos": {
+    "codybontecou/time.md": {
+      "notes": "macOS app distributed outside the App Store (Developer ID, Sparkle), plus mobile/ (Expo) and sync-worker/. PR CI builds and tests macOS. CI uses Xcode 16.2; the regression tests don't compile under newer Xcode's stricter concurrency checking, so don't chase those errors unless the issue is about them."
+    },
+    "codybontecou/health-md": {
+      "checks": [
+        "make test-contracts",
+        "make -C apps/apple prepare-healthmd-core-rust",
+        "xcodebuild build-for-testing -project apps/apple/HealthMd.xcodeproj -scheme HealthMd -destination 'generic/platform=iOS Simulator' -quiet CODE_SIGNING_ALLOWED=NO",
+        "HEALTHMD_CI_ANDROID_ABI=arm64-v8a bash scripts/ci/android.sh"
+      ],
+      "devices": {
+        "ios": {
+          "deviceType": "iPhone 17"
+        },
+        "android": {
+          "avd": "isobot-api35"
+        }
+      },
+      "notes": "Monorepo: Apple app under apps/apple (HealthMd.xcodeproj, scheme HealthMd), Android under apps/android, Rust core and CLI. PR CI only runs scripts/ci/run.py; the runner's checks build the iOS app and its tests and run scripts/ci/android.sh (instrumented tests and the live Rust pairing test) on the job's emulator. Run that script yourself through the isobot shell before finishing (HEALTHMD_CI_ANDROID_ABI=arm64-v8a bash scripts/ci/android.sh). For Android behaviour changes, especially upgrades and background work, install the previous release and then your build on the job's emulator (adb install -r keeps data) and check it with argent. The full Apple CI runs at release."
+    },
+    "codybontecou/GitSync.md": {
+      "checks": [
+        "! grep -E 'CURRENT_PROJECT_VERSION = [^;]+;' Sync.md.xcodeproj/project.pbxproj | grep -vE '= [0-9]{12};'",
+        "TEST_RUNNER_SKIP_STOREKIT_PURCHASE_TESTS=1 xcodebuild test -project Sync.md.xcodeproj -scheme Sync.md -destination \"id=$ISOBOT_IOS_SIMULATOR\" -only-testing:SyncMDTests -parallel-testing-enabled NO -quiet"
+      ],
+      "devices": {
+        "ios": {
+          "deviceType": "iPhone 17"
+        },
+        "android": {
+          "avd": "isobot-api35"
+        }
+      },
+      "notes": "iOS git client (Sync.md.xcodeproj, scheme Sync.md) plus an Android app under android/. CURRENT_PROJECT_VERSION must stay a 12-digit YYYYMMDDHHMM value. The runner's checks run the SyncMDTests unit suite on the job's simulator, like PR CI (xctest.yml). For Android changes, run the relevant Gradle tests (connected ones through the isobot shell on the job's emulator) and check the app there with argent.",
+      "ownerAutonomy": "merge",
+      "train": {
+        "appId": "6758960270",
+        "project": "Sync.md.xcodeproj",
+        "scheme": "Sync.md",
+        "everyHours": 24,
+        "holdMinutes": 60
+      }
+    },
+    "codybontecou/Instarep.ly": {
+      "checks": [
+        "xcodebuild build -project InstaReply/InstaReply.xcodeproj -scheme InstaReply -destination 'generic/platform=iOS Simulator' -quiet CODE_SIGNING_ALLOWED=NO"
+      ],
+      "devices": {
+        "ios": {
+          "deviceType": "iPhone 17"
+        }
+      },
+      "notes": "iOS app with a custom keyboard extension (InstaReply/InstaReply.xcodeproj, schemes InstaReply and InstaReplyKeyboard) plus a worker under worker/. There's no test target, so the runner only checks that the app builds; check visible changes on the job's simulator with argent."
+    },
+    "codybontecou/whereday": {
+      "checks": [
+        "python3 -m unittest discover -s scripts -p test_test_ios.py",
+        "scripts/test-ios.sh --destination \"platform=iOS Simulator,id=$ISOBOT_IOS_SIMULATOR\" -skip-testing:IsoMeTests/StoreManagerTests/testStoreKitCancellationAndOfflineRestoreKeepFreshUserLocked"
+      ],
+      "devices": {
+        "ios": {
+          "deviceType": "iPhone 17"
+        },
+        "android": {
+          "avd": "isobot-api35"
+        }
+      },
+      "notes": "iOS app (Xcode project IsoMe.xcodeproj, scheme IsoMe) plus Android under android/. The runner's checks run the IsoMe XCTest suite on the job's simulator (scripts/test-ios.sh), like PR CI, except one StoreKit restore test that waits forever on an Apple Account prompt on a simulator without App Store sign-in. Android's emulator suite takes hours and runs nightly in CI (android-heavy-tests.yml), so for Android changes run just the relevant connected tests through the isobot shell, e.g. `cd android && ./gradlew :app:connectedMapQaAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=<the test classes you touched>`, plus the unit tests in android-tests.yml.",
+      "ownerAutonomy": "merge",
+      "train": {
+        "appId": "6761960794",
+        "project": "IsoMe.xcodeproj",
+        "scheme": "IsoMe",
+        "everyHours": 24,
+        "holdMinutes": 60
+      }
+    },
+    "codybontecou/vox.md": {
+      "checks": [
+        "./scripts/test-project-contracts.sh",
+        "xcodebuild test -project Voxboard.xcodeproj -scheme VoxboardTests -configuration Debug -destination \"id=$ISOBOT_IOS_SIMULATOR\" -skip-testing:VoxboardTests/HardPaywallStoreKitTests -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile -quiet CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=''"
+      ],
+      "devices": {
+        "ios": {
+          "deviceType": "iPhone 17"
+        },
+        "android": {
+          "avd": "isobot-api35"
+        }
+      },
+      "notes": "SwiftUI iOS/Mac/Watch app plus an Android app under apps/android. The runner's checks run the app-hosted VoxboardTests on the job's simulator, as Apple CI does; GitHub Apple CI also runs the full suite on every PR. For Android changes, run the relevant tests through the isobot shell (./apps/android/gradlew -p apps/android …, connected tests on the job's emulator) and check the app there with argent.",
+      "ownerAutonomy": "merge",
+      "train": {
+        "appId": "6758967337",
+        "project": "Voxboard.xcodeproj",
+        "scheme": "Voxboard",
+        "everyHours": 24,
+        "holdMinutes": 60
+      }
+    }
+  }
+}

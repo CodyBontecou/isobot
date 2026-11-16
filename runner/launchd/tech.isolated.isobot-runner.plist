@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: runner/launchd/install.sh fills the __PLACEHOLDERS__ and installs it as a LaunchAgent. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>tech.isolated.isobot-runner</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__RUNNER__/dist/main.js</string>
+    <string>run</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__RUNNER__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__PATH__</string>
+    <key>ISOBOT_HOME</key>
+    <string>__HOME__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <!-- Back off if the runner crashes on start (e.g. bad config) instead of spinning. -->
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <!-- Long Xcode builds should not be throttled as background work. -->
+  <key>ProcessType</key>
+  <string>Standard</string>
+  <key>StandardOutPath</key>
+  <string>__HOME__/logs/runner.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/logs/runner.log</string>
+</dict>
+</plist>

@@ -1,8 +1,10 @@
 {
-  "sync.md":     { "owner": "codybontecou", "repo": "Sync.md" },
+  "sync.md":     { "owner": "codybontecou", "repo": "GitSync.md" },
+  "gitsync.md":  { "owner": "codybontecou", "repo": "GitSync.md" },
   "health.md":   { "owner": "codybontecou", "repo": "health-md" },
   "instarep.ly": { "owner": "codybontecou", "repo": "Instarep.ly" },
   "time.md":     { "owner": "codybontecou", "repo": "time.md" },
-  "iso.me":      { "owner": "codybontecou", "repo": "isome" },
+  "iso.me":      { "owner": "codybontecou", "repo": "whereday" },
+  "whereday":    { "owner": "codybontecou", "repo": "whereday" },
   "vox.md":      { "owner": "codybontecou", "repo": "vox.md" }
 }

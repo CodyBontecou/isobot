@@ -7,6 +7,10 @@ Discord assistant for isolated.tech. Mention isobot in a reply or a thread to
 turn a comment into a GitHub issue. Tagged bug/feature posts in mapped `#help`
 forums also become issues, and comments and issue state mirror both ways.
 
+The [runner](docs/runner.md) is isobot's always-on worker on a Mac: it triages
+Discord, GitHub and email into proposals, and builds approved issues with Claude
+Code through review, merge and release. See [architecture](docs/architecture.md).
+
 The ticket agent uses Cloudflare's [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi).
 `PiHarness` runs Pi Durable on SQLite-backed Durable Objects, with Workers AI
 (`@cf/moonshotai/kimi-k2.7-code`) by default or an eligible ChatGPT plan after
@@ -98,8 +102,11 @@ comment, request, and recent context to `POST /api/tickets`, then polls
 `reply_in_discord`; the reply tool saves content for the bridge to deliver.
 Vague comments produce a clarification instead of an issue.
 
-The issue tool fixes the destination to a mapped repository and appends the
-original quote, source URL, unique event marker, and `@codex implement this`.
+The issue tool fixes the destination to a mapped repository, appends the
+original quote, source URL and unique event marker, and adds `isobot:ready` so
+the [runner](docs/runner.md) builds it: these tickets come only from the owner
+allowlist. Forum posts, which anyone can create, get `isobot:proposed` instead
+and wait for the owner's approval.
 Pi submissions deduplicate by message ID. Issue creation is marked unsafe for
 automatic replay and checks GitHub's REST listing for its marker on retries.
 GitHub does not provide atomic issue-creation idempotency, so an ambiguous

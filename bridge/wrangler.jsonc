@@ -9,6 +9,7 @@
   ],
   "vars": {
     "ISOBOT_ALLOWED_USERS": "",
+    "ISOBOT_RUNNER_CHANNEL_ID": "",
     "DISCORD_HISTORY_GUILD_ID": "1443424100759634003"
   },
   "secrets": {

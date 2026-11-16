@@ -10,7 +10,7 @@ import { createTicketIssue, type TicketIssueInput } from "./github.js";
 const eventId = String((BigInt(Date.UTC(2026, 9, 7)) - 1_420_070_400_000n) << 22n);
 const input: TicketIssueInput = {
   token: "secret-test-token",
-  repo: { owner: "CODYBONTECOU", repo: "sync.MD" },
+  repo: { owner: "CODYBONTECOU", repo: "gitSYNC.md" },
   eventId,
   parent: { content: "First line\n\nSecond line", jumpUrl: "https://discord.com/channels/123/456/789" },
   title: " Fix syncing ", body: "Fix the reported syncing failure.", labels: ["bug"],
@@ -20,7 +20,7 @@ function json(value: unknown, status = 200): Response {
   return Response.json(value, { status });
 }
 
-test("creates only in mapped repo and appends deterministic source, quote, marker and Codex instruction", async () => {
+test("creates only in mapped repo, appends deterministic source, quote and marker, and queues the build", async () => {
   const calls: { url: URL; init?: RequestInit }[] = [];
   const fetcher: typeof fetch = async (request, init) => {
     assert.equal(typeof request, "string");
@@ -28,7 +28,7 @@ test("creates only in mapped repo and appends deterministic source, quote, marke
     return init?.method === "POST" ? json({ number: 42 }, 201) : json([]);
   };
   const result = await createTicketIssue(input, fetcher);
-  assert.deepEqual(result, { number: 42, url: "https://github.com/codybontecou/Sync.md/issues/42" });
+  assert.deepEqual(result, { number: 42, url: "https://github.com/codybontecou/GitSync.md/issues/42" });
   assert.equal(calls.length, 2);
   const query = calls[0].url.searchParams;
   assert.equal(query.get("state"), "all");
@@ -38,8 +38,9 @@ test("creates only in mapped repo and appends deterministic source, quote, marke
   assert.equal(query.get("since"), "2026-10-06T00:00:00.000Z");
   const posted = JSON.parse(String(calls[1].init?.body));
   assert.equal(posted.title, "Fix syncing");
-  assert.deepEqual(posted.labels, ["bug"]);
-  assert.equal(posted.body, `${input.body}\n\n### Original Discord message\n\n> First line\n> \n> Second line\n\nSource: [Discord message](${input.parent.jumpUrl})\n\n${marker}\n\n@codex implement this`);
+  assert.deepEqual(posted.labels, ["bug", "isobot:ready"]);
+  assert.equal(posted.body, `${input.body}\n\n### Original Discord message\n\n> First line\n> \n> Second line\n\nSource: [Discord message](${input.parent.jumpUrl})\n\n${marker}`);
+  assert.ok(!posted.body.includes("@codex"));
   assert.ok(calls.every(call => call.init?.redirect === "manual"));
   assert.ok(calls[1].init?.signal instanceof AbortSignal);
 });
@@ -61,7 +62,7 @@ test("retry finds existing issue across pages, including closed issues, and igno
 test("unmapped repo and invalid event or link are rejected before network access", async () => {
   let called = false;
   const fetcher: typeof fetch = async () => { called = true; return json([]); };
-  await assert.rejects(createTicketIssue({ ...input, repo: { owner: "other", repo: "Sync.md" } }, fetcher), /not allowed/);
+  await assert.rejects(createTicketIssue({ ...input, repo: { owner: "other", repo: "GitSync.md" } }, fetcher), /not allowed/);
   await assert.rejects(createTicketIssue({ ...input, eventId: "123 -->" }, fetcher), /event ID/);
   await assert.rejects(createTicketIssue({ ...input, parent: { ...input.parent, jumpUrl: "https://example.com" } }, fetcher), /source link/);
   assert.equal(called, false);
@@ -202,7 +203,7 @@ test("native Workers fetch creates issues and refuses secret-bearing redirects",
     await t.test("native fetch performs the duplicate check and creation", async () => {
       const response = await runtime.dispatchFetch("https://test/?scenario=success");
       assert.equal(response.status, 200);
-      assert.deepEqual(await response.json(), { number: 42, url: "https://github.com/codybontecou/Sync.md/issues/42" });
+      assert.deepEqual(await response.json(), { number: 42, url: "https://github.com/codybontecou/GitSync.md/issues/42" });
     });
     for (const scenario of ["redirect-get", "redirect-post"]) {
       await t.test(`native fetch rejects ${scenario}`, async () => {

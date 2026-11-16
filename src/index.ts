@@ -5,6 +5,8 @@ import { createClient } from "./client.js";
 import { registerTicketMention } from "./handlers/ticketMention.js";
 import { registerForumPostCreated } from "./handlers/forumPostCreated.js";
 import { registerThreadCommentSync } from "./handlers/threadCommentSync.js";
+import { registerRunnerThreadReplies } from "./handlers/runnerThreadReply.js";
+import { registerApproveReactions } from "./handlers/approveReaction.js";
 import { startWebhookServer } from "./webhooks/server.js";
 import { initAllowlist, describeAllowlist } from "./auth.js";
 import { registerAgentRecovery } from "./agent/recovery.js";
@@ -43,6 +45,8 @@ async function main(): Promise<void> {
   registerTicketMention(client);
   registerForumPostCreated(client);
   registerThreadCommentSync(client);
+  registerRunnerThreadReplies(client);
+  registerApproveReactions(client);
   const stopRecovery = registerAgentRecovery(client);
   const stopSupport = registerSupportBridge(client);
 

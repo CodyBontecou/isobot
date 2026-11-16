@@ -1,5 +1,8 @@
 # Vox.md → Pi
 
+> To turn Vox notes into isobot tickets and builds, post them to
+> `conversation=isobot` in memory mode; see [runner: Vox.md notes](runner.md#voxmd-notes).
+
 Each Vox capture preset can choose how Pi handles its text by using a different
 HTTP endpoint URL. Both modes preserve the original Markdown and the incoming
 JSON fields in SQLite on the conversation's Durable Object.

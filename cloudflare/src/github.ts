@@ -18,7 +18,8 @@ export interface TicketIssue {
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_LIST_PAGES = 10;
 const REQUEST_TIMEOUT_MS = 15_000;
-const CODEX_INSTRUCTION = "@codex implement this";
+/** Owner-triggered tickets are approved work: the isobot runner builds issues with this label. */
+export const READY_LABEL = "isobot:ready";
 
 class GitHubError extends Error {}
 
@@ -48,8 +49,7 @@ export async function createTicketIssue(
   const marker = `<!-- isobot:discord-event:${input.eventId} -->`;
   const quote = input.parent.content.split("\n").map((line) => `> ${line}`).join("\n");
   const body = [input.body.trim(), "### Original Discord message", quote,
-    `Source: [Discord message](${input.parent.jumpUrl})`, marker,
-    ...(input.body.includes(CODEX_INSTRUCTION) ? [] : [CODEX_INSTRUCTION])].join("\n\n");
+    `Source: [Discord message](${input.parent.jumpUrl})`, marker].join("\n\n");
   if (body.length > 65_000) throw new Error("Issue body is too long");
 
   const endpoint = `https://api.github.com/repos/${target.owner}/${target.repo}/issues`;
@@ -92,8 +92,9 @@ export async function createTicketIssue(
 
   // No automatic POST retry: an interrupted request may still be committing on GitHub.
   // A later invocation reconciles the marker first, but GitHub provides no atomic idempotency key.
+  const labels = [...new Set([...(input.labels ?? []), READY_LABEL])];
   const created = await githubRequest(endpoint, {
-    method: "POST", headers, body: JSON.stringify({ title, body, ...(input.labels ? { labels: input.labels } : {}) }),
+    method: "POST", headers, body: JSON.stringify({ title, body, labels }),
   }, 201, fetcher);
   if (!isRecord(created)) throw new GitHubError("GitHub returned an invalid issue response");
   return result(created);

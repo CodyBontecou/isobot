@@ -13,15 +13,13 @@ export interface CreatedIssue {
   url: string;
 }
 
-const CODEX_IMPLEMENT_INSTRUCTION = "@codex implement this";
+/**
+ * Issues from community forum posts are proposals: anyone can post in the forum,
+ * so the isobot runner builds them only after the owner adds `isobot:ready`.
+ */
+export const PROPOSED_LABEL = "isobot:proposed";
 
 let octokit: Octokit | null = null;
-
-function appendCodexInstruction(body: string): string {
-  if (body.includes(CODEX_IMPLEMENT_INSTRUCTION)) return body;
-  const trimmed = body.trimEnd();
-  return trimmed ? `${trimmed}\n\n${CODEX_IMPLEMENT_INSTRUCTION}` : CODEX_IMPLEMENT_INSTRUCTION;
-}
 
 function client(): Octokit {
   if (octokit) return octokit;
@@ -36,8 +34,8 @@ export async function createIssue(input: CreateIssueInput): Promise<CreatedIssue
     owner: input.owner,
     repo: input.repo,
     title: input.title,
-    body: appendCodexInstruction(input.body),
-    labels: input.labels,
+    body: input.body,
+    labels: [...new Set([...(input.labels ?? []), PROPOSED_LABEL])],
   });
   return { number: data.number, url: data.html_url };
 }
@@ -68,4 +66,29 @@ export async function createIssueComment(input: {
     issue_number: input.number,
     body: input.body,
   });
+}
+
+export interface IssueState {
+  state: string;
+  labels: string[];
+}
+
+export async function getIssue(input: { owner: string; repo: string; number: number }): Promise<IssueState> {
+  const { data } = await client().issues.get({ owner: input.owner, repo: input.repo, issue_number: input.number });
+  return {
+    state: data.state,
+    labels: data.labels.map((l) => (typeof l === "string" ? l : l.name ?? "")).filter(Boolean),
+  };
+}
+
+export async function addLabels(input: { owner: string; repo: string; number: number; labels: string[] }): Promise<void> {
+  await client().issues.addLabels({ owner: input.owner, repo: input.repo, issue_number: input.number, labels: input.labels });
+}
+
+export async function removeLabel(input: { owner: string; repo: string; number: number; label: string }): Promise<void> {
+  try {
+    await client().issues.removeLabel({ owner: input.owner, repo: input.repo, issue_number: input.number, name: input.label });
+  } catch (err) {
+    if ((err as { status?: number }).status !== 404) throw err;
+  }
 }
