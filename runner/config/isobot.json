@@ -121,39 +121,60 @@
   },
   "repos": {
     "codybontecou/time.md": {
-      "checks": [
-        "xcodebuild -scheme 'time.md' -destination 'platform=macOS' -configuration Debug CODE_SIGNING_ALLOWED=NO -quiet test"
-      ],
-      "notes": "macOS app distributed outside the App Store (Developer ID, Sparkle), plus mobile/ (Expo) and sync-worker/. PR CI builds and tests macOS."
+      "notes": "macOS app distributed outside the App Store (Developer ID, Sparkle), plus mobile/ (Expo) and sync-worker/. PR CI builds and tests macOS. CI uses Xcode 16.2; the regression tests don't compile under newer Xcode's stricter concurrency checking, so don't chase those errors unless the issue is about them."
     },
     "codybontecou/health-md": {
       "checks": [
         "make test-contracts",
-        "make apple-ios"
+        "make -C apps/apple prepare-healthmd-core-rust",
+        "xcodebuild build-for-testing -project apps/apple/HealthMd.xcodeproj -scheme HealthMd -destination 'generic/platform=iOS Simulator' -quiet CODE_SIGNING_ALLOWED=NO"
       ],
-      "notes": "Monorepo: Apple app under apps/apple (HealthMd.xcodeproj), Android under apps/android, Rust core and CLI. PR CI only runs scripts/ci/run.py, so the local checks are what verify the iOS app."
+      "notes": "Monorepo: Apple app under apps/apple (HealthMd.xcodeproj), Android under apps/android, Rust core and CLI. PR CI only runs scripts/ci/run.py; the runner compiles the iOS app and its tests; the full Apple CI runs at release."
     },
     "codybontecou/GitSync.md": {
       "checks": [
         "! grep -E 'CURRENT_PROJECT_VERSION = [^;]+;' Sync.md.xcodeproj/project.pbxproj | grep -vE '= [0-9]{12};'",
         "xcodebuild build-for-testing -project Sync.md.xcodeproj -scheme Sync.md -destination 'generic/platform=iOS Simulator' -quiet CODE_SIGNING_ALLOWED=NO"
       ],
-      "notes": "iOS git client (Sync.md.xcodeproj, scheme Sync.md). CURRENT_PROJECT_VERSION must stay a 12-digit YYYYMMDDHHMM value. PR CI (xctest.yml, SyncMDTests) runs the unit tests."
+      "notes": "iOS git client (Sync.md.xcodeproj, scheme Sync.md). CURRENT_PROJECT_VERSION must stay a 12-digit YYYYMMDDHHMM value. PR CI (xctest.yml, SyncMDTests) runs the unit tests.",
+      "ownerAutonomy": "merge",
+      "train": {
+        "appId": "6758960270",
+        "project": "Sync.md.xcodeproj",
+        "scheme": "Sync.md",
+        "everyHours": 24,
+        "holdMinutes": 60
+      }
     },
     "codybontecou/Instarep.ly": {},
     "codybontecou/whereday": {
       "checks": [
         "python3 -m unittest discover -s scripts -p test_test_ios.py",
-        "scripts/test-ios.sh"
+        "xcodebuild build-for-testing -project IsoMe.xcodeproj -scheme IsoMe -destination 'generic/platform=iOS Simulator' -quiet CODE_SIGNING_ALLOWED=NO"
       ],
-      "notes": "iOS app (Xcode project IsoMe.xcodeproj, scheme IsoMe) plus Android. PR CI runs IsoMe XCTest."
+      "notes": "iOS app (Xcode project IsoMe.xcodeproj, scheme IsoMe) plus Android. PR CI runs IsoMe XCTest.",
+      "ownerAutonomy": "merge",
+      "train": {
+        "appId": "6761960794",
+        "project": "IsoMe.xcodeproj",
+        "scheme": "IsoMe",
+        "everyHours": 24,
+        "holdMinutes": 60
+      }
     },
     "codybontecou/vox.md": {
       "ownerAutonomy": "merge",
       "checks": [
         "./scripts/test-project-contracts.sh"
       ],
-      "notes": "SwiftUI iOS/Mac/Watch app plus an Android app under apps/android. GitHub Apple CI runs the full xcodebuild test suite on every PR."
+      "notes": "SwiftUI iOS/Mac/Watch app plus an Android app under apps/android. GitHub Apple CI runs the full xcodebuild test suite on every PR.",
+      "train": {
+        "appId": "6758967337",
+        "project": "Voxboard.xcodeproj",
+        "scheme": "Voxboard",
+        "everyHours": 24,
+        "holdMinutes": 60
+      }
     }
   }
 }

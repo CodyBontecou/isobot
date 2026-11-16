@@ -2,14 +2,20 @@ import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 /**
- * SwiftPM and xcodebuild sandbox package manifests and plugins with sandbox-exec, and macOS
+ * SwiftPM and xcodebuild sandbox package manifests, plugins and Swift macro plugin servers with sandbox-exec, and macOS
  * can't nest one Seatbelt sandbox inside another. Inside isobot's sandbox (which already
  * confines the whole build) these wrappers turn the inner sandbox off, so `swift test` and
  * `xcodebuild` just work for builders and checks. They are only put on PATH for sandboxed runs.
  */
 const SHIMS: Record<string, string> = {
   xcodebuild: `#!/bin/sh
-exec /usr/bin/xcodebuild -IDEPackageSupportDisableManifestSandbox=YES -IDEPackageSupportDisablePluginExecutionSandbox=YES "$@"
+# Utility modes (xcframework packaging, queries) reject build settings and sandbox flags.
+for arg in "$@"; do
+  case "$arg" in
+    -create-xcframework|-version|-showsdks|-find-executable|-find-library|-list|-showdestinations) exec /usr/bin/xcodebuild "$@" ;;
+  esac
+done
+exec /usr/bin/xcodebuild -IDEPackageSupportDisableManifestSandbox=YES -IDEPackageSupportDisablePluginExecutionSandbox=YES 'OTHER_SWIFT_FLAGS=$(inherited) -Xfrontend -disable-sandbox' "$@"
 `,
   swift: `#!/bin/sh
 case "$1" in
