@@ -225,3 +225,45 @@ that also blocks the keychain. SwiftPM and xcodebuild sandbox package manifests
 themselves, which macOS can't nest, so inside isobot's sandboxes `swift` and
 `xcodebuild` are wrapped to turn that inner sandbox off (the outer one already
 confines the build).
+
+Builders don't get your Link payment and identity skills (`create-payment-credential`,
+`financial-insights`, `use-link-identity`): `builder.settings.permissions.deny` blocks
+them, because builders work on issues other people wrote.
+
+## Test devices and the isobot shell
+
+The builder's Bash sandbox can't reach CoreSimulator or let adb bind its port, so a
+builder can compile an app but not run it. The runner's check sandbox can. Two things
+use that:
+
+- **The isobot shell.** Every builder session gets an MCP tool, `mcp__isobot__shell`
+  (`runner/src/mcp.ts`). It runs a command in the job's workspace under the check sandbox:
+  the same limits as the runner's own checks (no keychain, credentials or runner state;
+  writes only to the workspace, temp and build caches), plus simulators, adb and local
+  ports. Builder-written code already runs there as checks, so the tool grants nothing
+  new. It just lets the builder run device tests while it works, not only afterwards.
+- **Per-job devices.** A repository with `devices` configured gets fresh devices for
+  each job, booted by the runner before the builder starts and deleted when the job ends:
+
+  ```json
+  "devices": { "ios": { "deviceType": "iPhone 17" }, "android": { "avd": "isobot-api35" } }
+  ```
+
+  The iOS simulator is a new `isobot-<job>` device (`runtime` optional; newest iOS by
+  default). The Android emulator is a `-read-only` instance of the AVD on a port from
+  5600 up, so the AVD itself never changes and your own emulators (5554+) are never
+  touched. Checks and the isobot shell see the devices as `$ISOBOT_IOS_SIMULATOR` and
+  `$ANDROID_SERIAL` (adb and Gradle read the latter). The builder is told the ids and
+  uses argent with exactly those devices to install, launch and screenshot UI changes.
+  A device that won't boot retries the job later rather than failing the issue. At
+  startup the runner deletes any `isobot-*` simulators and isobot-port emulators a
+  crash left behind.
+
+The `isobot-api35` AVD (Pixel 7, API 35, Google APIs, arm64) was made for the runner:
+
+```sh
+avdmanager create avd -n isobot-api35 -k "system-images;android-35;google_apis;arm64-v8a" -d pixel_7
+```
+
+`npm run runner -- checks <repo>` boots the repository's devices too, so try a new device
+check there before a job depends on it.

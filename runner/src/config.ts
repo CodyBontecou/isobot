@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { DeviceSpec } from "./devices.js";
 
 /**
  * Autonomy ladder for one repository. Policy lives in the isobot repo, never in
@@ -40,6 +41,11 @@ export interface RepoPolicy {
   ownerAutonomy?: Autonomy;
   /** Ship merged isobot work to the App Store on a schedule (see train.ts). */
   train?: TrainConfig;
+  /**
+   * Devices the runner boots for each job (devices.ts). Checks and the builder's isobot shell
+   * see them as $ISOBOT_IOS_SIMULATOR and $ANDROID_SERIAL; the builder can also drive them with argent.
+   */
+  devices?: DeviceSpec;
 }
 
 export interface TrainConfig {
@@ -207,6 +213,11 @@ export function validateConfig(config: RunnerConfig): void {
       if (!(t.everyHours >= 1)) fail(`${name}: train.everyHours must be at least 1`);
       if (!(t.holdMinutes >= 0)) fail(`${name}: train.holdMinutes must be 0 or more`);
       if ((policy.ownerAutonomy ?? policy.autonomy) !== "merge" && policy.autonomy !== "merge") fail(`${name}: a train only makes sense where isobot merges`);
+    }
+    if (policy.devices) {
+      const d = policy.devices;
+      if (d.ios && !d.ios.deviceType?.trim()) fail(`${name}: devices.ios.deviceType is required (e.g. "iPhone 17")`);
+      if (d.android && !/^[\w.-]+$/.test(d.android.avd ?? "")) fail(`${name}: devices.android.avd must be an AVD name`);
     }
     if (!(policy.minReviewConfidence > 0 && policy.minReviewConfidence <= 1)) fail(`${name}: minReviewConfidence must be in (0, 1]`);
     void partial;

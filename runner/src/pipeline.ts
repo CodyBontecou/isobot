@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import type { AgentRun, Builder, Review } from "./builder.js";
+import type { AgentRun, Builder, JobDevices, Review } from "./builder.js";
+import { hasDevices, type DeviceLease, type Devices } from "./devices.js";
 import { isTransient, UsageLimitError } from "./errors.js";
 import { failureFeedback, formatChecks } from "./checks.js";
 import { configuredRepos, policyFor, type Environment, type RepoPolicy, type RunnerConfig } from "./config.js";
@@ -38,7 +39,9 @@ export interface PipelineDeps {
    * Runs commands in a directory. `sandbox: true` for builder-written code (checks): the
    * implementation must confine it (see sandbox.ts). Release commands run unsandboxed.
    */
-  checks(cwd: string, commands: string[], options: { timeoutMs?: number; sandbox: boolean }): Promise<CheckReport>;
+  checks(cwd: string, commands: string[], options: { timeoutMs?: number; sandbox: boolean; env?: Record<string, string> }): Promise<CheckReport>;
+  /** Boots per-job simulators/emulators for repos with `devices` configured. */
+  devices?: Devices;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -198,12 +201,19 @@ export class Pipeline {
     const branch = revising ? job.branch! : `isobot/${job.number}-${slug(job.title)}`;
     job = store.update(job.id, { state: "building", attempts, branch });
     let workspace: string | null = null;
+    let lease: DeviceLease | null = null;
     try {
       const issue = await github.issue(job.owner, job.repo, job.number);
       if (issue.state === "closed" || hasLabel(issue, this.labels.stop)) return this.stop(job, issue);
       const source = await this.taskFor(issue);
       const base = await github.defaultBranch(job.owner, job.repo);
       const mainSha = await repo.sync(base);
+      if (hasDevices(policy.devices) && this.deps.devices) {
+        await this.feed(job, { phase: "devices" });
+        lease = await this.deps.devices.lease(job.id, policy.devices);
+        store.event(job.id, "devices", lease.describe());
+      }
+      const devices: JobDevices | undefined = lease ?? undefined;
       const notes = await this.takeNotes(job);
       // Everything the owner said since approving goes into the task, so the reviewer judges against it too.
       let task = withNotes(source.task, notes.all);
@@ -221,7 +231,7 @@ export class Pipeline {
         await this.feed(job, { phase: "revising", notes: this.noteCount(job, notes.fresh.length) }, this.ackNotes(notes.fresh));
         noteRounds++;
         run = await builder.revise({
-          cwd: workspace, sessionId: job.sessionId, task,
+          cwd: workspace, sessionId: job.sessionId, task, devices,
           feedback: notes.fresh.length ? noteFeedback(notes.fresh) : "Re-read the task and the owner's follow-up notes, and make sure this branch satisfies all of them.",
         });
         store.update(job.id, { sessionId: run.sessionId ?? job.sessionId });
@@ -230,7 +240,7 @@ export class Pipeline {
         baseSha = mainSha;
         workspace = await repo.createWorkspace(branch, baseSha);
         await this.feed(job, { phase: "implementing" });
-        run = await builder.implement({ cwd: workspace, task });
+        run = await builder.implement({ cwd: workspace, task, devices });
         store.update(job.id, { sessionId: run.sessionId });
         store.event(job.id, "implemented", run.summary);
       }
@@ -244,7 +254,7 @@ export class Pipeline {
       }
       const runChecks = async (summary: string) => {
         await this.feed(job, { phase: "checking" }, `🔨 Builder:\n${quote(summary || "(no summary)", 15)}`);
-        const report = await this.checks(workspace!, policy.checks);
+        const report = await this.checks(workspace!, policy.checks, lease?.env);
         await this.deps.notifier.say(job, checksLine(report));
         return report;
       };
@@ -261,7 +271,7 @@ export class Pipeline {
             noteRounds++;
             task = withNotes(source.task, late.all);
             await this.feed(job, { phase: "revising", notes: this.noteCount(job, late.fresh.length) }, this.ackNotes(late.fresh));
-            run = await builder.revise({ cwd: workspace, sessionId: sessionId(), task, feedback: noteFeedback(late.fresh) });
+            run = await builder.revise({ cwd: workspace, sessionId: sessionId(), task, feedback: noteFeedback(late.fresh), devices });
             sha = await commit(`Apply owner feedback for #${issue.number}`);
             checks = await runChecks(run.summary);
             continue;
@@ -270,7 +280,7 @@ export class Pipeline {
         if (!checks.passed && fixRounds < this.deps.config.builder.maxFixRounds) {
           fixRounds++;
           await this.feed(job, { phase: "fixing", fixRounds });
-          run = await builder.revise({ cwd: workspace, sessionId: sessionId(), task, feedback: failureFeedback(checks) });
+          run = await builder.revise({ cwd: workspace, sessionId: sessionId(), task, feedback: failureFeedback(checks), devices });
           sha = await commit(`Fix checks for #${issue.number}`);
           checks = await runChecks(run.summary);
           continue;
@@ -283,7 +293,7 @@ export class Pipeline {
         if (review.verdict === "request_changes" && reviewRounds < this.deps.config.builder.maxReviewRounds) {
           reviewRounds++;
           await this.feed(job, { phase: "addressing", reviewRounds });
-          run = await builder.revise({ cwd: workspace, sessionId: run.sessionId, task, feedback: reviewFeedback(review) });
+          run = await builder.revise({ cwd: workspace, sessionId: run.sessionId, task, feedback: reviewFeedback(review), devices });
           sha = await commit(`Address review for #${issue.number}`);
           checks = await runChecks(run.summary);
           continue;
@@ -364,6 +374,7 @@ export class Pipeline {
       if (isTransient(error)) await this.retryLater(job, error as Error);
       else await this.fail(job, error as Error);
     } finally {
+      if (lease) await lease.release().catch(error => console.warn(`[devices] ${job.id}: release failed: ${(error as Error).message}`));
       if (workspace) await repo.removeWorkspace(branch).catch(() => undefined);
     }
   }
@@ -578,8 +589,8 @@ export class Pipeline {
   }
 
   /** Checks run builder-written code, so always sandboxed. */
-  private checks(cwd: string, commands: string[]): Promise<CheckReport> {
-    return this.deps.checks(cwd, commands, { sandbox: true });
+  private checks(cwd: string, commands: string[], env?: Record<string, string>): Promise<CheckReport> {
+    return this.deps.checks(cwd, commands, { sandbox: true, env });
   }
 
   private async stop(job: Job, issue: Issue): Promise<void> {

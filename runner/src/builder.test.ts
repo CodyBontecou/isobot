@@ -45,7 +45,8 @@ test("builder settings sandbox the shell and deny secrets with absolute rule pat
   assert.ok(settings.permissions.deny.includes("Read(//Users/me/.ssh/**)"), "absolute paths need the // prefix");
   assert.ok(settings.permissions.deny.includes("Read(//state/runner.env)"));
   assert.ok(settings.permissions.deny.includes("Edit(//Users/me/.claude/**)"));
-  assert.ok(settings.permissions.deny.includes("Write(//code/isobot/**)"));
+  assert.ok(settings.permissions.deny.includes("Edit(//code/isobot/**)"));
+  assert.ok(!settings.permissions.deny.some(rule => rule.startsWith("Write(")), "Claude Code ignores Write rules; Edit covers every edit tool");
   assert.ok(!settings.permissions.deny.some(rule => /\((?!\/\/)\//.test(rule)), "no single-slash (settings-relative) rules");
 });
 

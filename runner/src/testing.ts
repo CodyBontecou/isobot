@@ -1,4 +1,4 @@
-import type { AgentRun, Builder, Review, TriageItem, TriageResult } from "./builder.js";
+import type { AgentRun, Builder, JobDevices, Review, TriageItem, TriageResult } from "./builder.js";
 import type { Labels } from "./config.js";
 import type { DiffStat } from "./git.js";
 import type { CiState, GitHubApi, Issue, IssueComment, PullRequest } from "./github.js";
@@ -156,8 +156,16 @@ export class FakeBuilder implements Builder {
   triageItems: TriageItem[] = [];
   implementResult: AgentRun = { ok: true, sessionId: "session-1", summary: "Added the feature and tests." };
 
-  async implement(_input: { cwd: string; task: string }): Promise<AgentRun> { this.implementCalls++; return this.implementResult; }
-  async revise(input: { feedback: string; sessionId: string | null }): Promise<AgentRun> {
+  /** Device env each implement/revise call saw. */
+  deviceEnvs: (Record<string, string> | undefined)[] = [];
+
+  async implement(input: { cwd: string; task: string; devices?: JobDevices }): Promise<AgentRun> {
+    this.implementCalls++;
+    this.deviceEnvs.push(input.devices?.env);
+    return this.implementResult;
+  }
+  async revise(input: { feedback: string; sessionId: string | null; devices?: JobDevices }): Promise<AgentRun> {
+    this.deviceEnvs.push(input.devices?.env);
     this.reviseFeedback.push(input.feedback);
     this.reviseSessions.push(input.sessionId);
     return { ok: true, sessionId: "session-1", summary: "Fixed." };

@@ -9,7 +9,15 @@
     "maxTurns": 300,
     "maxFixRounds": 3,
     "maxReviewRounds": 2,
-    "settings": {}
+    "settings": {
+      "permissions": {
+        "deny": [
+          "Skill(create-payment-credential)",
+          "Skill(financial-insights)",
+          "Skill(use-link-identity)"
+        ]
+      }
+    }
   },
   "labels": {
     "proposed": "isobot:proposed",
@@ -126,9 +134,18 @@
     "codybontecou/health-md": {
       "checks": [
         "make test-contracts",
-        "make -C apps/apple prepare-healthmd-core-rust"
+        "make -C apps/apple prepare-healthmd-core-rust",
+        "xcodebuild build-for-testing -project apps/apple/HealthMd.xcodeproj -scheme HealthMd -destination 'generic/platform=iOS Simulator' -quiet CODE_SIGNING_ALLOWED=NO"
       ],
-      "notes": "Monorepo: Apple app under apps/apple (HealthMd.xcodeproj, scheme HealthMd), Android under apps/android, Rust core and CLI. PR CI only runs scripts/ci/run.py. Before finishing, build the iOS app and its tests yourself (make -C apps/apple prepare-healthmd-core-rust, then xcodebuild build-for-testing -project apps/apple/HealthMd.xcodeproj -scheme HealthMd -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO); the full Apple CI runs at release."
+      "devices": {
+        "ios": {
+          "deviceType": "iPhone 17"
+        },
+        "android": {
+          "avd": "isobot-api35"
+        }
+      },
+      "notes": "Monorepo: Apple app under apps/apple (HealthMd.xcodeproj, scheme HealthMd), Android under apps/android, Rust core and CLI. PR CI only runs scripts/ci/run.py; the runner's checks build the iOS app and its tests. For Android behaviour changes, especially upgrades and background work, install the app on the job's emulator and check it with argent. The full Apple CI runs at release."
     },
     "codybontecou/GitSync.md": {
       "checks": [

@@ -19,7 +19,7 @@ export interface NotifierOptions {
 }
 
 export type Phase =
-  | "queued" | "implementing" | "revising" | "checking" | "fixing" | "reviewing" | "addressing"
+  | "queued" | "devices" | "implementing" | "revising" | "checking" | "fixing" | "reviewing" | "addressing"
   | "pushing" | "ci" | "waiting" | "merged" | "releasing" | "released" | "releaseFailed"
   | "ship" | "shipping" | "shipped" | "shipFailed" | "retrying" | "paused" | "failed" | "stopped" | "closed";
 
@@ -28,6 +28,7 @@ type Step = "Build" | "Checks" | "Review" | "PR" | "Merge" | "Release" | "Ship";
 
 const PHASES: Record<Phase, { label: string; emoji: string; step: Step | "done" | null; mark: Mark }> = {
   queued: { label: "Queued", emoji: "⏳", step: "Build", mark: "wait" },
+  devices: { label: "Booting test devices", emoji: "📱", step: "Build", mark: "active" },
   implementing: { label: "Implementing", emoji: "🔨", step: "Build", mark: "active" },
   revising: { label: "Revising with your note", emoji: "💬", step: "Build", mark: "active" },
   checking: { label: "Running checks", emoji: "🧪", step: "Checks", mark: "active" },

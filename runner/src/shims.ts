@@ -2,7 +2,8 @@ import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 /**
- * SwiftPM and xcodebuild sandbox package manifests, plugins and Swift macro plugin servers with sandbox-exec, and macOS
+ * SwiftPM and xcodebuild sandbox package manifests, plugins, Swift macro plugin servers and (with
+ * ENABLE_USER_SCRIPT_SANDBOXING) Run Script phases with sandbox-exec, and macOS
  * can't nest one Seatbelt sandbox inside another. Inside isobot's sandbox (which already
  * confines the whole build) these wrappers turn the inner sandbox off, so `swift test` and
  * `xcodebuild` just work for builders and checks. They are only put on PATH for sandboxed runs.
@@ -15,7 +16,8 @@ for arg in "$@"; do
     -create-xcframework|-version|-showsdks|-find-executable|-find-library|-list|-showdestinations) exec /usr/bin/xcodebuild "$@" ;;
   esac
 done
-exec /usr/bin/xcodebuild -IDEPackageSupportDisableManifestSandbox=YES -IDEPackageSupportDisablePluginExecutionSandbox=YES 'OTHER_SWIFT_FLAGS=$(inherited) -Xfrontend -disable-sandbox' "$@"
+# ENABLE_USER_SCRIPT_SANDBOXING runs Run Script phases under sandbox-exec, which can't nest either.
+exec /usr/bin/xcodebuild -IDEPackageSupportDisableManifestSandbox=YES -IDEPackageSupportDisablePluginExecutionSandbox=YES 'OTHER_SWIFT_FLAGS=$(inherited) -Xfrontend -disable-sandbox' ENABLE_USER_SCRIPT_SANDBOXING=NO "$@"
 `,
   swift: `#!/bin/sh
 case "$1" in

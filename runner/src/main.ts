@@ -18,6 +18,7 @@ import { Awake, heartbeatAge, readHeartbeat, rotateLog, writeHeartbeat } from ".
 import { killAllChildren, run, setGitIdentity, sh, workerEnv } from "./proc.js";
 import { sandboxProfile } from "./sandbox.js";
 import { ensureShims } from "./shims.js";
+import { hasDevices, LocalDevices } from "./devices.js";
 import { Store } from "./store.js";
 import { AppStoreSource, DiscordSource, EmailSource, GitHubSource, VoxSource, triage, type Source } from "./triage.js";
 
@@ -37,7 +38,8 @@ interface Runtime {
   sources: Source[];
   builder: ClaudeCodeBuilder;
   notifier: Notifier;
-  checks: (cwd: string, commands: string[], options: { timeoutMs?: number; sandbox: boolean }) => Promise<CheckReport>;
+  checks: (cwd: string, commands: string[], options: { timeoutMs?: number; sandbox: boolean; env?: Record<string, string> }) => Promise<CheckReport>;
+  devices: LocalDevices;
   repoFor: (owner: string, repo: string) => Repo;
   train: ReleaseTrain;
 }
@@ -65,17 +67,24 @@ function runtime(): Runtime {
   const secrets = ["runner.env", "runner.sqlite", "runner.sqlite-wal", "runner.sqlite-shm", "logs", "runner.lock", "paused", "heartbeat.json"]
     .map(entry => path.join(env.home, entry)).concat(path.resolve(process.cwd(), ".env.runner"));
   const shimDir = ensureShims(env.home);
-  const builder = new ClaudeCodeBuilder(config.builder, { secrets, noWrite: [path.join(env.home, "repos"), shimDir, ISOBOT_ROOT] }, env.claudeBin, shimDir);
   const extraWrite = ((config.builder.settings?.sandbox as { filesystem?: { allowWrite?: string[] } } | undefined)?.filesystem?.allowWrite) ?? [];
+  const mcpDir = path.join(env.home, "mcp");
+  const shellTool = {
+    configDir: mcpDir,
+    profileFor: (cwd: string) => sandboxProfile({ workspace: cwd, secrets, allowWrite: extraWrite }),
+    env: (extra: Record<string, string>) => workerEnv(extra) as Record<string, string>,
+  };
+  const builder = new ClaudeCodeBuilder(config.builder, { secrets, noWrite: [path.join(env.home, "repos"), shimDir, mcpDir, ISOBOT_ROOT] }, env.claudeBin, shimDir, shellTool);
+  const devices = new LocalDevices(path.join(env.home, "logs", "devices"));
   const notifier = new Notifier({ webhookUrl: env.discordWebhookUrl, bot: env.discordBot, store, jobUrl: env.jobUrl });
   // Checks execute builder-written code, so they get the same confinement as the builder's shell.
-  const checks = (cwd: string, commands: string[], options: { timeoutMs?: number; sandbox: boolean }) => runChecks(cwd, commands, {
-    timeoutMs: options.timeoutMs,
+  const checks = (cwd: string, commands: string[], options: { timeoutMs?: number; sandbox: boolean; env?: Record<string, string> }) => runChecks(cwd, commands, {
+    timeoutMs: options.timeoutMs, env: options.env,
     sandboxProfile: options.sandbox ? sandboxProfile({ workspace: cwd, secrets, allowWrite: extraWrite }) : undefined,
     shimDir,
   });
   const repoFor = (owner: string, repo: string) => new Repo(env.home, owner, repo, env.githubToken);
-  const pipeline = new Pipeline({ config, env, store, github, builder, notifier, repo: repoFor, checks });
+  const pipeline = new Pipeline({ config, env, store, github, builder, notifier, repo: repoFor, checks, devices });
   const labels = Object.values(config.labels);
   const sources: Source[] = [new GitHubSource(github, configuredRepos(config), labels)];
   if (env.piUrl && env.piToken) sources.push(new DiscordSource(env.piUrl, env.piToken, lowerKeys(config.discordCategories)));
@@ -96,7 +105,7 @@ function runtime(): Runtime {
       return { version: status.appstore?.version ?? null, state: status.appstore?.state ?? null };
     },
   });
-  return { config, env, store, github, pipeline, sources, builder, notifier, checks, repoFor, train };
+  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train };
 }
 
 /** `owner/repo#12`, or `repo#12` for a configured repository. */
@@ -135,6 +144,8 @@ async function loop(rt: Runtime): Promise<void> {
   rt.pipeline.recover();
   // Nothing is running yet, so any workspace left behind is from a crash.
   rmSync(path.join(rt.env.home, "work"), { recursive: true, force: true });
+  rmSync(path.join(rt.env.home, "mcp"), { recursive: true, force: true });
+  await rt.devices.cleanupStale().catch(error => console.warn(`[devices] cleanup failed: ${(error as Error).message}`));
   const awake = new Awake();
   const logFile = path.join(rt.env.home, "logs", "runner.log");
   let lastTriageAt: string | null = null;
@@ -341,12 +352,19 @@ async function main(): Promise<void> {
       const sha = await repo.sync(await rt.github.defaultBranch(ref.owner, ref.repo));
       const dir = await repo.checkoutAt(sha, `checks__${Date.now()}`);
       const started = Date.now();
+      let lease: Awaited<ReturnType<LocalDevices["lease"]>> | null = null;
       try {
-        const report = await rt.checks(dir, policy.checks, { sandbox: true });
+        if (hasDevices(policy.devices)) {
+          console.log("Booting test devices…");
+          lease = await rt.devices.lease(`checks-${Date.now()}`, policy.devices);
+          console.log(lease.describe());
+        }
+        const report = await rt.checks(dir, policy.checks, { sandbox: true, env: lease?.env });
         for (const r of report.results) console.log(`${r.ok ? "✅" : "❌"} ${r.command}${r.ok ? "" : `\n${r.output}`}`);
         console.log(`${report.passed ? "PASS" : "FAIL"} in ${Math.round((Date.now() - started) / 1000)}s at ${sha.slice(0, 8)}`);
         if (!report.passed) process.exitCode = 1;
       } finally {
+        await lease?.release();
         await repo.removeWorkspace(path.basename(dir)).catch(() => undefined);
       }
       return;

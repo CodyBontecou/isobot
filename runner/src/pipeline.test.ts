@@ -7,12 +7,14 @@ import type { CheckReport } from "./policy.js";
 import { Store } from "./store.js";
 import { DISCORD_REPLY_MARKER } from "./notes.js";
 import { FakeBuilder, FakeDiscord, FakeGitHub, FakeRepo } from "./testing.js";
+import type { DeviceSpec, Devices } from "./devices.js";
+import { TransientError } from "./errors.js";
 
 const REPO = "codybontecou/time.md";
 const [OWNER, NAME] = REPO.split("/");
 const CHANNEL = "123456789012345678";
 
-function setup(configure: (config: RunnerConfig) => void = () => {}, checks: CheckReport[] = [], discord?: FakeDiscord) {
+function setup(configure: (config: RunnerConfig) => void = () => {}, checks: CheckReport[] = [], discord?: FakeDiscord, devices?: Devices) {
   const config = loadConfig();
   configure(config);
   const store = new Store(":memory:");
@@ -20,17 +22,20 @@ function setup(configure: (config: RunnerConfig) => void = () => {}, checks: Che
   const builder = new FakeBuilder();
   const repo = new FakeRepo();
   const checkCalls: string[][] = [];
+  const checkEnvs: (Record<string, string> | undefined)[] = [];
   const pipeline = new Pipeline({
     config, env: { home: "/tmp/isobot-test" }, store, github, builder,
     notifier: discord ? new Notifier({ bot: { token: "t", channelId: CHANNEL }, store, fetcher: discord.fetch }) : new Notifier(),
     repo: () => repo,
-    checks: async (_cwd, commands) => {
+    checks: async (_cwd, commands, options) => {
       checkCalls.push(commands);
+      checkEnvs.push(options.env);
       return checks.shift() ?? { configured: commands.length > 0, passed: true, results: commands.map(command => ({ command, ok: true, output: "" })) };
     },
     sleep: async () => {},
+    devices,
   });
-  return { config, store, github, builder, repo, pipeline, checkCalls };
+  return { config, store, github, builder, repo, pipeline, checkCalls, checkEnvs };
 }
 
 async function cycle(pipeline: Pipeline) {
@@ -528,4 +533,51 @@ test("a stranger's issue that isobot vetted and auto-approved may merge; without
   await cycle(raw.pipeline);
   assert.equal(raw.github.merged.length, 0, "no vetted proposal: the stranger's own text was the task");
   assert.match(raw.github.commentsFor(OWNER, NAME, 41).at(-1)!, /written by @stranger/);
+});
+
+class FakeDevices implements Devices {
+  leased: { jobId: string; spec: DeviceSpec }[] = [];
+  released = 0;
+  fail?: Error;
+  async lease(jobId: string, spec: DeviceSpec) {
+    if (this.fail) throw this.fail;
+    this.leased.push({ jobId, spec });
+    return { env: { ISOBOT_IOS_SIMULATOR: "SIM-1" }, describe: () => "- iOS simulator: SIM-1", release: async () => { this.released++; } };
+  }
+  async cleanupStale() {}
+}
+
+test("repos with devices get a per-job device for the builder and every check run, released afterwards", async () => {
+  const devices = new FakeDevices();
+  const { github, pipeline, builder, checkEnvs } = setup(config => {
+    config.repos[REPO] = { autonomy: "merge", checks: ["make test"], devices: { ios: { deviceType: "iPhone 17" } } };
+  }, [{ configured: true, passed: false, results: [{ command: "make test", ok: false, output: "boom" }] }], undefined, devices);
+  github.add(OWNER, NAME, 31, "Fix the widget", ["isobot:ready"]);
+  await cycle(pipeline);
+
+  assert.deepEqual(devices.leased, [{ jobId: "codybontecou/time.md#31", spec: { ios: { deviceType: "iPhone 17" } } }]);
+  assert.deepEqual(builder.deviceEnvs, [{ ISOBOT_IOS_SIMULATOR: "SIM-1" }, { ISOBOT_IOS_SIMULATOR: "SIM-1" }], "implement and the fix round see the device");
+  assert.deepEqual(checkEnvs, [{ ISOBOT_IOS_SIMULATOR: "SIM-1" }, { ISOBOT_IOS_SIMULATOR: "SIM-1" }]);
+  assert.equal(devices.released, 1);
+});
+
+test("repos without devices never boot one", async () => {
+  const devices = new FakeDevices();
+  const { github, pipeline, builder } = setup(() => {}, [], undefined, devices);
+  github.add(OWNER, NAME, 32, "Fix the label", ["isobot:ready"]);
+  await cycle(pipeline);
+  assert.equal(devices.leased.length, 0);
+  assert.deepEqual(builder.deviceEnvs, [undefined]);
+});
+
+test("a device that won't boot is retried later, not blamed on the issue", async () => {
+  const devices = new FakeDevices();
+  devices.fail = new TransientError("couldn't boot the iOS simulator: timed out");
+  const { github, pipeline, store, builder } = setup(config => {
+    config.repos[REPO] = { autonomy: "pr", devices: { ios: { deviceType: "iPhone 17" } } };
+  }, [], undefined, devices);
+  github.add(OWNER, NAME, 33, "Fix the chart", ["isobot:ready"]);
+  await cycle(pipeline);
+  assert.equal(builder.implementCalls, 0);
+  assert.notEqual(store.get("codybontecou/time.md#33")!.state, "failed");
 });
