@@ -58,6 +58,19 @@ export function emulatorSerials(adbDevices: string): string[] {
   return adbDevices.split("\n").map(line => line.trim().split(/\s+/)[0]).filter(serial => /^emulator-\d+$/.test(serial));
 }
 
+/**
+ * -read-only lets several instances share one AVD and leaves it untouched; nothing is saved on exit.
+ * gRPC (on 127.0.0.1, token-protected) is what argent's gestures drive; without it the emulator also
+ * writes no discovery file, so argent can describe the screen but never tap.
+ */
+export function emulatorArgs(avd: string, port: number): string[] {
+  return ["-avd", avd, "-read-only", "-no-window", "-no-audio", "-no-boot-anim", "-no-snapshot-save",
+    "-port", String(port), "-grpc", String(port + GRPC_PORT_OFFSET), "-grpc-use-token"];
+}
+
+/** 5600 → 8700: clear of the emulator's default gRPC ports (8554+). */
+export const GRPC_PORT_OFFSET = 3100;
+
 export function freePort(inUse: Set<number>): number | null {
   return ANDROID_PORTS.find(port => !inUse.has(port)) ?? null;
 }
@@ -127,8 +140,7 @@ export class LocalDevices implements Devices {
     const serial = `emulator-${port}`;
     mkdirSync(this.logDir, { recursive: true });
     const log = openSync(path.join(this.logDir, `${serial}.log`), "w");
-    // -read-only lets several instances share one AVD and leaves it untouched; nothing is saved on exit.
-    const child = spawn(this.emulator, ["-avd", avd, "-read-only", "-no-window", "-no-audio", "-no-boot-anim", "-no-snapshot-save", "-port", String(port)], {
+    const child = spawn(this.emulator, emulatorArgs(avd, port), {
       detached: true, stdio: ["ignore", log, log],
     });
     closeSync(log);

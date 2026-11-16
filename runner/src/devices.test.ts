@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ANDROID_PORTS, emulatorSerials, freePort, LocalDevices, simulatorName, staleSimulators, type Exec } from "./devices.js";
+import { ANDROID_PORTS, emulatorArgs, emulatorSerials, freePort, LocalDevices, simulatorName, staleSimulators, type Exec } from "./devices.js";
 import type { RunResult } from "./proc.js";
 
 const ok = (stdout = ""): RunResult => ({ code: 0, stdout, stderr: "", timedOut: false });
@@ -50,4 +50,12 @@ test("a simulator that fails to boot is deleted and reported as transient", asyn
     return true;
   });
   assert.ok(calls.includes("simctl delete"));
+});
+
+test("emulators are read-only and expose token-protected gRPC for argent", () => {
+  const args = emulatorArgs("isobot-api35", 5602);
+  assert.deepEqual(args.slice(0, 3), ["-avd", "isobot-api35", "-read-only"]);
+  assert.equal(args[args.indexOf("-port") + 1], "5602");
+  assert.equal(args[args.indexOf("-grpc") + 1], "8702");
+  assert.ok(args.includes("-grpc-use-token"));
 });

@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
+import { removeDerivedData } from "./cleanup.js";
 import { run, workerEnv, type RunResult } from "./proc.js";
 
 export interface DiffStat {
@@ -105,7 +106,10 @@ export class Repo {
   }
 
   async removeWorkspace(name: string): Promise<void> {
-    rmSync(this.workspacePath(name), { recursive: true, force: true });
+    const dir = this.workspacePath(name);
+    rmSync(dir, { recursive: true, force: true });
+    // Xcode keyed its DerivedData to this path; nothing will build here again.
+    removeDerivedData(dir);
   }
 
   /** Commits anything left uncommitted in a workspace (no hooks run). */

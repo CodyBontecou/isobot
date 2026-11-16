@@ -228,6 +228,7 @@ export class Pipeline {
       // Everything the owner said since approving goes into the task, so the reviewer judges against it too.
       let task = withNotes(source.task, notes.all);
       let run: AgentRun;
+      let mainSummary = "";
       let baseSha: string;
       let noteRounds = 0;
       const sessionId = () => run?.sessionId ?? store.get(job.id)?.sessionId ?? null;
@@ -246,6 +247,7 @@ export class Pipeline {
         });
         store.update(job.id, { sessionId: run.sessionId ?? job.sessionId });
         store.event(job.id, "revised", run.summary);
+        mainSummary = run.summary;
       } else {
         baseSha = mainSha;
         workspace = await repo.createWorkspace(branch, baseSha);
@@ -253,6 +255,7 @@ export class Pipeline {
         run = await builder.implement({ cwd: workspace, task, devices, media: mediaDir });
         store.update(job.id, { sessionId: run.sessionId });
         store.event(job.id, "implemented", run.summary);
+        mainSummary = run.summary;
       }
       const commit = async (message: string) => {
         await repo.commitPending(workspace!, message);
@@ -269,6 +272,8 @@ export class Pipeline {
         return report;
       };
 
+      // The PR describes the change itself; fix, review and note rounds are listed after it.
+      const laterRounds: { label: string; summary: string }[] = [];
       let checks = await runChecks(run.summary);
       let review: Review | undefined;
       let fixRounds = 0;
@@ -282,6 +287,7 @@ export class Pipeline {
             task = withNotes(source.task, late.all);
             await this.feed(job, { phase: "revising", notes: this.noteCount(job, late.fresh.length) }, this.ackNotes(late.fresh));
             run = await builder.revise({ cwd: workspace, sessionId: sessionId(), task, feedback: noteFeedback(late.fresh), devices, media: mediaDir });
+            laterRounds.push({ label: "Owner note", summary: run.summary });
             sha = await commit(`Apply owner feedback for #${issue.number}`);
             checks = await runChecks(run.summary);
             continue;
@@ -291,6 +297,7 @@ export class Pipeline {
           fixRounds++;
           await this.feed(job, { phase: "fixing", fixRounds });
           run = await builder.revise({ cwd: workspace, sessionId: sessionId(), task, feedback: failureFeedback(checks), devices, media: mediaDir });
+          laterRounds.push({ label: `Check fix ${fixRounds}`, summary: run.summary });
           sha = await commit(`Fix checks for #${issue.number}`);
           checks = await runChecks(run.summary);
           continue;
@@ -307,6 +314,7 @@ export class Pipeline {
           reviewRounds++;
           await this.feed(job, { phase: "addressing", reviewRounds });
           run = await builder.revise({ cwd: workspace, sessionId: run.sessionId, task, feedback: reviewFeedback(review), devices, media: mediaDir });
+          laterRounds.push({ label: `Review round ${reviewRounds}`, summary: run.summary });
           sha = await commit(`Address review for #${issue.number}`);
           checks = await runChecks(run.summary);
           continue;
@@ -325,7 +333,7 @@ export class Pipeline {
       await this.feed(job, { phase: "pushing" });
       await repo.push(sha, branch);
       const media = await this.publishMedia(job, repo, mediaDir, sha);
-      const body = prBody({ issue, run: run.summary, checks, review, diff, media: media.markdown });
+      const body = prBody({ issue, run: mainSummary, rounds: laterRounds, checks, review, diff, media: media.markdown });
       const existing = await github.findPull(job.owner, job.repo, branch);
       const pr = existing && existing.state === "open"
         ? (await github.updatePull(job.owner, job.repo, existing.number, body), existing)
@@ -667,12 +675,14 @@ export function buildTask(issue: Pick<Issue, "title" | "url" | "body">, policy: 
   ].join("\n\n");
 }
 
-function prBody(input: { issue: Issue; run: string; checks: CheckReport; review: Review; diff: DiffStat; media?: string }): string {
+function prBody(input: { issue: Issue; run: string; rounds?: { label: string; summary: string }[]; checks: CheckReport; review: Review; diff: DiffStat; media?: string }): string {
   const { issue, run, checks, review, diff } = input;
+  const rounds = (input.rounds ?? []).filter(r => r.summary.trim());
   return [
     `Closes #${issue.number}`,
     "## Summary",
     run || "(builder gave no summary)",
+    ...(rounds.length ? [`<details><summary>Later rounds (${rounds.length})</summary>\n\n${rounds.map(r => `**${r.label}:** ${r.summary}`).join("\n\n")}\n\n</details>`] : []),
     ...(input.media ? ["## Screenshots", input.media] : []),
     "## Runner checks",
     formatChecks(checks),

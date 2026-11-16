@@ -184,7 +184,7 @@
     "codybontecou/whereday": {
       "checks": [
         "python3 -m unittest discover -s scripts -p test_test_ios.py",
-        "scripts/test-ios.sh --destination \"platform=iOS Simulator,id=$ISOBOT_IOS_SIMULATOR\""
+        "scripts/test-ios.sh --destination \"platform=iOS Simulator,id=$ISOBOT_IOS_SIMULATOR\" -skip-testing:IsoMeTests/StoreManagerTests/testStoreKitCancellationAndOfflineRestoreKeepFreshUserLocked"
       ],
       "devices": {
         "ios": {
@@ -194,7 +194,7 @@
           "avd": "isobot-api35"
         }
       },
-      "notes": "iOS app (Xcode project IsoMe.xcodeproj, scheme IsoMe) plus Android under android/. The runner's checks run the IsoMe XCTest suite on the job's simulator (scripts/test-ios.sh), like PR CI. Android's emulator suite takes hours and runs nightly in CI (android-heavy-tests.yml), so for Android changes run just the relevant connected tests through the isobot shell, e.g. `cd android && ./gradlew :app:connectedMapQaAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=<the test classes you touched>`, plus the unit tests in android-tests.yml.",
+      "notes": "iOS app (Xcode project IsoMe.xcodeproj, scheme IsoMe) plus Android under android/. The runner's checks run the IsoMe XCTest suite on the job's simulator (scripts/test-ios.sh), like PR CI, except one StoreKit restore test that waits forever on an Apple Account prompt on a simulator without App Store sign-in. Android's emulator suite takes hours and runs nightly in CI (android-heavy-tests.yml), so for Android changes run just the relevant connected tests through the isobot shell, e.g. `cd android && ./gradlew :app:connectedMapQaAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=<the test classes you touched>`, plus the unit tests in android-tests.yml.",
       "ownerAutonomy": "merge",
       "train": {
         "appId": "6761960794",

@@ -19,6 +19,7 @@ import { killAllChildren, run, setGitIdentity, sh, workerEnv } from "./proc.js";
 import { sandboxProfile } from "./sandbox.js";
 import { ensureShims } from "./shims.js";
 import { hasDevices, LocalDevices } from "./devices.js";
+import { removeDerivedData } from "./cleanup.js";
 import { Store } from "./store.js";
 import { AppStoreSource, DiscordSource, EmailSource, GitHubSource, VoxSource, triage, type Source } from "./triage.js";
 
@@ -144,6 +145,7 @@ async function loop(rt: Runtime): Promise<void> {
   rt.pipeline.recover();
   // Nothing is running yet, so any workspace left behind is from a crash.
   rmSync(path.join(rt.env.home, "work"), { recursive: true, force: true });
+  removeDerivedData(path.join(rt.env.home, "work"));
   rmSync(path.join(rt.env.home, "mcp"), { recursive: true, force: true });
   await rt.devices.cleanupStale().catch(error => console.warn(`[devices] cleanup failed: ${(error as Error).message}`));
   const awake = new Awake();

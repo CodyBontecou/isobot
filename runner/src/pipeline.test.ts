@@ -622,3 +622,14 @@ test("a media publishing failure never fails the job", async () => {
   assert.equal(store.get("codybontecou/time.md#43")!.state, "pr_open");
   assert.doesNotMatch(github.pulls.get(100)!.body, /Screenshots/);
 });
+
+test("the PR summary describes the change, not the last fix round", async () => {
+  const failing: CheckReport = { configured: true, passed: false, results: [{ command: "make test", ok: false, output: "1 failing" }] };
+  const { github, pipeline } = setup(config => {
+    config.repos[REPO] = { autonomy: "pr", checks: ["make test"] };
+  }, [failing]);
+  github.add(OWNER, NAME, 44, "Repair duplicates", ["isobot:ready"]);
+  await cycle(pipeline);
+  const body = github.pulls.get(100)!.body;
+  assert.match(body, /## Summary\n\nAdded the feature and tests\.\n\n<details><summary>Later rounds \(1\)<\/summary>\n\n\*\*Check fix 1:\*\* Fixed\./);
+});
