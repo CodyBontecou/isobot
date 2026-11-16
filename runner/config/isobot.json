@@ -150,9 +150,17 @@
     "codybontecou/GitSync.md": {
       "checks": [
         "! grep -E 'CURRENT_PROJECT_VERSION = [^;]+;' Sync.md.xcodeproj/project.pbxproj | grep -vE '= [0-9]{12};'",
-        "xcodebuild build-for-testing -project Sync.md.xcodeproj -scheme Sync.md -destination 'generic/platform=iOS Simulator' -quiet CODE_SIGNING_ALLOWED=NO"
+        "TEST_RUNNER_SKIP_STOREKIT_PURCHASE_TESTS=1 xcodebuild test -project Sync.md.xcodeproj -scheme Sync.md -destination \"id=$ISOBOT_IOS_SIMULATOR\" -only-testing:SyncMDTests -parallel-testing-enabled NO -quiet"
       ],
-      "notes": "iOS git client (Sync.md.xcodeproj, scheme Sync.md). CURRENT_PROJECT_VERSION must stay a 12-digit YYYYMMDDHHMM value. PR CI (xctest.yml, SyncMDTests) runs the unit tests.",
+      "devices": {
+        "ios": {
+          "deviceType": "iPhone 17"
+        },
+        "android": {
+          "avd": "isobot-api35"
+        }
+      },
+      "notes": "iOS git client (Sync.md.xcodeproj, scheme Sync.md) plus an Android app under android/. CURRENT_PROJECT_VERSION must stay a 12-digit YYYYMMDDHHMM value. The runner's checks run the SyncMDTests unit suite on the job's simulator, like PR CI (xctest.yml). For Android changes, run the relevant Gradle tests (connected ones through the isobot shell on the job's emulator) and check the app there with argent.",
       "ownerAutonomy": "merge",
       "train": {
         "appId": "6758960270",
@@ -162,13 +170,31 @@
         "holdMinutes": 60
       }
     },
-    "codybontecou/Instarep.ly": {},
+    "codybontecou/Instarep.ly": {
+      "checks": [
+        "xcodebuild build -project InstaReply/InstaReply.xcodeproj -scheme InstaReply -destination 'generic/platform=iOS Simulator' -quiet CODE_SIGNING_ALLOWED=NO"
+      ],
+      "devices": {
+        "ios": {
+          "deviceType": "iPhone 17"
+        }
+      },
+      "notes": "iOS app with a custom keyboard extension (InstaReply/InstaReply.xcodeproj, schemes InstaReply and InstaReplyKeyboard) plus a worker under worker/. There's no test target, so the runner only checks that the app builds; check visible changes on the job's simulator with argent."
+    },
     "codybontecou/whereday": {
       "checks": [
         "python3 -m unittest discover -s scripts -p test_test_ios.py",
-        "xcodebuild build-for-testing -project IsoMe.xcodeproj -scheme IsoMe -destination 'generic/platform=iOS Simulator' -quiet CODE_SIGNING_ALLOWED=NO"
+        "scripts/test-ios.sh --destination \"platform=iOS Simulator,id=$ISOBOT_IOS_SIMULATOR\""
       ],
-      "notes": "iOS app (Xcode project IsoMe.xcodeproj, scheme IsoMe) plus Android. PR CI runs IsoMe XCTest.",
+      "devices": {
+        "ios": {
+          "deviceType": "iPhone 17"
+        },
+        "android": {
+          "avd": "isobot-api35"
+        }
+      },
+      "notes": "iOS app (Xcode project IsoMe.xcodeproj, scheme IsoMe) plus Android under android/. The runner's checks run the IsoMe XCTest suite on the job's simulator (scripts/test-ios.sh), like PR CI. Android's emulator suite takes hours and runs nightly in CI (android-heavy-tests.yml), so for Android changes run just the relevant connected tests through the isobot shell, e.g. `cd android && ./gradlew :app:connectedMapQaAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=<the test classes you touched>`, plus the unit tests in android-tests.yml.",
       "ownerAutonomy": "merge",
       "train": {
         "appId": "6761960794",
@@ -179,11 +205,20 @@
       }
     },
     "codybontecou/vox.md": {
-      "ownerAutonomy": "merge",
       "checks": [
-        "./scripts/test-project-contracts.sh"
+        "./scripts/test-project-contracts.sh",
+        "xcodebuild test -project Voxboard.xcodeproj -scheme VoxboardTests -configuration Debug -destination \"id=$ISOBOT_IOS_SIMULATOR\" -skip-testing:VoxboardTests/HardPaywallStoreKitTests -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile -quiet CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=''"
       ],
-      "notes": "SwiftUI iOS/Mac/Watch app plus an Android app under apps/android. GitHub Apple CI runs the full xcodebuild test suite on every PR.",
+      "devices": {
+        "ios": {
+          "deviceType": "iPhone 17"
+        },
+        "android": {
+          "avd": "isobot-api35"
+        }
+      },
+      "notes": "SwiftUI iOS/Mac/Watch app plus an Android app under apps/android. The runner's checks run the app-hosted VoxboardTests on the job's simulator, as Apple CI does; GitHub Apple CI also runs the full suite on every PR. For Android changes, run the relevant tests through the isobot shell (./apps/android/gradlew -p apps/android …, connected tests on the job's emulator) and check the app there with argent.",
+      "ownerAutonomy": "merge",
       "train": {
         "appId": "6758967337",
         "project": "Voxboard.xcodeproj",
