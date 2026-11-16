@@ -140,6 +140,9 @@ function acquireLock(env: Environment): void {
   process.on("exit", () => { try { if (readFileSync(file, "utf8") === String(process.pid)) rmSync(file); } catch { /* gone */ } });
 }
 
+/** A cycle running longer than this (release steps included) counts as hung for the external heartbeat. */
+const HUNG_CYCLE_MS = 2 * 60 * 60_000;
+
 async function loop(rt: Runtime): Promise<void> {
   acquireLock(rt.env);
   rt.pipeline.recover();
@@ -168,11 +171,22 @@ async function loop(rt: Runtime): Promise<void> {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 
   let lastTriage = 0;
+  let cycleStartedAt: number | null = null;
+  if (rt.env.heartbeatUrl) {
+    const url = rt.env.heartbeatUrl;
+    // Its own timer, so a long release step inside a cycle doesn't silence it; a hung cycle still does.
+    setInterval(() => {
+      const hung = cycleStartedAt !== null && Date.now() - cycleStartedAt > HUNG_CYCLE_MS;
+      if (!stopping && !lastCycleError && !hung) void pingHeartbeat(url);
+    }, 60_000);
+    void pingHeartbeat(url);
+  }
   console.log(`[runner] started: ${configuredRepos(rt.config).map(r => `${r.owner}/${r.repo}`).join(", ")}; sources: ${rt.sources.map(s => s.name).join(", ")}`);
   await rt.notifier.discord("🟢 isobot runner started");
   while (!stopping) {
     const manuallyPaused = existsSync(pausedFile(rt.env));
     if (!manuallyPaused) {
+      cycleStartedAt = Date.now();
       try {
         await rt.pipeline.discover();
         rt.pipeline.startQueued();
@@ -198,8 +212,8 @@ async function loop(rt: Runtime): Promise<void> {
           await rt.notifier.discord(`⚠️ isobot runner cycle failing: ${lastCycleError.slice(0, 300)}`);
         }
       }
+      cycleStartedAt = null;
     }
-    if (rt.env.heartbeatUrl && !lastCycleError) void pingHeartbeat(rt.env.heartbeatUrl);
     awake.update(rt.pipeline.activeJobs.length > 0);
     try { rotateLog(logFile); } catch { /* logging must never stop the runner */ }
     try {

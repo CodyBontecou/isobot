@@ -97,11 +97,14 @@ from that channel.
 - **Claude Code signed out**: treated as temporary; `doctor` says so.
 - **Crash or reboot**: launchd restarts the runner; interrupted builds start
   again from a clean workspace.
-- **The whole Mac goes away** (asleep, offline, powered off): set
-  `ISOBOT_HEARTBEAT_URL` to a dead-man's switch such as a healthchecks.io check
-  that alerts to Discord. The runner POSTs to it after every healthy cycle, so
-  silence (including a cycle that fails every time) raises the alert. `doctor`
-  sends a test ping.
+- **The whole Mac goes away** (asleep, offline, powered off): the runner POSTs to
+  `ISOBOT_HEARTBEAT_URL` every minute while it is healthy (last cycle succeeded, current
+  one under 2 hours). The `watchdog/` Worker (`isobot-watchdog`, deploy with
+  `npm run watchdog:deploy`) receives them at `/ping/<PING_TOKEN>` and posts to the
+  runner's Discord webhook after 10 minutes of silence (`GRACE_MINUTES`), every 6 hours
+  while it stays quiet, and once when pings resume. `GET /status/<PING_TOKEN>` shows the
+  last ping. It runs on Cloudflare, so it still works when this Mac doesn't; any
+  dead-man's-switch URL that accepts a POST works too. `doctor` sends a test ping.
 - **Sleep**: while a build runs the runner holds a `caffeinate` assertion, so
   the Mac doesn't idle-sleep mid-build.
 
