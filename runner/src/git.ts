@@ -151,6 +151,13 @@ export class Repo {
     });
   }
 
+  /** Tags a released commit on GitHub (never moves an existing tag). */
+  pushTag(sha: string, tag: string): Promise<void> {
+    return this.exclusive(async () => {
+      await this.git(["push", "--quiet", "origin", `${sha}:refs/tags/${tag}`], this.barePath, true);
+    });
+  }
+
   /** A clean checkout of a commit, for release commands. */
   checkoutAt(sha: string, name: string): Promise<string> {
     return this.exclusive(async () => {

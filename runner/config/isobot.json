@@ -39,6 +39,19 @@
     "maxProposalsPerNote": 3,
     "hints": "\"Vox\", \"box\", \"boxing\" or \"Voxboard\" = Vox.md (codybontecou/vox.md); \"Health and D\" or \"health MD\" = Health.md (codybontecou/health-md); \"time MD\" = time.md; \"where day\", \"iso me\" = whereday; \"git sync\" or \"sync MD\" = GitSync.md; \"insta reply\" = Instarep.ly."
   },
+  "autoApprove": {
+    "sources": [
+      "discord",
+      "github",
+      "email",
+      "appstore"
+    ],
+    "kinds": [
+      "bug",
+      "feature"
+    ],
+    "minConfidence": 0.8
+  },
   "appStore": {
     "apps": {
       "6757763969": "codybontecou/health-md",
@@ -107,14 +120,39 @@
     }
   },
   "repos": {
-    "codybontecou/time.md": {},
-    "codybontecou/health-md": {},
-    "codybontecou/GitSync.md": {},
+    "codybontecou/time.md": {
+      "checks": [
+        "xcodebuild -scheme 'time.md' -destination 'platform=macOS' -configuration Debug CODE_SIGNING_ALLOWED=NO -quiet test"
+      ],
+      "notes": "macOS app distributed outside the App Store (Developer ID, Sparkle), plus mobile/ (Expo) and sync-worker/. PR CI builds and tests macOS."
+    },
+    "codybontecou/health-md": {
+      "checks": [
+        "make test-contracts",
+        "make apple-ios"
+      ],
+      "notes": "Monorepo: Apple app under apps/apple (HealthMd.xcodeproj), Android under apps/android, Rust core and CLI. PR CI only runs scripts/ci/run.py, so the local checks are what verify the iOS app."
+    },
+    "codybontecou/GitSync.md": {
+      "checks": [
+        "! grep -E 'CURRENT_PROJECT_VERSION = [^;]+;' Sync.md.xcodeproj/project.pbxproj | grep -vE '= [0-9]{12};'",
+        "xcodebuild build-for-testing -project Sync.md.xcodeproj -scheme Sync.md -destination 'generic/platform=iOS Simulator' -quiet CODE_SIGNING_ALLOWED=NO"
+      ],
+      "notes": "iOS git client (Sync.md.xcodeproj, scheme Sync.md). CURRENT_PROJECT_VERSION must stay a 12-digit YYYYMMDDHHMM value. PR CI (xctest.yml, SyncMDTests) runs the unit tests."
+    },
     "codybontecou/Instarep.ly": {},
-    "codybontecou/whereday": {},
+    "codybontecou/whereday": {
+      "checks": [
+        "python3 -m unittest discover -s scripts -p test_test_ios.py",
+        "scripts/test-ios.sh"
+      ],
+      "notes": "iOS app (Xcode project IsoMe.xcodeproj, scheme IsoMe) plus Android. PR CI runs IsoMe XCTest."
+    },
     "codybontecou/vox.md": {
       "ownerAutonomy": "merge",
-      "checks": ["./scripts/test-project-contracts.sh"],
+      "checks": [
+        "./scripts/test-project-contracts.sh"
+      ],
       "notes": "SwiftUI iOS/Mac/Watch app plus an Android app under apps/android. GitHub Apple CI runs the full xcodebuild test suite on every PR."
     }
   }

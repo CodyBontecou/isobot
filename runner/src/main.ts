@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import { ImapFlow } from "imapflow";
+import { ReleaseTrain } from "./train.js";
+import type { CheckReport } from "./policy.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ClaudeCodeBuilder } from "./builder.js";
-import { configuredRepos, loadConfig, loadEnvironment, type Environment, type RunnerConfig } from "./config.js";
+import { configuredRepos, loadConfig, loadEnvironment, policyFor, type Environment, type RunnerConfig } from "./config.js";
 import { Repo } from "./git.js";
 import { GitHub } from "./github.js";
 import { TERMINAL_MARKER } from "./notes.js";
@@ -13,7 +15,7 @@ import { Notifier } from "./notify.js";
 import { Pipeline } from "./pipeline.js";
 import { runChecks } from "./checks.js";
 import { Awake, heartbeatAge, readHeartbeat, rotateLog, writeHeartbeat } from "./ops.js";
-import { killAllChildren, run, setGitIdentity } from "./proc.js";
+import { killAllChildren, run, setGitIdentity, sh, workerEnv } from "./proc.js";
 import { sandboxProfile } from "./sandbox.js";
 import { ensureShims } from "./shims.js";
 import { Store } from "./store.js";
@@ -35,7 +37,13 @@ interface Runtime {
   sources: Source[];
   builder: ClaudeCodeBuilder;
   notifier: Notifier;
+  checks: (cwd: string, commands: string[], options: { timeoutMs?: number; sandbox: boolean }) => Promise<CheckReport>;
+  repoFor: (owner: string, repo: string) => Repo;
+  train: ReleaseTrain;
 }
+
+/** Set once the runner starts stopping; a release train interrupted by it resumes next start. */
+let shuttingDown = false;
 
 /** The isobot checkout running this code; builders must never modify it. */
 const ISOBOT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -60,23 +68,35 @@ function runtime(): Runtime {
   const builder = new ClaudeCodeBuilder(config.builder, { secrets, noWrite: [path.join(env.home, "repos"), shimDir, ISOBOT_ROOT] }, env.claudeBin, shimDir);
   const extraWrite = ((config.builder.settings?.sandbox as { filesystem?: { allowWrite?: string[] } } | undefined)?.filesystem?.allowWrite) ?? [];
   const notifier = new Notifier({ webhookUrl: env.discordWebhookUrl, bot: env.discordBot, store, jobUrl: env.jobUrl });
-  const pipeline = new Pipeline({
-    config, env, store, github, builder, notifier,
-    repo: (owner, repo) => new Repo(env.home, owner, repo, env.githubToken),
-    // Checks execute builder-written code, so they get the same confinement as the builder's shell.
-    checks: (cwd, commands, options) => runChecks(cwd, commands, {
-      timeoutMs: options.timeoutMs,
-      sandboxProfile: options.sandbox ? sandboxProfile({ workspace: cwd, secrets, allowWrite: extraWrite }) : undefined,
-      shimDir,
-    }),
+  // Checks execute builder-written code, so they get the same confinement as the builder's shell.
+  const checks = (cwd: string, commands: string[], options: { timeoutMs?: number; sandbox: boolean }) => runChecks(cwd, commands, {
+    timeoutMs: options.timeoutMs,
+    sandboxProfile: options.sandbox ? sandboxProfile({ workspace: cwd, secrets, allowWrite: extraWrite }) : undefined,
+    shimDir,
   });
+  const repoFor = (owner: string, repo: string) => new Repo(env.home, owner, repo, env.githubToken);
+  const pipeline = new Pipeline({ config, env, store, github, builder, notifier, repo: repoFor, checks });
   const labels = Object.values(config.labels);
   const sources: Source[] = [new GitHubSource(github, configuredRepos(config), labels)];
   if (env.piUrl && env.piToken) sources.push(new DiscordSource(env.piUrl, env.piToken, lowerKeys(config.discordCategories)));
   if (env.piUrl && env.piToken && config.vox) sources.push(new VoxSource(env.piUrl, env.piToken, config.vox.conversation));
   for (const account of env.imap) sources.push(new EmailSource(account));
   if (config.appStore) sources.push(new AppStoreSource(config.appStore));
-  return { config, env, store, github, pipeline, sources, builder, notifier };
+  const train = new ReleaseTrain({
+    config, store, github, notifier, repo: repoFor,
+    stopping: () => shuttingDown,
+    run: async (cwd, command, timeoutMs) => {
+      const result = await sh(command, { cwd, env: workerEnv(), timeoutMs });
+      return { ok: result.code === 0 && !result.timedOut, output: `${result.stdout}\n${result.stderr}` };
+    },
+    appStatus: async appId => {
+      const result = await run("asc", ["status", "--app", appId, "--output", "json"], { cwd: env.home, env: workerEnv(), timeoutMs: 120_000 });
+      if (result.code !== 0) throw new Error(`asc status failed: ${(result.stderr || result.stdout).trim().slice(-300)}`);
+      const status = JSON.parse(result.stdout) as { appstore?: { version?: string; state?: string } };
+      return { version: status.appstore?.version ?? null, state: status.appstore?.state ?? null };
+    },
+  });
+  return { config, env, store, github, pipeline, sources, builder, notifier, checks, repoFor, train };
 }
 
 /** `owner/repo#12`, or `repo#12` for a configured repository. */
@@ -127,6 +147,7 @@ async function loop(rt: Runtime): Promise<void> {
     stopping = true;
     console.log(`[runner] ${signal}: stopping; interrupted builds restart from scratch next time`);
     rt.pipeline.beginShutdown();
+    shuttingDown = true;
     killAllChildren();
     setTimeout(() => process.exit(0), 2000).unref();
   };
@@ -143,6 +164,7 @@ async function loop(rt: Runtime): Promise<void> {
         await rt.pipeline.discover();
         rt.pipeline.startQueued();
         await rt.pipeline.followUp();
+        await rt.train.tick();
         lastCycleError = null;
         if (!triageRunning && Date.now() - lastTriage > rt.config.triageMinutes * 60_000) {
           lastTriage = Date.now();
@@ -253,6 +275,7 @@ const HELP = `isobot runner
   setup               Create the isobot labels in every configured repository
   doctor              Check Claude Code, GitHub, Pi and optional sources
   pause | resume      Stop or restart new work (running builds finish)
+  checks <repo>       Run a repo's configured checks on its default branch, sandboxed like a build
   say <repo#n> <text> Send isobot a note about a job, like replying in its Discord thread`;
 
 async function main(): Promise<void> {
@@ -304,6 +327,30 @@ async function main(): Promise<void> {
     case "resume":
       rmSync(pausedFile(rt.env), { force: true });
       return console.log("resumed");
+    case "checks": {
+      // Runs a repo's configured checks on its default branch, in the same sandbox builds use.
+      const ref = process.argv[3] && resolveIssue(rt.config, `${process.argv[3]}#1`);
+      if (!ref) {
+        console.error("Usage: checks <owner/repo | repo>");
+        process.exitCode = 2;
+        return;
+      }
+      const policy = policyFor(rt.config, `${ref.owner}/${ref.repo}`);
+      if (policy.checks.length === 0) return console.log(`${ref.owner}/${ref.repo} has no checks configured`);
+      const repo = rt.repoFor(ref.owner, ref.repo);
+      const sha = await repo.sync(await rt.github.defaultBranch(ref.owner, ref.repo));
+      const dir = await repo.checkoutAt(sha, `checks__${Date.now()}`);
+      const started = Date.now();
+      try {
+        const report = await rt.checks(dir, policy.checks, { sandbox: true });
+        for (const r of report.results) console.log(`${r.ok ? "✅" : "❌"} ${r.command}${r.ok ? "" : `\n${r.output}`}`);
+        console.log(`${report.passed ? "PASS" : "FAIL"} in ${Math.round((Date.now() - started) / 1000)}s at ${sha.slice(0, 8)}`);
+        if (!report.passed) process.exitCode = 1;
+      } finally {
+        await repo.removeWorkspace(path.basename(dir)).catch(() => undefined);
+      }
+      return;
+    }
     case "say": {
       const [target, ...words] = process.argv.slice(3);
       const ref = target && resolveIssue(rt.config, target);

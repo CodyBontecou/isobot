@@ -69,6 +69,7 @@ export class FakeGitHub implements GitHubApi {
   async comment(owner: string, repo: string, number: number, body: string): Promise<void> {
     this.comments.push({ id: this.nextComment++, key: `${owner}/${repo}#${number}`, body: `${body}\n\n${RUNNER_MARKER}` });
   }
+  async closeIssue(owner: string, repo: string, number: number): Promise<void> { this.get(owner, repo, number).state = "closed"; }
   async createIssue(owner: string, repo: string, title: string, body: string, labels: string[]): Promise<Issue> {
     const number = this.issues.size + 1;
     return this.add(owner, repo, number, title, labels, body);

@@ -20,10 +20,10 @@ test("an invalid review is a high-risk rejection, never an approval", () => {
 test("triage keeps only known items and repositories", () => {
   const result = parseTriage({
     decisions: [
-      { id: "discord:1", action: "propose", repo: "codybontecou/time.md", kind: "bug", title: "Crash", spec: "Fix it", confidence: 0.8, reason: "clear" },
-      { id: "discord:2", action: "propose", repo: "evil/repo", kind: "feature", title: "X", spec: "Y", confidence: 0.9, reason: "" },
-      { id: "made-up", action: "propose", repo: "codybontecou/time.md", kind: "bug", title: "X", spec: "Y", confidence: 1, reason: "" },
-      { id: "discord:3", action: "propose", repo: "codybontecou/time.md", kind: "bug", title: " ", spec: "Y", confidence: 1, reason: "" },
+      { id: "discord:1", action: "propose", repo: "codybontecou/time.md", kind: "bug", scope: "small", title: "Crash", spec: "Fix it", confidence: 0.8, reason: "clear" },
+      { id: "discord:2", action: "propose", repo: "evil/repo", kind: "feature", scope: "small", title: "X", spec: "Y", confidence: 0.9, reason: "" },
+      { id: "made-up", action: "propose", repo: "codybontecou/time.md", kind: "bug", scope: "small", title: "X", spec: "Y", confidence: 1, reason: "" },
+      { id: "discord:3", action: "propose", repo: "codybontecou/time.md", kind: "bug", scope: "small", title: " ", spec: "Y", confidence: 1, reason: "" },
     ],
     digest: "summary",
   }, new Set(["discord:1", "discord:2", "discord:3"]), new Set(["codybontecou/time.md"]));
@@ -54,4 +54,16 @@ test("credential folders are denied to builders", () => {
   assert.ok(deny.includes("/Users/me/.ssh"));
   assert.ok(deny.includes("/Users/me/.config/gh"));
   assert.ok(deny.includes("/Users/me/Library/Keychains"));
+});
+
+test("triage scope defaults to major unless the model says small", () => {
+  const result = parseTriage({
+    decisions: [
+      { id: "a", action: "propose", repo: "o/r", kind: "bug", scope: "small", title: "A", spec: "s", confidence: 1, reason: "" },
+      { id: "b", action: "propose", repo: "o/r", kind: "bug", title: "B", spec: "s", confidence: 1, reason: "" },
+      { id: "c", action: "propose", repo: "o/r", kind: "bug", scope: "tiny", title: "C", spec: "s", confidence: 1, reason: "" },
+    ],
+    digest: "",
+  }, new Set(["a", "b", "c"]), new Set(["o/r"]));
+  assert.deepEqual(result.decisions.map(d => d.scope), ["small", "major", "major"]);
 });

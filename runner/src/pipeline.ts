@@ -54,7 +54,7 @@ const RETRY_DELAYS_MS = [5 * 60_000, 15 * 60_000, 45 * 60_000, 2 * 60 * 60_000];
 const MAX_ATTEMPTS = 5;
 /** Owner notes applied within one build before the rest wait for the PR revision. */
 const MAX_NOTE_ROUNDS = 5;
-const CI_WAIT_MS = 45 * 60_000;
+const CI_WAIT_MS = 90 * 60_000;
 /** How long a new PR may go without any CI reporting before "no CI" is final. */
 const CI_GRACE_MS = 5 * 60_000;
 export const PROPOSAL_MARKER = "<!-- isobot:triage:";
@@ -176,7 +176,10 @@ export class Pipeline {
     const policy = policyFor(this.deps.config, `${issue.owner}/${issue.repo}`);
     const task = buildTask(proposal ? { ...issue, body: proposal.body } : issue, policy);
     const fingerprint = createHash("sha256").update(`${issue.title}\n${issue.body}\n${proposal?.body ?? ""}`).digest("hex");
-    return { task, trusted: await this.isTrusted(issue.author), author: issue.author, fingerprint };
+    // A stranger's issue that isobot's own proposal replaced, and that isobot itself approved as small,
+    // builds from the vetted proposal, so it may go as far as the owner's own work.
+    const vetted = Boolean(proposal) && await this.ownerOriginated(issue);
+    return { task, trusted: vetted || await this.isTrusted(issue.author), author: issue.author, fingerprint };
   }
 
   private async viewerLogin(): Promise<string> {
@@ -561,7 +564,7 @@ export class Pipeline {
     }
   }
 
-  private async waitForCi(job: Job, sha: string): Promise<CiState | "still pending after 45 minutes"> {
+  private async waitForCi(job: Job, sha: string): Promise<CiState | "still pending after 90 minutes"> {
     const sleep = this.deps.sleep ?? ((ms: number) => new Promise(resolve => setTimeout(resolve, ms)));
     const started = Date.now();
     for (;;) {
@@ -570,7 +573,7 @@ export class Pipeline {
       if (state === "success" || state === "failure") return state;
       // Check suites can take minutes to register; "none" is only final after the grace period.
       if (state === "none" && Date.now() - started > CI_GRACE_MS) return "none";
-      if (Date.now() - started > CI_WAIT_MS) return "still pending after 45 minutes";
+      if (Date.now() - started > CI_WAIT_MS) return "still pending after 90 minutes";
     }
   }
 

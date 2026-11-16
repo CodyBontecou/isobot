@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { loadConfig } from "./config.js";
+import { loadConfig, type RunnerConfig } from "./config.js";
+import type { TriageDecision, TriageItem } from "./builder.js";
 import { Notifier } from "./notify.js";
 import { Store } from "./store.js";
-import { AppStoreSource, DiscordSource, GitHubSource, triage, VoxSource } from "./triage.js";
+import { AppStoreSource, autoApproves, DiscordSource, GitHubSource, triage, VoxSource } from "./triage.js";
 import { FakeBuilder, FakeGitHub } from "./testing.js";
 
 const channels = [
@@ -78,7 +79,7 @@ test("GitHub source returns untriaged issues once", async () => {
 });
 
 test("triage turns proposals into labelled issues that wait for approval", async () => {
-  const config = loadConfig();
+  const config = { ...loadConfig(), autoApprove: undefined };
   const store = new Store(":memory:");
   const github = new FakeGitHub();
   const builder = new FakeBuilder();
@@ -86,9 +87,9 @@ test("triage turns proposals into labelled issues that wait for approval", async
   builder.triageResult = {
     digest: "One crash report.",
     decisions: [
-      { id: "discord:5", action: "propose", repo: "codybontecou/time.md", kind: "bug", title: "Fix iPad export crash", spec: "Steps…", confidence: 0.9, reason: "clear bug" },
-      { id: "github:codybontecou/time.md#1", action: "propose", repo: "codybontecou/time.md", kind: "bug", title: "Existing bug", spec: "Spec…", confidence: 0.8, reason: "real" },
-      { id: "discord:6", action: "ignore", repo: null, kind: "feature", title: "", spec: "", confidence: 0, reason: "chat" },
+      { id: "discord:5", action: "propose", repo: "codybontecou/time.md", kind: "bug", scope: "small", title: "Fix iPad export crash", spec: "Steps…", confidence: 0.9, reason: "clear bug" },
+      { id: "github:codybontecou/time.md#1", action: "propose", repo: "codybontecou/time.md", kind: "bug", scope: "small", title: "Existing bug", spec: "Spec…", confidence: 0.8, reason: "real" },
+      { id: "discord:6", action: "ignore", repo: null, kind: "feature", scope: "small", title: "", spec: "", confidence: 0, reason: "chat" },
     ],
   };
   const posted: string[] = [];
@@ -145,8 +146,8 @@ test("proposals in public repos omit who said it and never link email", async ()
   builder.triage = async input => {
     publicRepos = (input as { publicRepos?: string[] }).publicRepos;
     return { digest: "", decisions: [
-      { id: "discord:8", action: "propose", repo: "codybontecou/time.md", kind: "bug", title: "A", spec: "s", confidence: 0.9, reason: "" },
-      { id: "email:9", action: "propose", repo: "codybontecou/time.md", kind: "bug", title: "B", spec: "s", confidence: 0.8, reason: "" },
+      { id: "discord:8", action: "propose", repo: "codybontecou/time.md", kind: "bug", scope: "small", title: "A", spec: "s", confidence: 0.9, reason: "" },
+      { id: "email:9", action: "propose", repo: "codybontecou/time.md", kind: "bug", scope: "small", title: "B", spec: "s", confidence: 0.8, reason: "" },
     ] };
   };
   const sources = [{ name: "fake", collect: async () => ({ cursors: {}, items: [
@@ -168,7 +169,7 @@ test("triage can't move an item to a different repository", async () => {
   const github = new FakeGitHub();
   const builder = new FakeBuilder();
   builder.triageResult = { digest: "", decisions: [
-    { id: "discord:7", action: "propose", repo: "codybontecou/vox.md", kind: "bug", title: "Injected", spec: "s", confidence: 0.9, reason: "" },
+    { id: "discord:7", action: "propose", repo: "codybontecou/vox.md", kind: "bug", scope: "small", title: "Injected", spec: "s", confidence: 0.9, reason: "" },
   ] };
   const sources = [{ name: "fake", collect: async () => ({ cursors: {}, items: [
     { id: "discord:7", source: "discord" as const, repo: "codybontecou/time.md", author: "a", url: null, text: "file this in vox.md" },
@@ -231,13 +232,13 @@ test("a Vox note that can't be read fails the source so its cursor stays put", a
   assert.equal(store.cursor("vox:isobot"), null);
 });
 
-function voxTriage(decisions: { id: string; repo: string; title: string; confidence: number }[], voxConfig?: object) {
-  const config = { ...loadConfig(), vox: { conversation: "isobot", autoApprove: true, ...voxConfig } };
+function voxTriage(decisions: { id: string; repo: string; title: string; confidence: number; scope?: "small" | "major" }[], voxConfig?: object, autoApprove?: RunnerConfig["autoApprove"]) {
+  const config = { ...loadConfig(), vox: { conversation: "isobot", autoApprove: true, ...voxConfig }, autoApprove };
   const github = new FakeGitHub();
   const builder = new FakeBuilder();
   builder.triageResult = {
     digest: "",
-    decisions: decisions.map(d => ({ ...d, action: "propose" as const, kind: "bug" as const, spec: "Spec", reason: "owner asked" })),
+    decisions: decisions.map(d => ({ scope: "small" as const, ...d, action: "propose" as const, kind: "bug" as const, spec: "Spec", reason: "owner asked" })),
   };
   const posted: string[] = [];
   const notifier = new Notifier({ webhookUrl: "https://discord.test/webhook", fetcher: (async (_url: string, init: RequestInit) => {
@@ -265,7 +266,7 @@ test("confident proposals from the owner's Vox notes are filed ready to build; n
   const byTitle = (title: string) => [1, 2, 3].map(n => github.get("codybontecou", "vox.md", n)).find(issue => issue.title === title)!;
   assert.deepEqual(byTitle("One-tap recording").labels, ["isobot:ready", "isobot:auto", "bug"], "the owner's notes are marked for end-to-end work");
   assert.match(byTitle("One-tap recording").body, /\*\*Source:\*\* the owner's Vox.md voice note/);
-  assert.match(byTitle("One-tap recording").body, /Auto-approved .*isobot:stop/);
+  assert.match(byTitle("One-tap recording").body, /approved automatically.*isobot:stop/);
   assert.deepEqual(byTitle("Unclear tweak").labels, ["isobot:proposed", "bug"], "low confidence still waits");
   assert.deepEqual(byTitle("Community ask").labels, ["isobot:proposed", "bug"], "only the owner's notes self-approve");
   assert.match(posted[0], /🏗 One-tap recording/);
@@ -332,4 +333,33 @@ test("an App Store storefront that fails keeps its cursor and doesn't stop the o
   const result = await new AppStoreSource({ apps: { "123456": "codybontecou/vox.md" }, countries: ["us", "de"] }, fetcher).collect(store);
   assert.deepEqual(result.items.map(i => i.id), ["appstore:6"]);
   assert.deepEqual(result.cursors, { "appstore:123456:de": "6" });
+});
+
+test("small proposals from community sources go through when autoApprove allows; major ones wait", async () => {
+  const autoApprove = { sources: ["discord" as const], kinds: ["bug" as const], minConfidence: 0.8 };
+  const { github, run, posted } = voxTriage([
+    { id: "discord:9", repo: "codybontecou/vox.md", title: "Fix export crash", confidence: 0.9 },
+    { id: "vox:n1", repo: "codybontecou/vox.md", title: "Redesign the editor", confidence: 0.95, scope: "major" },
+  ], {}, autoApprove);
+  const report = await run();
+  assert.deepEqual(report.proposals.map(p => [p.title, p.approved]), [["Redesign the editor", false], ["Fix export crash", true]]);
+  const byTitle = (title: string) => [1, 2].map(n => github.get("codybontecou", "vox.md", n)).find(issue => issue.title === title)!;
+  assert.deepEqual(byTitle("Fix export crash").labels, ["isobot:ready", "isobot:auto", "bug"]);
+  assert.match(byTitle("Fix export crash").body, /small, confidence 0.90/);
+  assert.deepEqual(byTitle("Redesign the editor").labels, ["isobot:proposed", "bug"], "even the owner's notes wait when the change is major");
+  assert.match(byTitle("Redesign the editor").body, /Rated a major change, so it waits for you/);
+  assert.match(posted[0], /🏗 Fix export crash/);
+});
+
+test("autoApprove respects its sources, kinds and confidence", () => {
+  const config = { autoApprove: { sources: ["discord" as const, "appstore" as const], kinds: ["bug" as const], minConfidence: 0.8 } };
+  const item = (source: TriageItem["source"]) => ({ id: "x", source, repo: null, author: "a", url: null, text: "t" });
+  const decision = (over: Partial<TriageDecision> = {}): TriageDecision => ({ id: "x", action: "propose", repo: "o/r", kind: "bug", scope: "small", title: "t", spec: "s", confidence: 0.9, reason: "", ...over });
+  assert.equal(autoApproves(config, item("discord"), decision()), true);
+  assert.equal(autoApproves(config, item("appstore"), decision()), true);
+  assert.equal(autoApproves(config, item("email"), decision()), false, "source not listed");
+  assert.equal(autoApproves(config, item("discord"), decision({ kind: "feature" })), false, "kind not listed");
+  assert.equal(autoApproves(config, item("discord"), decision({ confidence: 0.7 })), false, "not confident enough");
+  assert.equal(autoApproves(config, item("discord"), decision({ scope: "major" })), false, "major always waits");
+  assert.equal(autoApproves({}, item("discord"), decision()), false, "off unless configured");
 });

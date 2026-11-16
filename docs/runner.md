@@ -179,6 +179,37 @@ review of 2 stars or fewer. Proposals in public repos never name the reviewer.
 To add an app, find its id in its `apps.apple.com/.../id<digits>` link and add it under
 `appStore.apps`. Replying to reviews would need an App Store Connect API key; the runner doesn't do it.
 
+## Approval by scope
+
+Triage rates every proposal `small` or `major`. Small means a bug fix or a contained feature that
+fits the app as it is; major means redesigns, new screens or flows, data-model changes, anything
+touching purchases, sign-in, privacy, permissions, tracking, new services or dependencies, and
+anything uncertain. With `autoApprove` set (sources, kinds and a minimum confidence), small
+proposals are filed with `isobot:ready` and `isobot:auto` and go end to end; major ones always wait
+for you to add `isobot:ready`. Your Vox.md notes follow `vox.autoApprove`, but major ones wait too.
+
+A stranger's GitHub issue that isobot approved this way builds from isobot's own proposal comment,
+never the reporter's text, so it may merge like your own work. Every merge gate still applies:
+checks, the reviewer, protected paths, the line limit, CI, and an unchanged issue.
+
+## Release train
+
+A repo with `train` in its policy ships merged isobot work to the App Store:
+
+1. When merged jobs are waiting, the last train left at least `everyHours` ago, and no version is
+   in App Review (`asc status`), the runner opens a **Ship x.y.z** issue listing the changes and
+   their What's New text, and posts it to Discord.
+2. `holdMinutes` later, unless that issue has `isobot:stop` or was closed, it runs `prepare`, then
+   `asc publish appstore`: archive, upload, attach What's New, submit for review. The version is
+   the App Store's current one with the patch bumped; the build number is a UTC timestamp.
+3. On success the commit is tagged `v<version>`, the jobs become `shipped`, their issues hear about
+   it, and the ship issue closes. On failure the output goes on the ship issue and the work waits
+   for the next train.
+
+A repo's first train waits for you to add `isobot:ready` to its ship issue. Later trains don't.
+The runner uses the App Store Connect key `asc` already has in the keychain, and signs with this
+Mac's keychain, so it must run as a user who can archive and sign the app in Xcode.
+
 ## Builder sandbox
 
 Builders run with Claude Code's shell sandbox on. It allows writes to the

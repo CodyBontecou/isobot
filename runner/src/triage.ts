@@ -1,7 +1,7 @@
 import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
 import type { Builder, TriageDecision, TriageItem } from "./builder.js";
-import { configuredRepos, type AppStoreConfig, type ImapAccount, type RunnerConfig, type VoxConfig } from "./config.js";
+import { configuredRepos, type AppStoreConfig, type ImapAccount, type RunnerConfig } from "./config.js";
 import type { GitHubApi } from "./github.js";
 import type { Notifier } from "./notify.js";
 import type { Store } from "./store.js";
@@ -417,33 +417,44 @@ export async function triage(deps: TriageDeps): Promise<TriageReport> {
     ...proposals.map(p => `• ${p.approved ? "🏗 " : ""}${p.title} <${p.url}>`),
     ...(lowReviews.length ? [`⚠️ ${lowReviews.length} App Store review${lowReviews.length === 1 ? "" : "s"} at 2 stars or fewer:`] : []),
     ...lowReviews.map(r => `• ${"★".repeat(r.rating ?? 0)} ${r.repo}: ${r.text.split("\n\n")[1]?.slice(0, 80) || "(no title)"} <${r.url}>`),
-    ...(proposals.some(p => p.approved) ? [`🏗 = auto-approved from your Vox.md notes and queued to build; add \`${labels.stop}\` to cancel one.`] : []),
-    ...(proposals.some(p => !p.approved) ? [`Add \`${labels.ready}\` to a proposal to have isobot build it.`] : []),
+    ...(proposals.some(p => p.approved) ? [`🏗 = rated small and queued to build, merge and ship; add \`${labels.stop}\` to cancel one.`] : []),
+    ...(proposals.some(p => !p.approved) ? [`The rest are major or less certain: add \`${labels.ready}\` to have isobot build one.`] : []),
     result.digest,
   ];
   await deps.notifier.discord(lines.filter(Boolean).join("\n"));
   return { items: items.length, proposals, digest: result.digest };
 }
 
-/** Only the owner's own notes skip the approval click, and only when triage is confident. */
-export function autoApproves(vox: VoxConfig | undefined, item: TriageItem, decision: TriageDecision): boolean {
-  return item.source === "vox" && vox?.autoApprove === true && decision.confidence >= (vox.minAutoApproveConfidence ?? 0.7);
+/**
+ * Whether a proposal skips the approval click. Only work triage rated "small" ever does; the owner's
+ * Vox notes follow vox.autoApprove, everything else autoApprove (sources, kinds, confidence).
+ */
+export function autoApproves(config: Pick<RunnerConfig, "vox" | "autoApprove">, item: TriageItem, decision: TriageDecision): boolean {
+  if (decision.scope !== "small") return false;
+  if (item.source === "vox") {
+    const vox = config.vox;
+    return vox?.autoApprove === true && decision.confidence >= (vox.minAutoApproveConfidence ?? 0.7);
+  }
+  const auto = config.autoApprove;
+  return Boolean(auto) && (auto!.sources as string[]).includes(item.source) && auto!.kinds.includes(decision.kind) && decision.confidence >= auto!.minConfidence;
 }
 
 async function propose(deps: TriageDeps, decision: TriageDecision, item: TriageItem, isPublic: boolean): Promise<Proposal> {
   const [owner, repo] = decision.repo!.split("/");
   const labels = deps.config.labels;
   const kindLabel = decision.kind === "bug" ? "bug" : decision.kind === "feature" ? "enhancement" : null;
-  const approved = autoApproves(deps.config.vox, item, decision);
+  const approved = autoApproves(deps.config, item, decision);
   const next = approved
-    ? `Auto-approved from the owner's Vox.md note; add \`${labels.stop}\` to cancel the build.`
-    : `Add \`${labels.ready}\` to approve a build.`;
-  const footer = `\n\n---\n<sub>Proposed by isobot triage (confidence ${decision.confidence.toFixed(2)}): ${decision.reason}. ${next}</sub>\n<!-- isobot:triage:${item.id} -->`;
+    ? `Rated a small ${decision.kind}, so it was approved automatically; add \`${labels.stop}\` to cancel it.`
+    : decision.scope === "major"
+      ? `Rated a major change, so it waits for you: add \`${labels.ready}\` to approve a build.`
+      : `Add \`${labels.ready}\` to approve a build.`;
+  const footer = `\n\n---\n<sub>Proposed by isobot triage (${decision.scope}, confidence ${decision.confidence.toFixed(2)}): ${decision.reason}. ${next}</sub>\n<!-- isobot:triage:${item.id} -->`;
   if (item.source === "github") {
     const number = Number(item.id.split("#")[1]);
     await deps.github.comment(owner, repo, number, `## isobot proposal\n\n${decision.spec}${footer}`);
-    await deps.github.addLabels(owner, repo, number, [labels.proposed]);
-    return { title: decision.title, url: item.url!, approved: false };
+    await deps.github.addLabels(owner, repo, number, approved ? [labels.ready, labels.auto] : [labels.proposed]);
+    return { title: decision.title, url: item.url!, approved };
   }
   // Public repos never get who said it; email links and senders never leave the runner.
   const who = isPublic ? "" : ` from ${item.author}`;

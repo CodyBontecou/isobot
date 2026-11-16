@@ -63,6 +63,7 @@ export interface GitHubApi {
   removeLabel(owner: string, repo: string, number: number, label: string): Promise<void>;
   comment(owner: string, repo: string, number: number, body: string): Promise<void>;
   createIssue(owner: string, repo: string, title: string, body: string, labels: string[]): Promise<Issue>;
+  closeIssue(owner: string, repo: string, number: number): Promise<void>;
   findPull(owner: string, repo: string, branch: string): Promise<PullRequest | null>;
   pull(owner: string, repo: string, number: number): Promise<PullRequest>;
   createPull(owner: string, repo: string, input: { head: string; base: string; title: string; body: string }): Promise<PullRequest>;
@@ -173,6 +174,10 @@ export class GitHub implements GitHubApi {
   async note(owner: string, repo: string, number: number, body: string): Promise<string> {
     const { data } = await this.octokit.issues.createComment({ owner, repo, issue_number: number, body: body.slice(0, 65_000) });
     return data.html_url;
+  }
+
+  async closeIssue(owner: string, repo: string, number: number): Promise<void> {
+    await this.octokit.issues.update({ owner, repo, issue_number: number, state: "closed", state_reason: "completed" });
   }
 
   async createIssue(owner: string, repo: string, title: string, body: string, labels: string[]): Promise<Issue> {

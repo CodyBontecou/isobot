@@ -38,6 +38,24 @@ export interface RepoPolicy {
    * Vox.md notes). Defaults to `autonomy`. Every merge gate still applies.
    */
   ownerAutonomy?: Autonomy;
+  /** Ship merged isobot work to the App Store on a schedule (see train.ts). */
+  train?: TrainConfig;
+}
+
+export interface TrainConfig {
+  /** App Store Connect app id. */
+  appId: string;
+  /** Xcode project or workspace (relative to the repo root) and the scheme to archive. */
+  project?: string;
+  workspace?: string;
+  scheme: string;
+  platform?: "IOS" | "MAC_OS";
+  /** At most one train per this many hours. */
+  everyHours: number;
+  /** Warning time between announcing a train and shipping it. */
+  holdMinutes: number;
+  /** Commands run in the checkout before archiving (e.g. building a Rust core). */
+  prepare?: string[];
 }
 
 export interface RunnerConfig {
@@ -63,10 +81,21 @@ export interface RunnerConfig {
   discordCategories: Record<string, string>;
   /** The owner's Vox.md captures, posted by a Vox HTTP preset to one Pi conversation. */
   vox?: VoxConfig;
+  /** Small proposals (as rated by triage) from any source skip the approval click; major ones never do. */
+  autoApprove?: AutoApproveConfig;
   /** App Store reviews to triage, read from Apple's public customer-reviews feed (no API key). */
   appStore?: AppStoreConfig;
   defaults: RepoPolicy;
   repos: Record<string, Partial<RepoPolicy>>;
+}
+
+export interface AutoApproveConfig {
+  /** Sources whose small proposals are approved automatically. The owner's Vox notes follow vox.autoApprove. */
+  sources: ("discord" | "github" | "email" | "appstore")[];
+  /** Kinds of change that may be approved automatically. */
+  kinds: ("bug" | "feature" | "chore")[];
+  /** Below this triage confidence a proposal still waits. */
+  minConfidence: number;
 }
 
 export interface AppStoreConfig {
@@ -144,6 +173,12 @@ export function validateConfig(config: RunnerConfig): void {
     const most = config.vox.maxProposalsPerNote;
     if (most !== undefined && !(Number.isInteger(most) && most >= 1 && most <= 10)) fail("vox.maxProposalsPerNote must be 1-10");
   }
+  if (config.autoApprove) {
+    const a = config.autoApprove;
+    if (!Array.isArray(a.sources) || a.sources.some(x => !["discord", "github", "email", "appstore"].includes(x))) fail("autoApprove.sources must list discord, github, email or appstore");
+    if (!Array.isArray(a.kinds) || a.kinds.some(x => !["bug", "feature", "chore"].includes(x))) fail("autoApprove.kinds must list bug, feature or chore");
+    if (!(a.minConfidence > 0 && a.minConfidence <= 1)) fail("autoApprove.minConfidence must be in (0, 1]");
+  }
   if (config.appStore) {
     const apps = Object.entries(config.appStore.apps ?? {});
     if (apps.length === 0) fail("appStore.apps must list at least one app");
@@ -164,6 +199,14 @@ export function validateConfig(config: RunnerConfig): void {
     if (policy.ownerAutonomy !== undefined && !["off", "pr", "merge"].includes(policy.ownerAutonomy)) fail(`${name}: unknown ownerAutonomy "${policy.ownerAutonomy}"`);
     if (policy.ownerAutonomy === "merge" && policy.checks.length === 0) {
       fail(`${name}: ownerAutonomy "merge" needs at least one check command; unverified changes are never merged automatically`);
+    }
+    if (policy.train) {
+      const t = policy.train;
+      if (!/^\d{6,12}$/.test(t.appId ?? "")) fail(`${name}: train.appId must be a numeric App Store id`);
+      if (!t.scheme || Boolean(t.project) === Boolean(t.workspace)) fail(`${name}: train needs a scheme and exactly one of project or workspace`);
+      if (!(t.everyHours >= 1)) fail(`${name}: train.everyHours must be at least 1`);
+      if (!(t.holdMinutes >= 0)) fail(`${name}: train.holdMinutes must be 0 or more`);
+      if ((policy.ownerAutonomy ?? policy.autonomy) !== "merge" && policy.autonomy !== "merge") fail(`${name}: a train only makes sense where isobot merges`);
     }
     if (!(policy.minReviewConfidence > 0 && policy.minReviewConfidence <= 1)) fail(`${name}: minReviewConfidence must be in (0, 1]`);
     void partial;

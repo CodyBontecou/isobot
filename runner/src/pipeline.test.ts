@@ -512,3 +512,20 @@ test("a reply on a finished job explains how to continue instead of changing any
 function implementCalls(builder: FakeBuilder): number {
   return builder.implementCalls;
 }
+
+test("a stranger's issue that isobot vetted and auto-approved may merge; without its proposal it may not", async () => {
+  const configure = (config: RunnerConfig) => {
+    config.repos[REPO] = { autonomy: "pr", ownerAutonomy: "merge", checks: ["make test"] };
+  };
+  const vetted = setup(configure);
+  vetted.github.add(OWNER, NAME, 40, "Export crashes", ["isobot:ready", "isobot:auto"], "it crashes", "stranger");
+  vetted.github.addComment(OWNER, NAME, 40, "## isobot proposal\n\nGuard the nil export URL.\n\n<!-- isobot:triage:github:x -->", "owner");
+  await cycle(vetted.pipeline);
+  assert.deepEqual(vetted.github.merged, [100]);
+
+  const raw = setup(configure);
+  raw.github.add(OWNER, NAME, 41, "Export crashes", ["isobot:ready", "isobot:auto"], "it crashes", "stranger");
+  await cycle(raw.pipeline);
+  assert.equal(raw.github.merged.length, 0, "no vetted proposal: the stranger's own text was the task");
+  assert.match(raw.github.commentsFor(OWNER, NAME, 41).at(-1)!, /written by @stranger/);
+});
