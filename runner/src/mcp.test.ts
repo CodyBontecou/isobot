@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { handle, type ShellToolConfig } from "./mcp.js";
 import { workerEnv } from "./proc.js";
 import { sandboxProfile } from "./sandbox.js";
+
+// The shell tool runs commands under sandbox-exec, which only macOS has (CI runs these in its macOS job).
+const mac = process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec");
 
 const workspace = mkdtempSync(path.join(tmpdir(), "isobot-mcp-test-"));
 // Before the profile: it resolves /var → /private/var for paths that exist.
@@ -26,14 +29,14 @@ test("speaks enough MCP for Claude Code: initialize, tools/list, silent notifica
   assert.deepEqual(list.result.tools.map(t => t.name), ["shell"]);
 });
 
-test("runs commands in the workspace with the job's device env", async () => {
+test("runs commands in the workspace with the job's device env", { skip: !mac }, async () => {
   const response = await call("pwd -P; echo $ISOBOT_IOS_SIMULATOR; touch made-here");
   assert.equal(response.result.isError, false);
   assert.match(response.result.content[0].text, /^exit 0\n/);
   assert.match(response.result.content[0].text, /SIM-1/);
 });
 
-test("keeps the check sandbox: secrets unreadable, writes outside the workspace blocked", async () => {
+test("keeps the check sandbox: secrets unreadable, writes outside the workspace blocked", { skip: !mac }, async () => {
   const read = await call(`cat ${path.join(workspace, "secret.env")}`);
   assert.equal(read.result.isError, true);
   assert.doesNotMatch(read.result.content[0].text, /hunter2/);
