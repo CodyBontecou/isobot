@@ -135,7 +135,8 @@
       "checks": [
         "make test-contracts",
         "make -C apps/apple prepare-healthmd-core-rust",
-        "xcodebuild build-for-testing -project apps/apple/HealthMd.xcodeproj -scheme HealthMd -destination 'generic/platform=iOS Simulator' -quiet CODE_SIGNING_ALLOWED=NO"
+        "xcodebuild build-for-testing -project apps/apple/HealthMd.xcodeproj -scheme HealthMd -destination 'generic/platform=iOS Simulator' -quiet CODE_SIGNING_ALLOWED=NO",
+        "HEALTHMD_CI_ANDROID_ABI=arm64-v8a bash scripts/ci/android.sh"
       ],
       "devices": {
         "ios": {
@@ -145,7 +146,7 @@
           "avd": "isobot-api35"
         }
       },
-      "notes": "Monorepo: Apple app under apps/apple (HealthMd.xcodeproj, scheme HealthMd), Android under apps/android, Rust core and CLI. PR CI only runs scripts/ci/run.py; the runner's checks build the iOS app and its tests. For Android behaviour changes, especially upgrades and background work, install the app on the job's emulator and check it with argent. The full Apple CI runs at release."
+      "notes": "Monorepo: Apple app under apps/apple (HealthMd.xcodeproj, scheme HealthMd), Android under apps/android, Rust core and CLI. PR CI only runs scripts/ci/run.py; the runner's checks build the iOS app and its tests and run scripts/ci/android.sh (instrumented tests and the live Rust pairing test) on the job's emulator. Run that script yourself through the isobot shell before finishing (HEALTHMD_CI_ANDROID_ABI=arm64-v8a bash scripts/ci/android.sh). For Android behaviour changes, especially upgrades and background work, install the previous release and then your build on the job's emulator (adb install -r keeps data) and check it with argent. The full Apple CI runs at release."
     },
     "codybontecou/GitSync.md": {
       "checks": [
