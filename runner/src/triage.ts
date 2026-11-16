@@ -418,7 +418,7 @@ export async function triage(deps: TriageDeps): Promise<TriageReport> {
     ...(lowReviews.length ? [`⚠️ ${lowReviews.length} App Store review${lowReviews.length === 1 ? "" : "s"} at 2 stars or fewer:`] : []),
     ...lowReviews.map(r => `• ${"★".repeat(r.rating ?? 0)} ${r.repo}: ${r.text.split("\n\n")[1]?.slice(0, 80) || "(no title)"} <${r.url}>`),
     ...(proposals.some(p => p.approved) ? [`🏗 = rated small and queued to build, merge and ship; add \`${labels.stop}\` to cancel one.`] : []),
-    ...(proposals.some(p => !p.approved) ? [`The rest are major or less certain: add \`${labels.ready}\` to have isobot build one.`] : []),
+    ...(proposals.some(p => !p.approved) ? [`The rest are major or less certain: add \`${labels.ready}\`, or react ✅ in the issue's Discord help thread, to have isobot build one.`] : []),
     result.digest,
   ];
   await deps.notifier.discord(lines.filter(Boolean).join("\n"));
@@ -447,8 +447,8 @@ async function propose(deps: TriageDeps, decision: TriageDecision, item: TriageI
   const next = approved
     ? `Rated a small ${decision.kind}, so it was approved automatically; add \`${labels.stop}\` to cancel it.`
     : decision.scope === "major"
-      ? `Rated a major change, so it waits for you: add \`${labels.ready}\` to approve a build.`
-      : `Add \`${labels.ready}\` to approve a build.`;
+      ? `Rated a major change, so it waits for you: add \`${labels.ready}\` (or react ✅ in its Discord help thread) to approve a build.`
+      : `Add \`${labels.ready}\` (or react ✅ in its Discord help thread) to approve a build.`;
   const footer = `\n\n---\n<sub>Proposed by isobot triage (${decision.scope}, confidence ${decision.confidence.toFixed(2)}): ${decision.reason}. ${next}</sub>\n<!-- isobot:triage:${item.id} -->`;
   if (item.source === "github") {
     const number = Number(item.id.split("#")[1]);

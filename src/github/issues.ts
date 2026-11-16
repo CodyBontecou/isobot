@@ -67,3 +67,28 @@ export async function createIssueComment(input: {
     body: input.body,
   });
 }
+
+export interface IssueState {
+  state: string;
+  labels: string[];
+}
+
+export async function getIssue(input: { owner: string; repo: string; number: number }): Promise<IssueState> {
+  const { data } = await client().issues.get({ owner: input.owner, repo: input.repo, issue_number: input.number });
+  return {
+    state: data.state,
+    labels: data.labels.map((l) => (typeof l === "string" ? l : l.name ?? "")).filter(Boolean),
+  };
+}
+
+export async function addLabels(input: { owner: string; repo: string; number: number; labels: string[] }): Promise<void> {
+  await client().issues.addLabels({ owner: input.owner, repo: input.repo, issue_number: input.number, labels: input.labels });
+}
+
+export async function removeLabel(input: { owner: string; repo: string; number: number; label: string }): Promise<void> {
+  try {
+    await client().issues.removeLabel({ owner: input.owner, repo: input.repo, issue_number: input.number, name: input.label });
+  } catch (err) {
+    if ((err as { status?: number }).status !== 404) throw err;
+  }
+}
