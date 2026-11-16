@@ -10,6 +10,9 @@ export interface DiffStat {
 /** Binary changes can't be counted in lines; weigh them heavily so they can't slip under size limits. */
 export const BINARY_FILE_WEIGHT = 100;
 
+/** Where isobot keeps screenshots and recordings for PR bodies (see publishMedia). */
+export const MEDIA_BRANCH = "isobot/media";
+
 /** Never run repository hooks or fsmonitor commands from runner-side git calls. */
 const SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
 
@@ -40,9 +43,9 @@ export class Repo {
     return ["-c", `http.https://github.com/.extraheader=AUTHORIZATION: basic ${basic}`];
   }
 
-  private async git(args: string[], cwd: string, auth = false): Promise<RunResult> {
+  private async git(args: string[], cwd: string, auth = false, input?: string): Promise<RunResult> {
     const result = await run("git", [...SAFE, ...(auth ? this.authArgs() : []), ...args], {
-      cwd, env: workerEnv({ GIT_CONFIG_NOSYSTEM: "1" }), timeoutMs: 15 * 60_000,
+      cwd, env: workerEnv({ GIT_CONFIG_NOSYSTEM: "1" }), timeoutMs: 15 * 60_000, input,
     });
     if (result.code !== 0) {
       const message = (result.stderr || result.stdout).replaceAll(this.token, "***").trim();
@@ -148,6 +151,38 @@ export class Repo {
   push(sha: string, branch: string): Promise<void> {
     return this.exclusive(async () => {
       await this.git(["push", "--quiet", "--force", "origin", `${sha}:refs/heads/${branch}`], this.barePath, true);
+    });
+  }
+
+  /**
+   * Publishes screenshots/recordings on the `isobot/media` branch and returns a URL per name, pinned
+   * to the new commit. Each commit holds only its own files under `prefix/` and keeps the previous
+   * tip as parent, so older links keep working. The branch has no workflows, so pushing runs nothing.
+   */
+  publishMedia(prefix: string, files: { file: string; name: string }[], message: string): Promise<Record<string, string>> {
+    return this.exclusive(async () => {
+      if (files.length === 0) return {};
+      const ref = "refs/isobot/media-remote";
+      let parent: string | null = null;
+      try {
+        await this.git(["fetch", "--quiet", "--no-tags", "--force", "origin", `+refs/heads/${MEDIA_BRANCH}:${ref}`], this.barePath, true);
+        parent = (await this.git(["rev-parse", `${ref}^{commit}`], this.barePath)).stdout.trim();
+      } catch (error) {
+        if (!/couldn't find remote ref/i.test((error as Error).message)) throw error;
+      }
+      const entries: string[] = [];
+      for (const f of files) {
+        const blob = (await this.git(["hash-object", "-w", "--", f.file], this.barePath)).stdout.trim();
+        entries.push(`100644 blob ${blob}\t${f.name}`);
+      }
+      let tree = (await this.git(["mktree"], this.barePath, false, `${entries.join("\n")}\n`)).stdout.trim();
+      for (const segment of prefix.split("/").filter(Boolean).reverse()) {
+        tree = (await this.git(["mktree"], this.barePath, false, `040000 tree ${tree}\t${segment}\n`)).stdout.trim();
+      }
+      const commit = (await this.git(["-c", "user.name=isobot", "-c", "user.email=isobot@users.noreply.github.com",
+        "commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", message], this.barePath)).stdout.trim();
+      await this.git(["push", "--quiet", "origin", `${commit}:refs/heads/${MEDIA_BRANCH}`], this.barePath, true);
+      return Object.fromEntries(files.map(f => [f.name, `https://github.com/${this.owner}/${this.repo}/blob/${commit}/${prefix}/${f.name}?raw=true`]));
     });
   }
 

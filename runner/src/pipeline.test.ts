@@ -6,9 +6,10 @@ import { buildTask, Pipeline, slug } from "./pipeline.js";
 import type { CheckReport } from "./policy.js";
 import { Store } from "./store.js";
 import { DISCORD_REPLY_MARKER } from "./notes.js";
-import { FakeBuilder, FakeDiscord, FakeGitHub, FakeRepo } from "./testing.js";
+import { FakeBuilder, FakeDiscord, FakeGitHub, FakeRepo, MP4, PNG } from "./testing.js";
 import type { DeviceSpec, Devices } from "./devices.js";
 import { TransientError } from "./errors.js";
+import path from "node:path";
 
 const REPO = "codybontecou/time.md";
 const [OWNER, NAME] = REPO.split("/");
@@ -580,4 +581,44 @@ test("a device that won't boot is retried later, not blamed on the issue", async
   await cycle(pipeline);
   assert.equal(builder.implementCalls, 0);
   assert.notEqual(store.get("codybontecou/time.md#33")!.state, "failed");
+});
+
+test("captures of a visible change go to the reviewer, the PR body and the job's Discord thread", async () => {
+  const discord = new FakeDiscord();
+  const { github, pipeline, builder, repo } = setup(() => {}, [], discord);
+  builder.captures = { "01-after-export-sheet.png": PNG, "02-export-flow.mp4": MP4, "junk.png": Buffer.from("nope") };
+  github.add(OWNER, NAME, 41, "Redesign the export sheet", ["isobot:ready"]);
+  await cycle(pipeline);
+
+  assert.deepEqual(builder.reviewMedia[0]!.map(p => path.basename(p)), ["01-after-export-sheet.png", "02-export-flow.mp4"]);
+  assert.equal(repo.published.length, 1);
+  assert.match(repo.published[0].prefix, /^41\/\d{8}T\d{6}-sha1$/);
+  const pr = github.pulls.get(100)!;
+  assert.match(pr.body, /## Screenshots\n\n\*\*After export sheet\*\*\n\n<img src="https:\/\/github.com\/o\/r\/blob\/media\/41\/[^"]+\/01-after-export-sheet.png\?raw=true"/);
+  assert.match(pr.body, /🎬 \[Export flow\]/);
+  assert.equal(discord.uploads.length, 1);
+  assert.deepEqual(discord.uploads[0].files, ["01-after-export-sheet.png", "02-export-flow.mp4"]);
+  assert.match(String(discord.uploads[0].payload.content), /📸 What the change looks like/);
+  assert.deepEqual(discord.uploads[0].payload.allowed_mentions, { parse: [] });
+  assert.ok(discord.posts(discord.uploads[0].path.split("/")[2]).some(p => /junk\.png: contents don't match/.test(p)), "rejected files are explained in the thread");
+});
+
+test("no captures means no Screenshots section and no upload", async () => {
+  const discord = new FakeDiscord();
+  const { github, pipeline, repo } = setup(() => {}, [], discord);
+  github.add(OWNER, NAME, 42, "Fix a crash", ["isobot:ready"]);
+  await cycle(pipeline);
+  assert.equal(repo.published.length, 0);
+  assert.doesNotMatch(github.pulls.get(100)!.body, /Screenshots/);
+  assert.equal(discord.uploads.length, 0);
+});
+
+test("a media publishing failure never fails the job", async () => {
+  const { github, pipeline, builder, repo, store } = setup();
+  builder.captures = { "01-after.png": PNG };
+  repo.publishError = new Error("push rejected");
+  github.add(OWNER, NAME, 43, "Tweak the header", ["isobot:ready"]);
+  await cycle(pipeline);
+  assert.equal(store.get("codybontecou/time.md#43")!.state, "pr_open");
+  assert.doesNotMatch(github.pulls.get(100)!.body, /Screenshots/);
 });

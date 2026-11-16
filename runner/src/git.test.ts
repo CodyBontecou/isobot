@@ -98,3 +98,25 @@ test("hooks a builder plants never run with the runner's token", async () => {
   await repo.sync("main");
   assert.ok(!existsSync(leak), "no hook ran during runner git operations");
 });
+
+test("media goes on an isobot/media branch, one commit per publish, older links still resolvable", async () => {
+  const { root, origin, repo } = fixture();
+  await repo.sync("main");
+  const shot = path.join(root, "after.png");
+  writeFileSync(shot, "png-bytes");
+  const first = await repo.publishMedia("7/20261116T120000-abc", [{ file: shot, name: "01-after.png" }], "Media for #7");
+  const url = first["01-after.png"];
+  const commit = /\/blob\/([0-9a-f]{40})\/7\/20261116T120000-abc\/01-after\.png\?raw=true$/.exec(url)?.[1];
+  assert.ok(url.startsWith("https://github.com/o/r/blob/") && commit, url);
+  assert.equal(git(origin, "show", `${commit}:7/20261116T120000-abc/01-after.png`), "png-bytes");
+  assert.equal(git(origin, "rev-parse", "isobot/media"), commit);
+  assert.equal(git(origin, "rev-list", "--count", "isobot/media"), "1", "an orphan: no main history on the media branch");
+
+  writeFileSync(shot, "second");
+  const second = await repo.publishMedia("8/20261116T130000-def", [{ file: shot, name: "x.png" }], "Media for #8");
+  const tip = git(origin, "rev-parse", "isobot/media");
+  assert.ok(second["x.png"].includes(tip));
+  assert.equal(git(origin, "rev-parse", `${tip}^`), commit, "the previous publish stays reachable as the parent");
+  assert.equal(git(origin, "show", `${commit}:7/20261116T120000-abc/01-after.png`), "png-bytes");
+  assert.equal(git(origin, "ls-tree", "-r", "--name-only", tip), "8/20261116T130000-def/x.png", "each commit holds only its own files");
+});

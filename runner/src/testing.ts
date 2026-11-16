@@ -1,9 +1,15 @@
+import { writeFileSync } from "node:fs";
+import path from "node:path";
 import type { AgentRun, Builder, JobDevices, Review, TriageItem, TriageResult } from "./builder.js";
 import type { Labels } from "./config.js";
 import type { DiffStat } from "./git.js";
 import type { CiState, GitHubApi, Issue, IssueComment, PullRequest } from "./github.js";
 import { RUNNER_MARKER } from "./notes.js";
 import type { RepoOps } from "./pipeline.js";
+
+/** Smallest byte sequences media.ts accepts as a PNG and an MP4. */
+export const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(32)]);
+export const MP4 = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from("ftypmp42"), Buffer.alloc(32)]);
 
 /** In-memory GitHub for tests. */
 export class FakeGitHub implements GitHubApi {
@@ -102,12 +108,20 @@ export class FakeGitHub implements GitHubApi {
 /** Records Discord REST calls the Notifier makes; messages get ids 1000, 1001… */
 export class FakeDiscord {
   calls: { method: string; path: string; body: Record<string, unknown> }[] = [];
+  /** Multipart uploads: the payload and the uploaded file names. */
+  uploads: { path: string; payload: Record<string, unknown>; files: string[] }[] = [];
   private next = 1000;
   fail404 = new Set<string>();
 
   readonly fetch = (async (url: string | URL, init?: RequestInit) => {
     const path = String(url).replace("https://discord.com/api/v10", "");
     const method = init?.method ?? "GET";
+    if (init?.body instanceof FormData) {
+      const form = init.body;
+      const files = [...form.entries()].filter(([key]) => key.startsWith("files[")).map(([, value]) => (value as File).name);
+      this.uploads.push({ path, payload: JSON.parse(String(form.get("payload_json"))), files });
+      return Response.json({ id: String(this.next++) });
+    }
     this.calls.push({ method, path, body: init?.body ? JSON.parse(String(init.body)) : {} });
     if (this.fail404.has(path)) return new Response("{}", { status: 404 });
     return Response.json({ id: String(this.next++) });
@@ -144,6 +158,13 @@ export class FakeRepo implements RepoOps {
   async fetchBranch(branch: string): Promise<string> { this.calls.push(`fetch ${branch}`); return `pr-head-${branch}`; }
   async mergeBase(a: string, b: string): Promise<string> { this.calls.push(`merge-base ${a} ${b}`); return "base"; }
   async checkoutAt(sha: string, name: string): Promise<string> { this.calls.push(`checkout ${sha} ${name}`); return "/tmp/release"; }
+  published: { prefix: string; names: string[] }[] = [];
+  publishError?: Error;
+  async publishMedia(prefix: string, files: { name: string }[]): Promise<Record<string, string>> {
+    if (this.publishError) throw this.publishError;
+    this.published.push({ prefix, names: files.map(f => f.name) });
+    return Object.fromEntries(files.map(f => [f.name, `https://github.com/o/r/blob/media/${prefix}/${f.name}?raw=true`]));
+  }
 }
 
 export class FakeBuilder implements Builder {
@@ -159,9 +180,15 @@ export class FakeBuilder implements Builder {
   /** Device env each implement/revise call saw. */
   deviceEnvs: (Record<string, string> | undefined)[] = [];
 
-  async implement(input: { cwd: string; task: string; devices?: JobDevices }): Promise<AgentRun> {
+  /** Files the builder "captures" into $ISOBOT_MEDIA during implement: name → bytes. */
+  captures: Record<string, Buffer> = {};
+  /** Media paths each review saw. */
+  reviewMedia: (string[] | undefined)[] = [];
+
+  async implement(input: { cwd: string; task: string; devices?: JobDevices; media?: string }): Promise<AgentRun> {
     this.implementCalls++;
     this.deviceEnvs.push(input.devices?.env);
+    for (const [name, bytes] of Object.entries(this.captures)) writeFileSync(path.join(input.media!, name), bytes);
     return this.implementResult;
   }
   async revise(input: { feedback: string; sessionId: string | null; devices?: JobDevices }): Promise<AgentRun> {
@@ -170,8 +197,9 @@ export class FakeBuilder implements Builder {
     this.reviseSessions.push(input.sessionId);
     return { ok: true, sessionId: "session-1", summary: "Fixed." };
   }
-  async review(input: { task: string }): Promise<Review> {
+  async review(input: { task: string; media?: string[] }): Promise<Review> {
     this.reviewTasks.push(input.task);
+    this.reviewMedia.push(input.media);
     return this.reviews.shift() ?? { verdict: "approve", confidence: 0.95, risk: "low", summary: "Looks right.", concerns: [] };
   }
   async triage(input: { items: TriageItem[] }): Promise<TriageResult> {

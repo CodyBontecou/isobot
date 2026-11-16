@@ -59,9 +59,11 @@ export interface JobDevices {
 
 /** A coding agent the runner can drive. Claude Code is the implementation; Pi can slot in behind the same contract. */
 export interface Builder {
-  implement(input: { cwd: string; task: string; devices?: JobDevices }): Promise<AgentRun>;
-  revise(input: { cwd: string; sessionId: string | null; task: string; feedback: string; devices?: JobDevices }): Promise<AgentRun>;
-  review(input: { cwd: string; task: string; diff: string; checks: string }): Promise<Review>;
+  /** `media` is the job's $ISOBOT_MEDIA folder for screenshots and recordings of visible changes. */
+  implement(input: { cwd: string; task: string; devices?: JobDevices; media?: string }): Promise<AgentRun>;
+  revise(input: { cwd: string; sessionId: string | null; task: string; feedback: string; devices?: JobDevices; media?: string }): Promise<AgentRun>;
+  /** `media`: paths of the captures the builder made, for the reviewer to look at. */
+  review(input: { cwd: string; task: string; diff: string; checks: string; media?: string[] }): Promise<Review>;
   triage(input: { items: TriageItem[]; repos: string[]; publicRepos?: string[]; maxProposals: number; hints?: string }): Promise<TriageResult>;
 }
 
@@ -76,7 +78,7 @@ Rules:
 - Finish with a short summary: what changed, how you verified it, and anything a reviewer should check.`;
 
 /** How the builder reaches what its Bash sandbox blocks: the isobot shell tool, its own devices, argent. */
-export function toolRules(devices?: JobDevices): string {
+export function toolRules(devices?: JobDevices, media?: string): string {
   const lines = [
     "",
     "Tools beyond your Bash sandbox:",
@@ -91,7 +93,19 @@ export function toolRules(devices?: JobDevices): string {
       "- For visible UI changes, build the app, then use the argent MCP tools (`mcp__argent__*`) with exactly these device ids to install, launch, tap through and screenshot the change. Never boot, erase, shut down or interact with any other simulator or emulator: they belong to the owner or to other jobs.",
     );
   }
+  if (media) {
+    lines.push(
+      `- Show visible changes. When your change alters anything a user sees (UI, layout, copy, styling, animation), save screenshots of the changed screens, and a short screen recording for flows or animations, to $ISOBOT_MEDIA (${media}). They go on the PR and to the owner on Discord; the reviewer looks at them too.`,
+      "  - Name files in order with a description, which becomes the caption: `01-before-export-sheet.png`, `02-after-export-sheet.png`, `03-export-flow.mp4`. PNG, JPEG, GIF, WebP, MP4 or MOV; at most 8 files, images under 8 MB, recordings under 50 MB (keep them under 10 MB and about 20 seconds so Discord shows them inline).",
+      "  - Capture only this app on your own devices, with sample data, never anything personal. Through `mcp__isobot__shell`: `xcrun simctl io \"$ISOBOT_IOS_SIMULATOR\" screenshot \"$ISOBOT_MEDIA/02-after-x.png\"`, `xcrun simctl io \"$ISOBOT_IOS_SIMULATOR\" recordVideo --codec=h264 \"$ISOBOT_MEDIA/03-flow.mp4\"` (stop it with Ctrl-C/SIGINT), `adb exec-out screencap -p > \"$ISOBOT_MEDIA/02-after-x.png\"`, `adb shell screenrecord --time-limit 20 /sdcard/flow.mp4 && adb pull /sdcard/flow.mp4 \"$ISOBOT_MEDIA/03-flow.mp4\"`. argent's screenshot and recording tools work too; copy their files into $ISOBOT_MEDIA.",
+      "  - Leave $ISOBOT_MEDIA empty when nothing visible changed. Never put captures in the repository.",
+    );
+  }
   return lines.join("\n");
+}
+
+function mediaEnv(media?: string): Record<string, string> {
+  return media ? { ISOBOT_MEDIA: media } : {};
 }
 
 /** The builder's isobot shell tool: sandboxed like checks, with the job's devices in its environment. */
@@ -237,7 +251,7 @@ export class ClaudeCodeBuilder implements Builder {
     this.ghConfigDir = mkdtempSync(path.join(tmpdir(), "isobot-gh-"));
   }
 
-  private async call(cwd: string, prompt: string, args: string[], timeoutMs: number): Promise<CliResult> {
+  private async call(cwd: string, prompt: string, args: string[], timeoutMs: number, extraEnv: Record<string, string> = {}): Promise<CliResult> {
     const fullArgs = [
       "-p", "--output-format", "json", "--settings", this.settingsJson,
       ...(this.config.model ? ["--model", this.config.model] : []),
@@ -250,6 +264,7 @@ export class ClaudeCodeBuilder implements Builder {
         CLAUDE_CODE_OAUTH_TOKEN: process.env.CLAUDE_CODE_OAUTH_TOKEN, GH_CONFIG_DIR: this.ghConfigDir,
         // Device test runs through the isobot shell tool can take a while.
         MCP_TOOL_TIMEOUT: String(46 * 60_000),
+        ...extraEnv,
         // Builder shell commands run sandboxed, so SwiftPM/xcodebuild need their inner sandbox off (shims.ts).
         ...(this.shimDir ? { PATH: `${this.shimDir}:${process.env.PATH ?? ""}` } : {}),
       }),
@@ -274,38 +289,38 @@ export class ClaudeCodeBuilder implements Builder {
   }
 
   /** Builder flags: rules plus, when the runner provides it, the isobot shell MCP server for this workspace. */
-  private builderArgs(cwd: string, devices?: JobDevices): string[] {
+  private builderArgs(cwd: string, devices?: JobDevices, media?: string): string[] {
     if (!this.shellTool) return ["--permission-mode", "bypassPermissions", "--append-system-prompt", BUILDER_RULES];
     mkdirSync(this.shellTool.configDir, { recursive: true });
     const dir = mkdtempSync(path.join(this.shellTool.configDir, "session-"));
     const shellConfig = path.join(dir, "shell.json");
     writeFileSync(shellConfig, JSON.stringify({
       cwd, profile: this.shellTool.profileFor(cwd), maxTimeoutMs: 45 * 60_000,
-      env: this.shellTool.env({ ...(this.shimDir ? { PATH: `${this.shimDir}:${process.env.PATH ?? ""}` } : {}), ...(devices?.env ?? {}) }),
+      env: this.shellTool.env({ ...(this.shimDir ? { PATH: `${this.shimDir}:${process.env.PATH ?? ""}` } : {}), ...(devices?.env ?? {}), ...(media ? { ISOBOT_MEDIA: media } : {}) }),
     }), { mode: 0o600 });
     const here = fileURLToPath(import.meta.url);
     const server = path.join(path.dirname(here), `mcp${path.extname(here)}`);
     const mcpConfig = path.join(dir, "mcp.json");
     // execArgv carries tsx's loader when the runner itself runs from source.
     writeFileSync(mcpConfig, JSON.stringify({ mcpServers: { isobot: { command: process.execPath, args: [...process.execArgv, server, shellConfig] } } }), { mode: 0o600 });
-    return ["--permission-mode", "bypassPermissions", "--append-system-prompt", `${BUILDER_RULES}\n${toolRules(devices)}`, "--mcp-config", mcpConfig];
+    return ["--permission-mode", "bypassPermissions", "--append-system-prompt", `${BUILDER_RULES}\n${toolRules(devices, media)}`, "--mcp-config", mcpConfig];
   }
 
-  async implement(input: { cwd: string; task: string; devices?: JobDevices }): Promise<AgentRun> {
-    const result = await this.call(input.cwd, input.task, this.builderArgs(input.cwd, input.devices), this.config.timeoutMinutes * 60_000);
+  async implement(input: { cwd: string; task: string; devices?: JobDevices; media?: string }): Promise<AgentRun> {
+    const result = await this.call(input.cwd, input.task, this.builderArgs(input.cwd, input.devices, input.media), this.config.timeoutMinutes * 60_000, mediaEnv(input.media));
     return this.agentRun(result);
   }
 
-  async revise(input: { cwd: string; sessionId: string | null; task: string; feedback: string; devices?: JobDevices }): Promise<AgentRun> {
+  async revise(input: { cwd: string; sessionId: string | null; task: string; feedback: string; devices?: JobDevices; media?: string }): Promise<AgentRun> {
     const prompt = input.sessionId
       ? `${input.feedback}\n\nFix these problems, commit, and summarise what you changed.`
       : `${input.task}\n\n## Previous attempt feedback\n${input.feedback}\n\nThe branch already contains a previous attempt. Fix these problems, commit, and summarise.`;
     let result: CliResult;
     try {
       result = await this.call(input.cwd, prompt, [
-        ...this.builderArgs(input.cwd, input.devices),
+        ...this.builderArgs(input.cwd, input.devices, input.media),
         ...(input.sessionId ? ["--resume", input.sessionId] : []),
-      ], this.config.timeoutMinutes * 60_000);
+      ], this.config.timeoutMinutes * 60_000, mediaEnv(input.media));
     } catch (error) {
       // A revision of an older PR can outlive its session (cleaned up, or a different machine): start fresh.
       if (input.sessionId && /no conversation found/i.test((error as Error).message)) return this.revise({ ...input, sessionId: null });
@@ -314,11 +329,15 @@ export class ClaudeCodeBuilder implements Builder {
     return this.agentRun(result);
   }
 
-  async review(input: { cwd: string; task: string; diff: string; checks: string }): Promise<Review> {
-    const prompt = `## Task\n${input.task}\n\n## Runner checks\n${input.checks}\n\n## Diff\n\`\`\`diff\n${input.diff}\n\`\`\``;
+  async review(input: { cwd: string; task: string; diff: string; checks: string; media?: string[] }): Promise<Review> {
+    const media = input.media?.length
+      ? `\n\n## Screenshots and recordings\nThe builder captured these to show the change (open the images with Read; check they match the task and look right):\n${input.media.map(m => `- ${m}`).join("\n")}`
+      : "";
+    const prompt = `## Task\n${input.task}\n\n## Runner checks\n${input.checks}${media}\n\n## Diff\n\`\`\`diff\n${input.diff}\n\`\`\``;
     const result = await this.call(input.cwd, prompt, [
       // Project settings are skipped: the builder could have written hooks or instructions into them.
       "--tools", "Read,Grep,Glob", "--permission-mode", "dontAsk", "--no-session-persistence", "--setting-sources", "user",
+      ...[...new Set((input.media ?? []).map(m => path.dirname(m)))].flatMap(dir => ["--add-dir", dir]),
       "--append-system-prompt", REVIEW_RULES, "--json-schema", JSON.stringify(REVIEW_SCHEMA),
     ], 30 * 60_000);
     return parseReview(result.structured_output);

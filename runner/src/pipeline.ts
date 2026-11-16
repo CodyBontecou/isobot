@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type { AgentRun, Builder, JobDevices, Review } from "./builder.js";
 import { hasDevices, type DeviceLease, type Devices } from "./devices.js";
+import { collectMedia, mediaMarkdown, type MediaFile } from "./media.js";
 import { isTransient, UsageLimitError } from "./errors.js";
 import { failureFeedback, formatChecks } from "./checks.js";
 import { configuredRepos, policyFor, type Environment, type RepoPolicy, type RunnerConfig } from "./config.js";
@@ -25,6 +29,8 @@ export interface RepoOps {
   checkoutAt(sha: string, name: string): Promise<string>;
   fetchBranch(branch: string): Promise<string>;
   mergeBase(a: string, b: string): Promise<string>;
+  /** Publishes screenshots/recordings and returns a URL per file name (git.ts). */
+  publishMedia(prefix: string, files: { file: string; name: string }[], message: string): Promise<Record<string, string>>;
 }
 
 export interface PipelineDeps {
@@ -40,6 +46,8 @@ export interface PipelineDeps {
    * implementation must confine it (see sandbox.ts). Release commands run unsandboxed.
    */
   checks(cwd: string, commands: string[], options: { timeoutMs?: number; sandbox: boolean; env?: Record<string, string> }): Promise<CheckReport>;
+  /** Parent folder for each build's $ISOBOT_MEDIA (default: the system temp folder). */
+  mediaRoot?: string;
   /** Boots per-job simulators/emulators for repos with `devices` configured. */
   devices?: Devices;
   sleep?: (ms: number) => Promise<void>;
@@ -202,6 +210,8 @@ export class Pipeline {
     job = store.update(job.id, { state: "building", attempts, branch });
     let workspace: string | null = null;
     let lease: DeviceLease | null = null;
+    // Screenshots and recordings of visible changes ($ISOBOT_MEDIA); both of the builder's sandboxes can write temp.
+    const mediaDir = mkdtempSync(path.join(this.deps.mediaRoot ?? tmpdir(), "isobot-media-"));
     try {
       const issue = await github.issue(job.owner, job.repo, job.number);
       if (issue.state === "closed" || hasLabel(issue, this.labels.stop)) return this.stop(job, issue);
@@ -231,7 +241,7 @@ export class Pipeline {
         await this.feed(job, { phase: "revising", notes: this.noteCount(job, notes.fresh.length) }, this.ackNotes(notes.fresh));
         noteRounds++;
         run = await builder.revise({
-          cwd: workspace, sessionId: job.sessionId, task, devices,
+          cwd: workspace, sessionId: job.sessionId, task, devices, media: mediaDir,
           feedback: notes.fresh.length ? noteFeedback(notes.fresh) : "Re-read the task and the owner's follow-up notes, and make sure this branch satisfies all of them.",
         });
         store.update(job.id, { sessionId: run.sessionId ?? job.sessionId });
@@ -240,7 +250,7 @@ export class Pipeline {
         baseSha = mainSha;
         workspace = await repo.createWorkspace(branch, baseSha);
         await this.feed(job, { phase: "implementing" });
-        run = await builder.implement({ cwd: workspace, task, devices });
+        run = await builder.implement({ cwd: workspace, task, devices, media: mediaDir });
         store.update(job.id, { sessionId: run.sessionId });
         store.event(job.id, "implemented", run.summary);
       }
@@ -271,7 +281,7 @@ export class Pipeline {
             noteRounds++;
             task = withNotes(source.task, late.all);
             await this.feed(job, { phase: "revising", notes: this.noteCount(job, late.fresh.length) }, this.ackNotes(late.fresh));
-            run = await builder.revise({ cwd: workspace, sessionId: sessionId(), task, feedback: noteFeedback(late.fresh), devices });
+            run = await builder.revise({ cwd: workspace, sessionId: sessionId(), task, feedback: noteFeedback(late.fresh), devices, media: mediaDir });
             sha = await commit(`Apply owner feedback for #${issue.number}`);
             checks = await runChecks(run.summary);
             continue;
@@ -280,20 +290,23 @@ export class Pipeline {
         if (!checks.passed && fixRounds < this.deps.config.builder.maxFixRounds) {
           fixRounds++;
           await this.feed(job, { phase: "fixing", fixRounds });
-          run = await builder.revise({ cwd: workspace, sessionId: sessionId(), task, feedback: failureFeedback(checks), devices });
+          run = await builder.revise({ cwd: workspace, sessionId: sessionId(), task, feedback: failureFeedback(checks), devices, media: mediaDir });
           sha = await commit(`Fix checks for #${issue.number}`);
           checks = await runChecks(run.summary);
           continue;
         }
         // The reviewer sees exactly the commit the runner captured, diffed in the runner's own clone.
         await this.feed(job, { phase: "reviewing" });
-        review = await builder.review({ cwd: workspace, task, diff: await repo.diff(baseSha, sha), checks: formatChecks(checks) });
+        review = await builder.review({
+          cwd: workspace, task, diff: await repo.diff(baseSha, sha), checks: formatChecks(checks),
+          media: collectMedia(mediaDir).files.map(f => f.file),
+        });
         store.event(job.id, "review", `${review.verdict} ${review.confidence} ${review.risk}: ${review.summary}`);
         await this.deps.notifier.say(job, reviewLine(review));
         if (review.verdict === "request_changes" && reviewRounds < this.deps.config.builder.maxReviewRounds) {
           reviewRounds++;
           await this.feed(job, { phase: "addressing", reviewRounds });
-          run = await builder.revise({ cwd: workspace, sessionId: run.sessionId, task, feedback: reviewFeedback(review), devices });
+          run = await builder.revise({ cwd: workspace, sessionId: run.sessionId, task, feedback: reviewFeedback(review), devices, media: mediaDir });
           sha = await commit(`Address review for #${issue.number}`);
           checks = await runChecks(run.summary);
           continue;
@@ -311,13 +324,16 @@ export class Pipeline {
       }
       await this.feed(job, { phase: "pushing" });
       await repo.push(sha, branch);
-      const body = prBody({ issue, run: run.summary, checks, review, diff });
+      const media = await this.publishMedia(job, repo, mediaDir, sha);
+      const body = prBody({ issue, run: run.summary, checks, review, diff, media: media.markdown });
       const existing = await github.findPull(job.owner, job.repo, branch);
       const pr = existing && existing.state === "open"
         ? (await github.updatePull(job.owner, job.repo, existing.number, body), existing)
         : await github.createPull(job.owner, job.repo, { head: branch, base, title: issue.title, body });
       store.update(job.id, { prNumber: pr.number });
       await this.feed(job, { prUrl: pr.url }, `📤 ${pr === existing ? "Updated" : "Opened"} ${pr.url} (${diff.files.length} files, ${diff.changedLines} lines)`);
+      if (media.files.length) await this.deps.notifier.media(job, `📸 What the change looks like (also on ${pr.url}):`, media.files);
+      if (media.notes.length) await this.deps.notifier.say(job, `📸 Some captures weren't published:\n${media.notes.map(n => `- ${n}`).join("\n")}`);
 
       const gateNow = async (): Promise<GateDecision> => {
         const current = await github.issue(job.owner, job.repo, job.number);
@@ -375,6 +391,7 @@ export class Pipeline {
       else await this.fail(job, error as Error);
     } finally {
       if (lease) await lease.release().catch(error => console.warn(`[devices] ${job.id}: release failed: ${(error as Error).message}`));
+      rmSync(mediaDir, { recursive: true, force: true });
       if (workspace) await repo.removeWorkspace(branch).catch(() => undefined);
     }
   }
@@ -588,6 +605,23 @@ export class Pipeline {
     }
   }
 
+  /**
+   * Publishes the builder's captures to the isobot/media branch for the PR body. Never fails the job:
+   * a capture problem only costs the pictures.
+   */
+  private async publishMedia(job: Job, repo: RepoOps, dir: string, sha: string): Promise<{ files: MediaFile[]; markdown: string; notes: string[] }> {
+    const { files, skipped } = collectMedia(dir);
+    if (files.length === 0) return { files, markdown: "", notes: skipped };
+    try {
+      const prefix = `${job.number}/${new Date().toISOString().replace(/[-:]/g, "").slice(0, 15)}-${sha.slice(0, 8)}`;
+      const urls = await repo.publishMedia(prefix, files, `Media for #${job.number} at ${sha.slice(0, 8)}`);
+      return { files, markdown: mediaMarkdown(files, urls), notes: skipped };
+    } catch (error) {
+      console.warn(`[media] ${job.id}: publishing failed: ${(error as Error).message}`);
+      return { files, markdown: "", notes: [...skipped, `couldn't publish to GitHub: ${(error as Error).message.slice(0, 200)}`] };
+    }
+  }
+
   /** Checks run builder-written code, so always sandboxed. */
   private checks(cwd: string, commands: string[], env?: Record<string, string>): Promise<CheckReport> {
     return this.deps.checks(cwd, commands, { sandbox: true, env });
@@ -633,12 +667,13 @@ export function buildTask(issue: Pick<Issue, "title" | "url" | "body">, policy: 
   ].join("\n\n");
 }
 
-function prBody(input: { issue: Issue; run: string; checks: CheckReport; review: Review; diff: DiffStat }): string {
+function prBody(input: { issue: Issue; run: string; checks: CheckReport; review: Review; diff: DiffStat; media?: string }): string {
   const { issue, run, checks, review, diff } = input;
   return [
     `Closes #${issue.number}`,
     "## Summary",
     run || "(builder gave no summary)",
+    ...(input.media ? ["## Screenshots", input.media] : []),
     "## Runner checks",
     formatChecks(checks),
     "## Independent review",

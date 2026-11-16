@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { DISCORD_MAX_BYTES, mb, type MediaFile } from "./media.js";
 import type { Job, Store } from "./store.js";
 
 /**
@@ -127,6 +129,36 @@ export class Notifier {
     const card = this.load(job);
     if (!this.options.bot || !card?.threadId) return;
     await this.bot("POST", `/channels/${card.threadId}/messages`, message(post)).catch(warn);
+  }
+
+  /**
+   * Uploads screenshots/recordings into a job's thread, where Discord shows them inline. Files over
+   * Discord's bot limit are named instead (the PR has them). Does nothing without a thread.
+   */
+  async media(job: Pick<Job, "id">, text: string, files: MediaFile[]): Promise<void> {
+    const card = this.load(job);
+    if (!this.options.bot || !card?.threadId || files.length === 0) return;
+    const fits = files.filter(f => f.bytes <= DISCORD_MAX_BYTES).slice(0, 10);
+    const tooBig = files.filter(f => f.bytes > DISCORD_MAX_BYTES).map(f => `${f.caption} (${mb(f.bytes)}, too big for Discord; it's on the PR)`);
+    const content = [text, ...fits.map((f, i) => `${i + 1}. ${f.caption}`), ...tooBig.map(line => `- ${line}`)].join("\n");
+    const form = new FormData();
+    form.append("payload_json", JSON.stringify({
+      ...message(content),
+      attachments: fits.map((f, i) => ({ id: i, filename: f.name, description: f.caption.slice(0, 1024) })),
+    }));
+    fits.forEach((f, i) => form.append(`files[${i}]`, new Blob([readFileSync(f.file)]), f.name));
+    try {
+      const response = await this.fetcher(`${API}/channels/${card.threadId}/messages`, {
+        method: "POST",
+        headers: { Authorization: `Bot ${this.options.bot.token}`, "User-Agent": "isobot-runner (https://github.com, 0.1)" },
+        body: form,
+        signal: AbortSignal.timeout(120_000),
+      });
+      if (!response.ok) throw new Error(`Discord media upload returned HTTP ${response.status}: ${(await response.text().catch(() => "")).slice(0, 200)}`);
+      await response.body?.cancel();
+    } catch (error) {
+      warn(error);
+    }
   }
 
   /** Forgets a job's card, so the next update starts a new card and thread (a fresh approval). */

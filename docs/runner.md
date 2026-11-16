@@ -267,3 +267,28 @@ avdmanager create avd -n isobot-api35 -k "system-images;android-35;google_apis;a
 
 `npm run runner -- checks <repo>` boots the repository's devices too, so try a new device
 check there before a job depends on it.
+
+## Screenshots and recordings
+
+When a change is visible, the builder saves screenshots and short recordings of it to
+`$ISOBOT_MEDIA`, a fresh temp folder per build that both of its sandboxes can write.
+It captures from its own devices through the isobot shell (`xcrun simctl io … screenshot`
+or `recordVideo`, `adb exec-out screencap`, `adb shell screenrecord`) or with argent. File
+names set the order and the caption: `01-before-export-sheet.png` is shown as "Before
+export sheet". Nothing visible changed, nothing captured.
+
+The runner takes only regular PNG, JPEG, GIF, WebP, MP4 or MOV files whose bytes match
+their extension: at most 8, images up to 8 MB, recordings up to 50 MB (`media.ts`). Then:
+
+- The reviewer gets their paths and looks at them alongside the diff.
+- They're committed to the repository's `isobot/media` branch (an orphan branch, one commit
+  per publish under `<issue>/<time>-<sha>/`, each keeping the last as its parent, so old
+  links keep working). The PR body gets a **Screenshots** section linking each file at that
+  commit: images inline, recordings as links, because GitHub only embeds video it hosts
+  itself. The branch has no workflows, so pushing it runs no CI. On a public repository the
+  branch is public too.
+- They're uploaded to the job's Discord thread, where Discord shows images and MP4s inline.
+  Files over Discord's 10 MB bot limit are listed instead, pointing at the PR.
+
+Files left out are explained in the thread. A publishing failure only costs the pictures,
+never the job. Revisions capture again, so the PR body and thread show the latest state.
