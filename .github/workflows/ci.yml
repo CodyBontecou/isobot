@@ -28,16 +28,19 @@ jobs:
             runner/package-lock.json
             cloudflare/package-lock.json
             bridge/package-lock.json
+            watchdog/package-lock.json
       - run: npm ci
       - run: npm ci --prefix runner
       - run: npm ci --prefix cloudflare
       - run: npm ci --prefix bridge
+      - run: npm ci --prefix watchdog
       - name: Typecheck
         run: |
           npm run typecheck
           npm run runner:typecheck
           npm run agent:typecheck
           npm run bridge:typecheck
+          npm run watchdog:typecheck
       - name: Test
         run: npm test
 
