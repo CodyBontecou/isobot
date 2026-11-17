@@ -322,6 +322,11 @@ Discord's 10 MB limit are skipped. The staff channel gets a note that the post w
 that never goes live, or that a later version replaces, gets no post. `name` defaults to the
 scheme and `storeUrl` to `https://apps.apple.com/app/id<appId>`. Launch posts need the Discord bot;
 a webhook alone can't post to another channel.
+
+For GitSync.md, iso.me and Vox.md, the train posts in each app's `#updates`, and
+`asc-webhook-worker` (which announces every other App Store release from Apple's webhooks) skips
+their iOS releases via `skipPlatforms`. An iOS version of those apps released outside the train
+gets no post; Vox.md's Mac releases are still the worker's.
 The runner uses the App Store Connect key `asc` already has in the keychain, and signs with this
 Mac's keychain, so it must run as a user who can archive and sign the app in Xcode.
 
