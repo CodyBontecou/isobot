@@ -6,7 +6,10 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ClaudeCodeBuilder } from "./builder.js";
+import { builderSettings, ClaudeCodeBuilder } from "./builder.js";
+import { chatAllowlist, claudeChatModel, StaffChat } from "./chat.js";
+import { ChatToolServer } from "./chatMcp.js";
+import { DiscordApi } from "./discordApi.js";
 import { configuredRepos, loadConfig, loadEnvironment, policyFor, type Environment, type RunnerConfig } from "./config.js";
 import { Repo } from "./git.js";
 import { GitHub } from "./github.js";
@@ -21,6 +24,7 @@ import { ensureShims } from "./shims.js";
 import { hasDevices, LocalDevices } from "./devices.js";
 import { removeDerivedData } from "./cleanup.js";
 import { Store } from "./store.js";
+import type { LiveStatus } from "./chatTools.js";
 import { AppStoreSource, DiscordSource, EmailSource, GitHubSource, VoxSource, triage, type Source } from "./triage.js";
 
 function loadEnvFiles(): void {
@@ -43,6 +47,8 @@ interface Runtime {
   devices: LocalDevices;
   repoFor: (owner: string, repo: string) => Repo;
   train: ReleaseTrain;
+  /** Runner secrets and state, for settings that keep agents out of them. */
+  secrets: string[];
 }
 
 /** Set once the runner starts stopping; a release train interrupted by it resumes next start. */
@@ -67,21 +73,23 @@ function runtime(): Runtime {
   // Builders and checks may read the shared clones (workspaces borrow their objects) but not secrets or state.
   const secrets = ["runner.env", "runner.sqlite", "runner.sqlite-wal", "runner.sqlite-shm", "logs", "runner.lock", "paused", "heartbeat.json"]
     .map(entry => path.join(env.home, entry)).concat(path.resolve(process.cwd(), ".env.runner"));
+  // Builders and checks also stay out of the staff chat's files (the owner's uploads and checkouts).
+  const builderSecrets = [...secrets, path.join(env.home, "chat")];
   const shimDir = ensureShims(env.home);
   const extraWrite = ((config.builder.settings?.sandbox as { filesystem?: { allowWrite?: string[] } } | undefined)?.filesystem?.allowWrite) ?? [];
   const mcpDir = path.join(env.home, "mcp");
   const shellTool = {
     configDir: mcpDir,
-    profileFor: (cwd: string) => sandboxProfile({ workspace: cwd, secrets, allowWrite: extraWrite }),
+    profileFor: (cwd: string) => sandboxProfile({ workspace: cwd, secrets: builderSecrets, allowWrite: extraWrite }),
     env: (extra: Record<string, string>) => workerEnv(extra) as Record<string, string>,
   };
-  const builder = new ClaudeCodeBuilder(config.builder, { secrets, noWrite: [path.join(env.home, "repos"), shimDir, mcpDir, ISOBOT_ROOT] }, env.claudeBin, shimDir, shellTool);
+  const builder = new ClaudeCodeBuilder(config.builder, { secrets: builderSecrets, noWrite: [path.join(env.home, "repos"), shimDir, mcpDir, ISOBOT_ROOT] }, env.claudeBin, shimDir, shellTool);
   const devices = new LocalDevices(path.join(env.home, "logs", "devices"));
   const notifier = new Notifier({ webhookUrl: env.discordWebhookUrl, bot: env.discordBot, store, jobUrl: env.jobUrl });
   // Checks execute builder-written code, so they get the same confinement as the builder's shell.
   const checks = (cwd: string, commands: string[], options: { timeoutMs?: number; sandbox: boolean; env?: Record<string, string> }) => runChecks(cwd, commands, {
     timeoutMs: options.timeoutMs, env: options.env,
-    sandboxProfile: options.sandbox ? sandboxProfile({ workspace: cwd, secrets, allowWrite: extraWrite }) : undefined,
+    sandboxProfile: options.sandbox ? sandboxProfile({ workspace: cwd, secrets: builderSecrets, allowWrite: extraWrite }) : undefined,
     shimDir,
   });
   const repoFor = (owner: string, repo: string) => new Repo(env.home, owner, repo, env.githubToken);
@@ -106,7 +114,7 @@ function runtime(): Runtime {
       return { version: status.appstore?.version ?? null, state: status.appstore?.state ?? null };
     },
   });
-  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train };
+  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, secrets };
 }
 
 /** `owner/repo#12`, or `repo#12` for a configured repository. */
@@ -181,6 +189,9 @@ async function loop(rt: Runtime): Promise<void> {
     }, 60_000);
     void pingHeartbeat(url);
   }
+  const chat = await startChat(rt, () => ({ activeJobs: rt.pipeline.activeJobs, lastCycleError, lastTriageAt, manuallyPaused: existsSync(pausedFile(rt.env)) }))
+    .catch(error => { console.warn(`[chat] not started: ${(error as Error).message}`); return null; });
+  process.once("exit", () => chat?.stop());
   console.log(`[runner] started: ${configuredRepos(rt.config).map(r => `${r.owner}/${r.repo}`).join(", ")}; sources: ${rt.sources.map(s => s.name).join(", ")}`);
   await rt.notifier.discord("🟢 isobot runner started");
   while (!stopping) {
@@ -227,6 +238,33 @@ async function loop(rt: Runtime): Promise<void> {
     }
     await sleep(rt.config.pollSeconds * 1000);
   }
+}
+
+/** Starts the staff chat when the bot is configured and chat isn't switched off. */
+async function startChat(rt: Runtime, live: () => LiveStatus): Promise<StaffChat | null> {
+  if (!rt.env.discordBot || rt.config.chat?.enabled === false) return null;
+  const discord = new DiscordApi(rt.env.discordBot.token);
+  const [me, allowed] = await Promise.all([discord.request<{ id: string }>("GET", "/users/@me"), chatAllowlist(discord)]);
+  if (allowed.size === 0) throw new Error("nobody is allowed to chat (set ISOBOT_CHAT_USERS)");
+  const chatDir = path.join(rt.env.home, "chat");
+  mkdirSync(chatDir, { recursive: true });
+  const server = new ChatToolServer();
+  await server.start();
+  const config = rt.config.chat ?? {};
+  const chat = new StaffChat({
+    discord, channelId: rt.env.chatChannelId ?? rt.env.discordBot.channelId, botId: me.id, allowed, store: rt.store, server, config,
+    model: claudeChatModel({ bin: rt.env.claudeBin, config, chatDir, settingsJson: JSON.stringify(builderSettings({}, { secrets: rt.secrets, noWrite: [] })) }),
+    tools: {
+      config: rt.config, store: rt.store, github: rt.github, home: rt.env.home, chatDir, live,
+      // Checkouts go under the chat's directory, the only place its Read tool can reach.
+      repoFor: (owner, repo) => new Repo(rt.env.home, owner, repo, rt.env.githubToken, undefined, path.join(chatDir, "checkouts")),
+      setPaused: paused => paused ? writeFileSync(pausedFile(rt.env), new Date().toISOString()) : rmSync(pausedFile(rt.env), { force: true }),
+      card: id => rt.notifier.card({ id }),
+    },
+  });
+  void chat.run();
+  console.log(`[chat] listening in the staff channel for ${allowed.size} user(s)`);
+  return chat;
 }
 
 async function doctor(rt: Runtime): Promise<boolean> {
@@ -279,6 +317,11 @@ async function doctor(rt: Runtime): Promise<boolean> {
     const channel = response?.ok ? await response.json() as { name?: string } : null;
     report(Boolean(channel), "Discord job cards and threads", channel ? `#${channel.name}` : response ? `HTTP ${response.status}: the bot needs View Channel, Send Messages, Create Public Threads and Send Messages in Threads` : "unreachable");
   } else console.log(rt.env.discordWebhookUrl ? "➖ Discord notifications through a webhook (set ISOBOT_DISCORD_BOT_TOKEN and ISOBOT_DISCORD_CHANNEL_ID for job threads)" : "➖ Discord notifications disabled");
+  if (rt.env.discordBot && rt.config.chat?.enabled !== false) {
+    const allowed = await chatAllowlist(new DiscordApi(rt.env.discordBot.token)).catch((error: Error) => error);
+    report(allowed instanceof Set && allowed.size > 0, "Staff chat",
+      allowed instanceof Set ? `${allowed.size} user(s) may talk to isobot in channel ${rt.env.chatChannelId} (the bridge needs ISOBOT_CHAT_CHANNEL_ID set to it)` : allowed.message);
+  } else console.log("➖ Staff chat off (needs ISOBOT_DISCORD_BOT_TOKEN and ISOBOT_DISCORD_CHANNEL_ID; chat.enabled false switches it off)");
   report(existsSync("/usr/bin/sandbox-exec"), "Check sandbox (sandbox-exec) available");
   if (rt.env.heartbeatUrl) {
     const pinged = await pingHeartbeat(rt.env.heartbeatUrl);
