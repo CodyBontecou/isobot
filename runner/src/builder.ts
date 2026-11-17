@@ -170,7 +170,7 @@ const TRIAGE_SCHEMA = {
 
 /** Credential locations no builder tool or shell command should read. */
 export function defaultDenyPaths(home = homedir()): string[] {
-  return [".ssh", ".aws", ".gnupg", ".config/gh", ".netrc", ".npmrc", ".docker", ".wrangler", ".kube", "Library/Keychains", ".appstoreconnect", ".fastlane", ".git-credentials"]
+  return [".ssh", ".aws", ".gnupg", ".config/gh", ".netrc", ".npmrc", ".docker", ".wrangler", ".kube", "Library/Keychains", ".appstoreconnect", ".asc", ".fastlane", ".git-credentials"]
     .map(entry => `${home}/${entry}`);
 }
 
