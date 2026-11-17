@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { removeDerivedData } from "./cleanup.js";
 import { skipMarkers } from "./policy.js";
@@ -122,6 +122,33 @@ export class Repo {
     rmSync(dir, { recursive: true, force: true });
     // Xcode keyed its DerivedData to this path; nothing will build here again.
     removeDerivedData(dir);
+  }
+
+  /**
+   * Removes what this repository's clone still holds for one issue: leftover build and release
+   * workspaces (with their DerivedData) and the job's branch refs. Returns what went, for the issue comment.
+   */
+  purge(number: number): Promise<string[]> {
+    return this.exclusive(async () => {
+      const removed: string[] = [];
+      const root = path.join(this.workRoot, this.owner, this.repo);
+      for (const entry of existsSync(root) ? readdirSync(root) : []) {
+        if (!entry.startsWith(`isobot__${number}-`) && !entry.startsWith(`release__${number}-`)) continue;
+        const dir = path.join(root, entry);
+        rmSync(dir, { recursive: true, force: true });
+        removeDerivedData(dir);
+        removed.push(`workspace ${entry.replace(/^isobot__/, "isobot/")}`);
+      }
+      if (existsSync(path.join(this.barePath, "HEAD"))) {
+        const refs = (await this.git(["for-each-ref", "--format=%(refname)", "refs/isobot/isobot/"], this.barePath)).stdout
+          .split("\n").filter(ref => ref.startsWith(`refs/isobot/isobot/${number}-`));
+        for (const ref of refs) {
+          await this.git(["update-ref", "-d", ref], this.barePath);
+          removed.push(`ref ${ref.slice("refs/isobot/".length)}`);
+        }
+      }
+      return removed;
+    });
   }
 
   /** Commits anything left uncommitted in a workspace (no hooks run). */

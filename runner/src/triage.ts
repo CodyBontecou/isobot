@@ -3,7 +3,7 @@ import { simpleParser } from "mailparser";
 import type { Builder, TriageDecision, TriageItem } from "./builder.js";
 import { configuredRepos, type AppStoreConfig, type ImapAccount, type RunnerConfig } from "./config.js";
 import type { GitHubApi } from "./github.js";
-import type { Notifier } from "./notify.js";
+import { CONTROLS, PROPOSAL_CONTROLS, type Notifier } from "./notify.js";
 import type { Store } from "./store.js";
 
 /** New inbound items since the last pass, plus the cursor moves to apply once triage succeeds. */
@@ -409,7 +409,13 @@ export async function triage(deps: TriageDeps): Promise<TriageReport> {
   }
   commitCursors();
   deps.store.event(null, "triage", `${items.length} items, ${proposals.length} proposals`);
-  const result = { digest: digests.join("\n\n") };
+  // The model sometimes writes its newlines escaped; Discord would show a literal "\n".
+  const result = { digest: digests.join("\n\n").replace(/\\n/g, "\n") };
+  // With a bot, each proposal awaiting approval gets ✅/🧹 reactions: on the digest when it is the
+  // only issue the digest links (the bridge only acts on messages about exactly one issue), else on
+  // a short message of its own.
+  const waiting = proposals.filter(p => !p.approved);
+  const controls = deps.notifier.threads;
 
   const lowReviews = items.filter(item => item.source === "appstore" && (item.rating ?? 5) <= 2);
   const lines = [
@@ -418,10 +424,17 @@ export async function triage(deps: TriageDeps): Promise<TriageReport> {
     ...(lowReviews.length ? [`⚠️ ${lowReviews.length} App Store review${lowReviews.length === 1 ? "" : "s"} at 2 stars or fewer:`] : []),
     ...lowReviews.map(r => `• ${"★".repeat(r.rating ?? 0)} ${r.repo}: ${r.text.split("\n\n")[1]?.slice(0, 80) || "(no title)"} <${r.url}>`),
     ...(proposals.some(p => p.approved) ? [`🏗 = rated small and queued to build, merge and ship; add \`${labels.stop}\` to cancel one.`] : []),
-    ...(proposals.some(p => !p.approved) ? [`The rest are major or less certain: add \`${labels.ready}\`, or react ✅ in the issue's Discord help thread, to have isobot build one.`] : []),
+    ...(waiting.length ? [controls
+      ? `${proposals.some(p => p.approved) ? "The rest are" : "This is"} major or less certain: react ${CONTROLS.start} to have isobot build it, or ${CONTROLS.cleanup} to dismiss it (or add \`${labels.ready}\` on GitHub).`
+      : `The rest are major or less certain: add \`${labels.ready}\`, or react ✅ in the issue's Discord help thread, to have isobot build one.`] : []),
     result.digest,
   ];
-  await deps.notifier.discord(lines.filter(Boolean).join("\n"));
+  const digest = lines.filter(Boolean).join("\n");
+  const onDigest = controls && waiting.length === 1 && issueUrls(digest).size === 1;
+  await deps.notifier.discord(digest, onDigest ? PROPOSAL_CONTROLS : []);
+  if (controls && !onDigest) {
+    for (const p of waiting) await deps.notifier.discord(`🗳 **${p.title}** <${p.url}>`, PROPOSAL_CONTROLS);
+  }
   return { items: items.length, proposals, digest: result.digest };
 }
 
@@ -465,4 +478,9 @@ async function propose(deps: TriageDeps, decision: TriageDecision, item: TriageI
   const issue = await deps.github.createIssue(owner, repo, decision.title, `${decision.spec}${source}${footer}`,
     [...(approved ? [labels.ready, labels.auto] : [labels.proposed]), ...(kindLabel ? [kindLabel] : [])]);
   return { title: decision.title, url: issue.url, approved };
+}
+
+/** The distinct GitHub issues a message links, as the bridge counts them. */
+function issueUrls(text: string): Set<string> {
+  return new Set([...text.matchAll(/https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+)/g)].map(m => m[0].toLowerCase()));
 }

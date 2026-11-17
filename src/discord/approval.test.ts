@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { approvalFor, isApproveEmoji, issueLinks, messageIssue } from "./approval.js";
+import { approvalFor, isApproveEmoji, issueLinks, messageIssue, planFor, reactionAction } from "./approval.js";
 
 const url = (n: number) => `https://github.com/CodyBontecou/health-md/issues/${n}`;
 const msg = (content: string, over: { author?: string; embed?: string } = {}) => ({
@@ -37,4 +37,22 @@ test("only the approval emoji counts, with or without the variation selector", (
   assert.equal(isApproveEmoji({ name: "✅️", id: null }), true);
   assert.equal(isApproveEmoji({ name: "👍", id: null }), false);
   assert.equal(isApproveEmoji({ name: null, id: "123" }), false);
+});
+
+test("each control emoji maps to its action, with or without the variation selector", () => {
+  assert.equal(reactionAction({ name: "✅", id: null }), "start");
+  assert.equal(reactionAction({ name: "🛑", id: null }), "stop");
+  assert.equal(reactionAction({ name: "🔁", id: null }), "continue");
+  assert.equal(reactionAction({ name: "🧹", id: null }), "cleanup");
+  assert.equal(reactionAction({ name: "👍", id: null }), null);
+});
+
+test("plans: stop withdraws a pending approval, continue doesn't disturb an open PR, cleanup is idempotent", () => {
+  assert.deepEqual(planFor("stop", { state: "open", labels: ["isobot:ready"] }), { add: ["isobot:stop"], remove: ["isobot:ready"] });
+  assert.equal(planFor("stop", { state: "open", labels: ["isobot:stop"] }), "noop");
+  assert.equal(planFor("continue", { state: "open", labels: ["isobot:review"] }), "noop");
+  assert.deepEqual(planFor("continue", { state: "open", labels: ["isobot:review", "isobot:stop"] }), { add: [], remove: ["isobot:stop"] });
+  assert.equal(planFor("cleanup", { state: "open", labels: ["isobot:cleanup"] }), "noop");
+  assert.deepEqual(planFor("cleanup", { state: "open", labels: ["isobot:ready"] }), { add: ["isobot:cleanup"], remove: ["isobot:ready"] });
+  assert.equal(planFor("start", { state: "open", labels: ["isobot:stop"] }), "refuse");
 });

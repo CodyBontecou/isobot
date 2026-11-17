@@ -13,20 +13,26 @@ import { isAllowed } from "../auth.js";
 import { repoToCategoryKey } from "../config/repos.js";
 import {
   APPROVED_EMOJI,
+  DONE_EMOJI,
   LABELS,
   REFUSED_EMOJI,
   approvalFor,
-  isApproveEmoji,
   messageIssue,
+  planFor,
+  reactionAction,
   type IssueRef,
 } from "../discord/approval.js";
 import { runnerJobIssue } from "../discord/runnerThreads.js";
 import { addLabels, getIssue, removeLabel } from "../github/issues.js";
 
 /**
- * ✅ from the owner approves a build: on a bot message that links one issue (a help-forum
- * "Tracked from GitHub" post, a runner job card), or on any message in that issue's help-forum
- * thread or runner job thread. Removing the ✅ before the runner claims the issue withdraws it.
+ * The owner's reactions drive isobot, on a bot message that links one issue (a triage digest, a
+ * help-forum "Tracked from GitHub" post, a runner job card), or on any message in that issue's
+ * help-forum thread or runner job thread:
+ *   ✅ start (isobot:ready)  🛑 stop (isobot:stop)  🔁 continue (lift a stop, or build again)
+ *   🧹 clean up (isobot:cleanup: the runner closes the issue and removes what it made locally)
+ * ✅ and 🛑 toggle: removing the ✅ before the runner claims the issue withdraws it, and removing
+ * the 🛑 continues (like 🔁). 🔁 and 🧹 are one-shot; removing them does nothing.
  */
 export function registerApproveReactions(client: Client): void {
   client.on(Events.MessageReactionAdd, (reaction, user) => void handleApproveReaction(client, reaction, user, true));
@@ -55,7 +61,9 @@ export async function handleApproveReaction(
   deps: ApproveDeps = defaultDeps,
 ): Promise<void> {
   const { getIssue, addLabels, removeLabel } = deps;
-  if (user.bot || !isApproveEmoji(partial.emoji) || !deps.isAllowed(user.id)) return;
+  const action = reactionAction(partial.emoji);
+  if (user.bot || !action || !deps.isAllowed(user.id)) return;
+  if (!added && action !== "start" && action !== "stop") return;
   try {
     const reaction = partial.partial ? await partial.fetch() : partial;
     const message = reaction.message.partial ? await reaction.message.fetch() : reaction.message;
@@ -64,8 +72,20 @@ export async function handleApproveReaction(
     const tag = `${ref.owner}/${ref.repo}#${ref.number}`;
     const issue = await getIssue(ref);
 
+    if (!added && action === "stop") {
+      // Only undoes a stop that is still in place; otherwise un-clicking could start a build.
+      if (!issue.labels.some(l => l.toLowerCase() === LABELS.stop)) return;
+      const plan = planFor("continue", issue);
+      if (typeof plan === "string") return;
+      if (plan.add.length) await addLabels({ ...ref, labels: plan.add });
+      for (const label of plan.remove) await removeLabel({ ...ref, label });
+      await message.react(DONE_EMOJI).catch(() => undefined);
+      console.log(`[isobot] stop lifted from Discord by ${user.id}: ${tag} (+${plan.add.join(",")} -${plan.remove.join(",")})`);
+      return;
+    }
+
     if (!added) {
-      // Withdraw only an approval the runner hasn't picked up yet; once it builds, use the stop label.
+      // Withdraw only an approval the runner hasn't picked up yet; once it builds, use 🛑.
       if (approvalFor(issue) === "in_flight" && issue.labels.includes(LABELS.ready)) {
         await removeLabel({ ...ref, label: LABELS.ready });
         await message.reactions.cache.get(APPROVED_EMOJI)?.users.remove(client.user!.id).catch(() => undefined);
@@ -74,17 +94,19 @@ export async function handleApproveReaction(
       return;
     }
 
-    const decision = approvalFor(issue);
-    if (decision === "refuse") {
+    const plan = planFor(action, issue);
+    if (plan === "refuse") {
       await message.react(REFUSED_EMOJI).catch(() => undefined);
-      console.log(`[isobot] approval refused for ${tag}: ${issue.state}, labels ${issue.labels.join(",")}`);
+      console.log(`[isobot] ${action} refused for ${tag}: ${issue.state}, labels ${issue.labels.join(",")}`);
       return;
     }
-    if (decision === "approve") {
-      await addLabels({ ...ref, labels: [LABELS.ready] });
-      console.log(`[isobot] approved from Discord by ${user.id}: ${tag}`);
+    if (plan !== "noop") {
+      // Add before removing: a cleanup's stop must land before its ready label goes.
+      if (plan.add.length) await addLabels({ ...ref, labels: plan.add });
+      for (const label of plan.remove) await removeLabel({ ...ref, label });
+      console.log(`[isobot] ${action} from Discord by ${user.id}: ${tag} (+${plan.add.join(",")} -${plan.remove.join(",")})`);
     }
-    await message.react(APPROVED_EMOJI).catch(() => undefined);
+    await message.react(action === "start" ? APPROVED_EMOJI : DONE_EMOJI).catch(() => undefined);
   } catch (err) {
     console.error("[isobot] approveReaction error:", err);
     await partial.message.react("⚠️").catch(() => undefined);

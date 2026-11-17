@@ -10,7 +10,7 @@ import { failureFeedback, formatChecks } from "./checks.js";
 import { configuredRepos, policyFor, type Environment, type RepoPolicy, type RunnerConfig } from "./config.js";
 import type { DiffStat } from "./git.js";
 import type { CiState, GitHubApi, Issue, IssueComment, PullRequest } from "./github.js";
-import { maxCommentId, noteFeedback, ownerNotes, quoteNote, withNotes, type OwnerNote } from "./notes.js";
+import { asksToRetry, maxCommentId, noteFeedback, ownerNotes, quoteNote, withNotes, type OwnerNote } from "./notes.js";
 import type { CardUpdate, Notifier } from "./notify.js";
 import { evaluateGate, matchesGlob, type CheckReport, type GateDecision } from "./policy.js";
 import type { Job, Store } from "./store.js";
@@ -27,6 +27,8 @@ export interface RepoOps {
   diff(baseSha: string, sha: string): Promise<string>;
   push(sha: string, branch: string): Promise<void>;
   checkoutAt(sha: string, name: string): Promise<string>;
+  /** Removes leftover workspaces and refs for one issue (🧹); returns what went. */
+  purge(number: number): Promise<string[]>;
   fetchBranch(branch: string): Promise<string>;
   mergeBase(a: string, b: string): Promise<string>;
   /** Publishes screenshots/recordings and returns a URL per file name (git.ts). */
@@ -78,6 +80,9 @@ export interface TaskSource {
   fingerprint: string;
 }
 
+/** Job states a retry may start over from. */
+const REBUILDABLE = ["merged", "released", "shipped", "closed", "failed", "stopped"];
+
 export class Pipeline {
   private running = new Set<string>();
   /** Set on SIGTERM/SIGINT: builds dying because their processes were killed are interruptions, not failures. */
@@ -107,7 +112,7 @@ export class Pipeline {
       }
       for (const issue of issues) {
         try {
-          if (hasLabel(issue, this.labels.stop)) continue;
+          if (hasLabel(issue, this.labels.stop) || hasLabel(issue, this.labels.cleanup)) continue;
           // Approval is the trust boundary: only you (or trustedAuthors) may start a build.
           const approver = await github.labeledBy(owner, repo, issue.number, this.labels.ready);
           if (!approver || !(await this.isTrusted(approver))) {
@@ -546,15 +551,86 @@ export class Pipeline {
         await this.feed(job, { phase: "shipFailed", detail: (error as Error).message.slice(0, 300) });
       }
     }
-    if (this.deps.notifier.threads) await this.answerFinished();
+    await this.answerFinished();
   }
 
-  /** A reply in the thread of a finished job can't change it; say what would. */
+  /**
+   * Approves an issue to build again for the owner: a "retry" reply in the job's Discord thread or on the issue,
+   * or `runner retry`. It adds the ready label with the runner's own (trusted) token, so the usual claim follows
+   * on the next pass, with every note since the first approval going to the builder.
+   */
+  async rebuild(owner: string, repo: string, number: number): Promise<{ ok: boolean; message: string }> {
+    const { github, store } = this.deps;
+    const job = store.get(storeId(owner, repo, number));
+    if (job && !REBUILDABLE.includes(job.state)) {
+      return { ok: false, message: `isobot is already on this (${job.state.replace("_", " ")}${job.prNumber ? `, PR #${job.prNumber}` : ""}), so there's nothing to retry.` };
+    }
+    const issue = await github.issue(owner, repo, number);
+    if (issue.state === "closed") return { ok: false, message: `${issue.url} is closed; reopen it to build it again.` };
+    if (hasLabel(issue, this.labels.stop)) return { ok: false, message: `${issue.url} has \`${this.labels.stop}\`; remove it to build it again.` };
+    await github.addLabels(owner, repo, number, [this.labels.ready]);
+    return { ok: true, message: `🔁 Building ${issue.url} again; isobot picks it up on its next pass.` };
+  }
+
+  /**
+   * 🧹 from Discord (the cleanup label): drops the issue from isobot. Waits for a running build to
+   * stop, then removes the job's local workspaces and refs, strips isobot's labels, and closes the
+   * issue as not planned. An open PR is left alone; close it on GitHub if it should go too.
+   */
+  async cleanUp(): Promise<void> {
+    const { github, store } = this.deps;
+    for (const { owner, repo } of configuredRepos(this.deps.config)) {
+      let issues: Issue[];
+      try {
+        issues = await github.issuesWithLabel(owner, repo, this.labels.cleanup);
+      } catch (error) {
+        console.warn(`[cleanup] ${owner}/${repo}: ${(error as Error).message}`);
+        continue;
+      }
+      for (const issue of issues) {
+        const id = storeId(owner, repo, issue.number);
+        if (this.running.has(id)) continue;
+        try {
+          // Closing an issue is the owner's call, like approving one.
+          const by = await github.labeledBy(owner, repo, issue.number, this.labels.cleanup);
+          if (!by || !(await this.isTrusted(by))) {
+            await github.removeLabel(owner, repo, issue.number, this.labels.cleanup);
+            await github.comment(owner, repo, issue.number, `isobot only cleans up for its owner; \`${this.labels.cleanup}\` was added by @${by ?? "unknown"}.`);
+            continue;
+          }
+          const job = store.get(id);
+          if (job && ["queued", "building"].includes(job.state)) store.update(id, { state: "stopped" });
+          const removed = await this.deps.repo(owner, repo).purge(issue.number);
+          const ours = [this.labels.proposed, this.labels.ready, this.labels.building, this.labels.review, this.labels.failed, this.labels.ship, this.labels.stop, this.labels.auto];
+          for (const label of ours) if (hasLabel(issue, label)) await github.removeLabel(owner, repo, issue.number, label);
+          const pr = job?.prNumber && job.state === "pr_open" ? ` PR #${job.prNumber} is still open; close it if it should go too.` : "";
+          await github.comment(owner, repo, issue.number,
+            `🧹 Dismissed from Discord: isobot closed this and removed ${removed.length ? removed.map(r => `\`${r}\``).join(", ") : "its labels (nothing was left on the runner)"}.${pr}`);
+          await github.closeIssue(owner, repo, issue.number, "not_planned");
+          // Last, so a failure above is retried on the next pass.
+          await github.removeLabel(owner, repo, issue.number, this.labels.cleanup);
+          if (job) await this.feed(store.get(id)!, { phase: "cleaned" }, `🧹 Dismissed: closed the issue and cleaned up.${pr}`);
+          console.log(`[cleanup] ${id}: ${removed.length} local item(s) removed, issue closed`);
+        } catch (error) {
+          console.warn(`[cleanup] ${id}: ${(error as Error).message}`);
+        }
+      }
+    }
+  }
+
+  /** A reply on a finished job can't change it: "retry" builds it again, anything else gets told what would. */
   private async answerFinished(): Promise<void> {
     for (const job of this.deps.store.recentlyFinished(48)) {
       try {
-        if (!(await this.takeNotes(job)).fresh.length) continue;
-        const again = `add \`${this.labels.ready}\` to the issue to build it again (your notes go to the builder), or open a new issue`;
+        const { fresh } = await this.takeNotes(job);
+        if (!fresh.length) continue;
+        if (fresh.some(note => asksToRetry(note.text))) {
+          const { message } = await this.rebuild(job.owner, job.repo, job.number);
+          await this.deps.notifier.say(job, message);
+          continue;
+        }
+        if (!this.deps.notifier.threads) continue;
+        const again = `reply \`retry\` here (or add \`${this.labels.ready}\` to the issue) to build it again with your notes, or open a new issue`;
         await this.deps.notifier.say(job, job.state === "failed"
           ? `💬 Got your note. This job failed, so nothing is running: ${again}.`
           : `💬 Got your note, but this job is already ${job.state.replace("_", " ")}, so there's no open PR to revise. To change more, ${again}.`);
@@ -651,12 +727,12 @@ export class Pipeline {
       await this.deps.github.removeLabel(job.owner, job.repo, job.number, this.labels.building);
       await this.deps.github.addLabels(job.owner, job.repo, job.number, [this.labels.failed]);
       await this.deps.github.comment(job.owner, job.repo, job.number,
-        `⚠️ isobot couldn't finish this: ${message}\n\nEdit the issue to clarify, then add \`${this.labels.ready}\` to try again.`);
+        `⚠️ isobot couldn't finish this: ${message}\n\nEdit the issue or comment to clarify, then comment \`retry\` (or add \`${this.labels.ready}\`) to try again.`);
     } catch (githubError) {
       console.error(`[build] ${job.id}: could not report failure: ${(githubError as Error).message}`);
     }
     await this.feed(job, { phase: "failed", detail: message.split("\n")[0].slice(0, 300) },
-      `⚠️ isobot couldn't finish this:\n${message.slice(0, 1500)}\n\nEdit the issue to clarify (or reply here), then add \`${this.labels.ready}\` to try again.`,
+      `⚠️ isobot couldn't finish this:\n${message.slice(0, 1500)}\n\nReply \`retry\` here to try again. Anything else you say first (or in the same reply, e.g. \`retry, and use the system font\`) goes to the builder.`,
       notify ? `⚠️ **${job.id}** failed: ${message.slice(0, 300)}` : undefined);
   }
 }

@@ -23,6 +23,7 @@ test("one card per job, edited in place, with the detail in a thread under it", 
     `POST /channels/${CHANNEL}/messages`,
     `POST /channels/${CHANNEL}/messages/1000/threads`,
     "POST /channels/1001/messages",
+    ...["🛑", "🔁", "🧹"].map(e => `PUT /channels/${CHANNEL}/messages/1000/reactions/${encodeURIComponent(e)}/@me`),
     `PATCH /channels/${CHANNEL}/messages/1000`,
     "POST /channels/1001/messages",
     `PATCH /channels/${CHANNEL}/messages/1000`,
@@ -34,7 +35,8 @@ test("one card per job, edited in place, with the detail in a thread under it", 
   assert.equal(last.title, "#7 · Add CSV export");
   assert.match(last.description, /\*\*👀 Waiting for you\*\*\n- autonomy is pr/);
   assert.match(last.description, /✅ Build → ✅ Checks → ✅ Review → ✅ PR → 👀 Merge → ▫️ Release/);
-  assert.ok(discord.calls.filter(c => !c.path.endsWith("/threads")).every(c => (c.body.allowed_mentions as { parse: unknown[] }).parse.length === 0), "never pings");
+  assert.match(discord.posts("1001")[0], /🛑 stop \(un-click to continue\) · 🔁 build again .* · 🧹 dismiss and clean up/);
+  assert.ok(discord.calls.filter(c => !c.path.endsWith("/threads") && c.method !== "PUT").every(c => (c.body.allowed_mentions as { parse: unknown[] }).parse.length === 0), "never pings");
 
   // A restarted runner keeps editing the same card.
   const again = new Notifier({ bot: { token: "t", channelId: CHANNEL }, store, fetcher: discord.fetch });
@@ -49,7 +51,7 @@ test("a deleted card is recreated, and a fresh approval starts a new card", asyn
   await notifier.job(JOB, { phase: "queued" });
   discord.fail404.add(`/channels/${CHANNEL}/messages/1000`);
   await notifier.job(JOB, { phase: "implementing" });
-  assert.equal(notifier.card(JOB)!.messageId, "1003");
+  assert.equal(notifier.card(JOB)!.messageId, "1006", "after the first card, its thread, intro and three reactions");
 
   store.enqueue(JOB.owner, JOB.repo, JOB.number, JOB.title);
   assert.equal(notifier.card(JOB), null);

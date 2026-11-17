@@ -108,3 +108,57 @@ test("a GitHub failure is reported on the message instead of throwing", async ()
   }
   assert.deepEqual(w.reactions, ["⚠️"]);
 });
+
+test("🛑 stops, 🔁 continues, 🧹 asks the runner to clean up", async () => {
+  const stop = world({ state: "open", labels: ["isobot:building"] });
+  await handleApproveReaction(client, reaction(stop, { emoji: "🛑" }), owner, true, stop.deps);
+  assert.deepEqual(stop.calls, ["get vox.md#5", "add vox.md#5 isobot:stop"]);
+  assert.deepEqual(stop.reactions, ["👌"]);
+
+  const resume = world({ state: "open", labels: ["isobot:building", "isobot:stop"] });
+  await handleApproveReaction(client, reaction(resume, { emoji: "🔁" }), owner, true, resume.deps);
+  assert.deepEqual(resume.calls, ["get vox.md#5", "remove vox.md#5 isobot:stop"], "a build that hasn't stopped yet just carries on");
+
+  const stopped = world({ state: "open", labels: ["isobot:stop"] });
+  await handleApproveReaction(client, reaction(stopped, { emoji: "🔁" }), owner, true, stopped.deps);
+  assert.deepEqual(stopped.calls, ["get vox.md#5", "add vox.md#5 isobot:ready", "remove vox.md#5 isobot:stop"]);
+
+  const failed = world({ state: "open", labels: ["isobot:failed"] });
+  await handleApproveReaction(client, reaction(failed, { emoji: "🔁" }), owner, true, failed.deps);
+  assert.deepEqual(failed.calls, ["get vox.md#5", "add vox.md#5 isobot:ready"]);
+
+  const clean = world({ state: "open", labels: ["isobot:building"] });
+  await handleApproveReaction(client, reaction(clean, { emoji: "🧹" }), owner, true, clean.deps);
+  assert.deepEqual(clean.calls, ["get vox.md#5", "add vox.md#5 isobot:stop,isobot:cleanup"]);
+
+  const proposal = world({ state: "open", labels: ["isobot:proposed"] });
+  await handleApproveReaction(client, reaction(proposal, { emoji: "🧹" }), owner, true, proposal.deps);
+  assert.deepEqual(proposal.calls, ["get vox.md#5", "add vox.md#5 isobot:cleanup"]);
+});
+
+test("🛑 toggles: removing it lifts a stop that is still there, and nothing else", async () => {
+  const running = world({ state: "open", labels: ["isobot:building", "isobot:stop"] });
+  await handleApproveReaction(client, reaction(running, { emoji: "🛑" }), owner, false, running.deps);
+  assert.deepEqual(running.calls, ["get vox.md#5", "remove vox.md#5 isobot:stop"]);
+  assert.deepEqual(running.reactions, ["👌"]);
+
+  const stopped = world({ state: "open", labels: ["isobot:stop"] });
+  await handleApproveReaction(client, reaction(stopped, { emoji: "🛑" }), owner, false, stopped.deps);
+  assert.deepEqual(stopped.calls, ["get vox.md#5", "add vox.md#5 isobot:ready", "remove vox.md#5 isobot:stop"], "a stopped job builds again");
+
+  const lifted = world({ state: "open", labels: ["isobot:failed"] });
+  await handleApproveReaction(client, reaction(lifted, { emoji: "🛑" }), owner, false, lifted.deps);
+  assert.deepEqual(lifted.calls, ["get vox.md#5"], "with the stop already gone, un-clicking must not start a build");
+});
+
+test("removing 🔁 or 🧹 changes nothing, and closed issues are refused", async () => {
+  for (const emoji of ["🔁", "🧹"]) {
+    const w = world({ state: "open", labels: ["isobot:stop"] });
+    await handleApproveReaction(client, reaction(w, { emoji }), owner, false, w.deps);
+    assert.deepEqual(w.calls, []);
+  }
+
+  const closed = world({ state: "closed", labels: [] });
+  await handleApproveReaction(client, reaction(closed, { emoji: "🔁" }), owner, true, closed.deps);
+  assert.deepEqual(closed.reactions, ["🚫"]);
+});

@@ -34,7 +34,7 @@ export interface IssueComment {
 
 const LABEL_COLORS: Record<keyof Labels, string> = {
   proposed: "c5def5", ready: "0e8a16", building: "fbca04", review: "1d76db",
-  failed: "b60205", ship: "5319e7", stop: "000000", auto: "0b7285",
+  failed: "b60205", ship: "5319e7", stop: "000000", auto: "0b7285", cleanup: "d4c5f9",
 };
 
 const LABEL_DESCRIPTIONS: Record<keyof Labels, string> = {
@@ -46,6 +46,7 @@ const LABEL_DESCRIPTIONS: Record<keyof Labels, string> = {
   ship: "Approve isobot to run the ship (App Store) step",
   stop: "Stop isobot from touching this issue",
   auto: "From the owner: isobot may take it end to end (only counts when the owner adds it)",
+  cleanup: "Dismiss: isobot removes its local workspaces, strips its labels and closes the issue",
 };
 
 /** The subset of GitHub the runner needs; an interface so tests can fake it. */
@@ -64,7 +65,7 @@ export interface GitHubApi {
   removeLabel(owner: string, repo: string, number: number, label: string): Promise<void>;
   comment(owner: string, repo: string, number: number, body: string): Promise<void>;
   createIssue(owner: string, repo: string, title: string, body: string, labels: string[]): Promise<Issue>;
-  closeIssue(owner: string, repo: string, number: number): Promise<void>;
+  closeIssue(owner: string, repo: string, number: number, reason?: "completed" | "not_planned"): Promise<void>;
   findPull(owner: string, repo: string, branch: string): Promise<PullRequest | null>;
   pull(owner: string, repo: string, number: number): Promise<PullRequest>;
   createPull(owner: string, repo: string, input: { head: string; base: string; title: string; body: string }): Promise<PullRequest>;
@@ -177,8 +178,8 @@ export class GitHub implements GitHubApi {
     return data.html_url;
   }
 
-  async closeIssue(owner: string, repo: string, number: number): Promise<void> {
-    await this.octokit.issues.update({ owner, repo, issue_number: number, state: "closed", state_reason: "completed" });
+  async closeIssue(owner: string, repo: string, number: number, reason: "completed" | "not_planned" = "completed"): Promise<void> {
+    await this.octokit.issues.update({ owner, repo, issue_number: number, state: "closed", state_reason: reason });
   }
 
   async createIssue(owner: string, repo: string, title: string, body: string, labels: string[]): Promise<Issue> {

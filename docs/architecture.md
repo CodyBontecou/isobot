@@ -33,12 +33,13 @@ the `claude` CLI. It already runs on any Mac, including the mini, unchanged.
 | Label | Meaning | Set by |
 | --- | --- | --- |
 | `isobot:proposed` | Triage thinks this is worth doing | Runner triage, community forum posts |
-| `isobot:ready` | Approved: build it | **You** (label, or ✅ on the issue's Discord help thread or job card), or your own `@isobot` ticket in Discord |
+| `isobot:ready` | Approved: build it | **You** (label, or ✅ on a triage digest, the issue's Discord help thread or job card), or your own `@isobot` ticket in Discord |
 | `isobot:building` | Claimed by the runner | Runner |
 | `isobot:review` | PR open, waiting for your merge decision | Runner |
 | `isobot:failed` | Couldn't finish; comment explains | Runner |
 | `isobot:ship` | Approve the ship step (App Store) | **You** |
-| `isobot:stop` | Hands off, at any point | **You** |
+| `isobot:stop` | Hands off, at any point | **You** (label, or 🛑 in Discord) |
+| `isobot:cleanup` | Dismiss: runner removes its local leftovers and labels, closes the issue as not planned | **You** (label, or 🧹 in Discord) |
 
 Using issues as the queue means no extra infrastructure, a visible history, and
 the same behaviour wherever the runner lives.
@@ -51,8 +52,8 @@ instructions:
 1. Triage reads untrusted content with **no tools** and outputs proposals only.
    Proposals in public repositories never name or quote people.
 2. Proposals never build until **you** add `isobot:ready`; the runner checks
-   who added the label and ignores approvals from anyone else. A ✅ reaction
-   counts only from the bridge allowlist, and the bridge adds the label with
+   who added the label and ignores approvals from anyone else. A ✅ (or 🔁,
+   🛑, 🧹) reaction counts only from the bridge allowlist, and the bridge adds the label with
    your GitHub token, so the same check applies. Only tickets you
    create yourself (the owner-only `@isobot` mention) start as ready.
 3. For a proposal, builders get isobot's own vetted spec, not the reporter's

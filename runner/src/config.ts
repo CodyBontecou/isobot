@@ -137,6 +137,8 @@ export interface Labels {
   stop: string;
   /** Owner-originated work: lets the repo's ownerAutonomy apply. Only counts when the owner added it. */
   auto: string;
+  /** Dismiss: the runner removes what it made locally, strips its labels and closes the issue. Default isobot:cleanup. */
+  cleanup: string;
 }
 
 export interface Environment {
@@ -172,6 +174,8 @@ export function validateConfig(config: RunnerConfig): void {
   if (!(config.triageMinutes >= 5)) fail("triageMinutes must be at least 5");
   if (!(config.maxConcurrentJobs >= 1 && config.maxConcurrentJobs <= 8)) fail("maxConcurrentJobs must be 1-8");
   if (config.builder?.kind !== "claude") fail("builder.kind must be \"claude\"");
+  // Added after the others; older configs get the default.
+  if (config.labels && !config.labels.cleanup) config.labels.cleanup = "isobot:cleanup";
   for (const key of ["proposed", "ready", "building", "review", "failed", "ship", "stop", "auto"] as const) {
     if (!config.labels?.[key]) fail(`labels.${key} is required`);
   }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cleanNote, COMMUNITY_MARKER, DISCORD_REPLY_MARKER, noteFeedback, ownerNotes, RUNNER_MARKER, TERMINAL_MARKER, withNotes } from "./notes.js";
+import { asksToRetry, cleanNote, isBareRetry, COMMUNITY_MARKER, DISCORD_REPLY_MARKER, noteFeedback, ownerNotes, RUNNER_MARKER, TERMINAL_MARKER, withNotes } from "./notes.js";
 
 const relay = (text: string) => `_Sent from Discord by **cody** ([message](https://discord.com/channels/1/2/3))_\n\n${text}\n\n${DISCORD_REPLY_MARKER}`;
 
@@ -31,4 +31,17 @@ test("notes are cleaned for the builder and appended to the task", () => {
   assert.match(noteFeedback(notes), /^The owner sent a note about this change[\s\S]*Make it blue$/);
   assert.match(withNotes("# Task", notes), /# Task\n\n## Follow-up notes from the owner[^\n]*\n\nMake it blue/);
   assert.equal(withNotes("# Task", []), "# Task");
+});
+
+test("retry requests are recognised at the start of a note; bare ones aren't passed to the builder", () => {
+  for (const text of ["try again", "Retry", "retry!", "please try again", "ok, rebuild it", "build it again please", "re-run", "try again, and use the system font"]) {
+    assert.ok(asksToRetry(text), text);
+  }
+  for (const text of ["why did this fail?", "don't retry yet", "I'll try again later myself", "retrying is pointless"]) {
+    assert.ok(!asksToRetry(text), text);
+  }
+  assert.ok(isBareRetry("Try again."));
+  assert.ok(isBareRetry("retry please"));
+  assert.ok(!isBareRetry("try again, and use the system font"));
+  assert.equal(withNotes("task", [{ id: 1, source: "discord", text: "retry" }]), "task");
 });
