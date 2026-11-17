@@ -21,7 +21,8 @@
       "SUPPORT_BRIDGE_TOKEN",
       "ISOBOT_AGENT_URL",
       "SUPPORT_DISCORD_CHANNEL_ID",
-      "SUPPORT_DISCORD_STAFF_IDS"
+      "SUPPORT_DISCORD_STAFF_IDS",
+      "ISOBOT_CHAT_CHANNEL_ID"
     ]
   },
   "containers": [

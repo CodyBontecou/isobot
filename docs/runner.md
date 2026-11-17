@@ -87,6 +87,51 @@ triage proposals and relays of community `#help` threads never do. The bridge po
 thread says the reply was ignored. Set `ISOBOT_RUNNER_CHANNEL_ID` on the bridge to only relay
 from that channel.
 
+## Staff chat
+
+Mention isobot in the staff chat channel (`ISOBOT_CHAT_CHANNEL_ID` in `runner.env`; without it,
+the job-card channel) and it answers in a thread. Keep
+talking in that thread without mentioning it; each thread is one Claude Code session that
+remembers the conversation. Reply to a job card while mentioning isobot to ask about that job.
+Attach screenshots or logs and it reads them.
+
+- **Ask anything:** status, what needs you, why a build failed or a gate refused a merge, what a
+  PR changes. It reads jobs, issues, PRs and diffs, the runner log and repository policy, and it can
+  check out any configured repository to read and grep the code. "Why does export crash?" gets an
+  answer from the code.
+- **Act:** it proposes actions and does nothing until you confirm. Each proposal is its own message
+  spelling out exactly what will happen; react 👍 to run it or 👎 to cancel (proposals expire after
+  24 hours). The runner, not the model, carries out the confirmed action:
+
+  | Say | Proposal | On 👍 |
+  |---|---|---|
+  | "file this", "write the code for this" | create_issue (with build) | opens the issue; with build, adds `isobot:ready` and `isobot:auto`, so the usual build, checks, review and PR follow (and `ownerAutonomy` applies) |
+  | "build #12", "try #12 again" | build | adds `isobot:ready` and `isobot:auto` |
+  | "tell #12 to use the system font" | note | an owner note on the issue, same as replying in the job's thread |
+  | "merge PR #40" | merge | squash-merges exactly the commit that was proposed, only if CI isn't failing or pending; release steps follow on the next pass |
+  | "ship #12" | ship | adds `isobot:ship` to a job waiting to ship (App Store / Google Play step) |
+  | "stop #12" / "pause" / "resume" | stop / pause / resume | the stop label, or pauses / resumes the whole runner |
+
+- **Daily check-in:** at `chat.checkInHour` (local time; 9 by default, `null` for none) the
+  channel gets a summary of what needs you: PRs to review, jobs ready to ship, failures this week,
+  proposals awaiting approval. Nothing is posted on a day with nothing to say.
+
+Who can talk to it: `ISOBOT_CHAT_USERS` (comma-separated Discord user ids), else
+`ISOBOT_ALLOWED_USERS`, else the bot application's owner. Everyone else is ignored, and only their
+👍 counts. The model runs with Read, Grep and Glob limited to `chat/` in the runner's home
+(checkouts and your uploads), plus isobot's own tools served from inside the runner on 127.0.0.1;
+it never sees the runner's tokens, your other MCP servers or a shell. Everything it reads from
+issues, reviews, email or code is treated as data, and because every action needs your 👍 on a
+message that spells it out, text planted in an issue can at most suggest something you decline.
+
+Configure it under `chat` in the runner config: `model` (default `sonnet`), `checkInHour`,
+`maxConcurrent` (turns at once, default 2), `timeoutMinutes` (default 15), `maxTurns` (default 40),
+`enabled: false` to switch it off. The bridge must leave that channel to the runner: set its
+`ISOBOT_CHAT_CHANNEL_ID` secret to the same channel id
+(`npx --prefix bridge wrangler secret put ISOBOT_CHAT_CHANNEL_ID`). The bot needs View Channel,
+Send Messages, Read Message History, Create Public Threads, Send Messages in Threads, Add
+Reactions and Attach Files there.
+
 ## When things go wrong
 
 - **Temporary problems** (network, GitHub outages, Claude overload) put the

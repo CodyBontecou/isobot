@@ -88,6 +88,15 @@ export class Repo {
     });
   }
 
+  /** Fetches a pull request's head (any author's, including forks) and returns its commit. */
+  fetchPull(number: number): Promise<string> {
+    return this.exclusive(async () => {
+      const ref = `refs/isobot/pull/${number}`;
+      await this.git(["fetch", "--quiet", "--no-tags", "--force", "origin", `+refs/pull/${number}/head:${ref}`], this.barePath, true);
+      return (await this.git(["rev-parse", `${ref}^{commit}`], this.barePath)).stdout.trim();
+    });
+  }
+
   async mergeBase(a: string, b: string): Promise<string> {
     return (await this.git(["merge-base", a, b], this.barePath)).stdout.trim();
   }

@@ -1,4 +1,5 @@
 import { Octokit } from "@octokit/rest";
+import type { PullDetails } from "./chatTools.js";
 import type { Labels } from "./config.js";
 import { RUNNER_MARKER } from "./notes.js";
 
@@ -197,6 +198,21 @@ export class GitHub implements GitHubApi {
       number: data.number, url: data.html_url, state: data.state as "open" | "closed", merged: data.merged,
       headSha: data.head.sha, mergeCommitSha: data.merged ? data.merge_commit_sha : null,
     };
+  }
+
+  /** A PR with the detail the staff chat shows (title, body, branches, draft). */
+  async pullDetails(owner: string, repo: string, number: number): Promise<PullDetails> {
+    const { data } = await this.octokit.pulls.get({ owner, repo, pull_number: number });
+    return {
+      number: data.number, url: data.html_url, title: data.title, body: data.body ?? "", state: data.state as "open" | "closed",
+      merged: data.merged, draft: Boolean(data.draft), headSha: data.head.sha, headRef: data.head.ref, baseRef: data.base.ref,
+      author: data.user?.login ?? "unknown",
+    };
+  }
+
+  async openPulls(owner: string, repo: string): Promise<{ number: number; title: string; headRef: string; author: string; draft: boolean }[]> {
+    const { data } = await this.octokit.pulls.list({ owner, repo, state: "open", per_page: 50 });
+    return data.map(pr => ({ number: pr.number, title: pr.title, headRef: pr.head.ref, author: pr.user?.login ?? "unknown", draft: Boolean(pr.draft) }));
   }
 
   async createPull(owner: string, repo: string, input: { head: string; base: string; title: string; body: string }): Promise<PullRequest> {

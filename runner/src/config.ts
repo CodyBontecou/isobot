@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { ChatConfig } from "./chat.js";
 import type { DeviceSpec } from "./devices.js";
 
 /**
@@ -91,6 +92,8 @@ export interface RunnerConfig {
   autoApprove?: AutoApproveConfig;
   /** App Store reviews to triage, read from Apple's public customer-reviews feed (no API key). */
   appStore?: AppStoreConfig;
+  /** The staff chat in the job-card channel (chat.ts). On by default when the bot is configured. */
+  chat?: ChatConfig;
   defaults: RepoPolicy;
   repos: Record<string, Partial<RepoPolicy>>;
 }
@@ -144,6 +147,8 @@ export interface Environment {
   discordWebhookUrl?: string;
   /** Bot token and channel for job status cards and threads (takes precedence over the webhook). */
   discordBot?: { token: string; channelId: string };
+  /** Where the staff chat listens: ISOBOT_CHAT_CHANNEL_ID, else the job-card channel. */
+  chatChannelId?: string;
   /** Optional link to a job in isobot's UI, with `{id}` for the job id. */
   jobUrl?: string;
   /** Mailboxes to triage, from ISOBOT_IMAP_* and ISOBOT_IMAP_*_2 … _9. */
@@ -196,6 +201,14 @@ export function validateConfig(config: RunnerConfig): void {
     }
     const countries = config.appStore.countries ?? [];
     if (countries.length === 0 || countries.some(c => !/^[a-z]{2}$/.test(c))) fail("appStore.countries must be lowercase two-letter country codes");
+  }
+  if (config.chat) {
+    const c = config.chat;
+    if (c.enabled !== undefined && typeof c.enabled !== "boolean") fail("chat.enabled must be true or false");
+    if (c.checkInHour !== undefined && c.checkInHour !== null && !(Number.isInteger(c.checkInHour) && c.checkInHour >= 0 && c.checkInHour <= 23)) fail("chat.checkInHour must be 0-23 or null");
+    if (c.maxConcurrent !== undefined && !(Number.isInteger(c.maxConcurrent) && c.maxConcurrent >= 1 && c.maxConcurrent <= 4)) fail("chat.maxConcurrent must be 1-4");
+    if (c.timeoutMinutes !== undefined && !(c.timeoutMinutes >= 1 && c.timeoutMinutes <= 60)) fail("chat.timeoutMinutes must be 1-60");
+    if (c.maxTurns !== undefined && !(Number.isInteger(c.maxTurns) && c.maxTurns >= 1)) fail("chat.maxTurns must be a positive integer");
   }
   for (const [name, partial] of Object.entries(config.repos ?? {})) {
     if (!/^[\w.-]+\/[\w.-]+$/.test(name)) fail(`repo key ${name} must be owner/repo`);
@@ -303,6 +316,7 @@ export function loadEnvironment(env: NodeJS.ProcessEnv = process.env): Environme
     piToken: env.ISOBOT_PI_TOKEN,
     discordWebhookUrl: env.ISOBOT_DISCORD_WEBHOOK_URL,
     discordBot: discordBot(env),
+    chatChannelId: env.ISOBOT_CHAT_CHANNEL_ID?.trim() || discordBot(env)?.channelId,
     jobUrl: env.ISOBOT_JOB_URL,
     imap,
     claudeBin: env.ISOBOT_CLAUDE_BIN ?? "claude",

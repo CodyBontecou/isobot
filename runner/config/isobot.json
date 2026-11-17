@@ -19,6 +19,10 @@
       }
     }
   },
+  "chat": {
+    "model": "sonnet",
+    "checkInHour": 9
+  },
   "labels": {
     "proposed": "isobot:proposed",
     "ready": "isobot:ready",
