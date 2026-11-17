@@ -455,6 +455,36 @@ test("App Store Connect: reads run read-only; changes run only after 👍, exact
   } finally { t.done(); }
 });
 
+test("Discord server changes: the chat reads the layout, and a channel appears only after 👍", async () => {
+  const writes: { method: string; route: string; body?: unknown }[] = [];
+  const guildChannels = [{ id: "410000000000000001", type: 4, name: "STAFF", permission_overwrites: [{ id: GUILD, type: 0, allow: "0", deny: "1024" }] }];
+  const api = {
+    async request<T>(method: string, route: string, body?: Record<string, unknown>): Promise<T> {
+      if (method === "GET") return structuredClone(guildChannels) as T;
+      writes.push({ method, route, body });
+      return { id: "410000000000000099", ...body } as T;
+    },
+  };
+  const t = await setup(async (_input, tool) => {
+    const list = await tool("list_discord_channels");
+    assert.match(list.text, /"name": "STAFF"[\s\S]*"private": true/);
+    await tool("propose", { action: "create_channel", name: "vox inbox", category: "STAFF" });
+    return "Proposed #vox-inbox under STAFF.";
+  });
+  t.tools.discord = { api, guildId: GUILD, webhookDir: path.join(t.tools.home, "webhooks") };
+  try {
+    const ask = t.discord.say(CHANNEL, ME, `<@${BOT}> make a private vox-inbox channel in staff`);
+    await t.step();
+    assert.equal(writes.length, 0, "proposing changes nothing");
+    const proposal = t.discord.channels.get(ask.id)!.filter(m => m.author.id === BOT).at(-1)!;
+    assert.match(proposal.content, /Create text channel #vox-inbox\*\* in \*\*STAFF\*\*/);
+    await t.discord.react(ask.id, proposal.id, "👍", ME);
+    await t.step();
+    assert.deepEqual(writes.map(w => `${w.method} ${w.route}`), [`POST /guilds/${GUILD}/channels`]);
+    assert.match(t.discord.edits.at(-1)!.content, /✅ Done[\s\S]*Created <#410000000000000099>/);
+  } finally { t.done(); }
+});
+
 test("asc arguments can't read local files or secrets, switch credentials, or reach commands outside the lists", () => {
   assert.deepEqual(ascArgs(["reviews", "list", "--app", "1"], "read"), ["reviews", "list", "--app", "1"]);
   assert.throws(() => ascArgs(["review", "details-update", "--notes", "@file:/Users/x/Library/Application Support/isobot/runner.env"], "write"), /can't start with @/);
