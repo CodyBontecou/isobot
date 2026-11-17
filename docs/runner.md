@@ -322,14 +322,18 @@ use that:
   ```
 
   The iOS simulator is a new `isobot-<job>` device (`runtime` optional; newest iOS by
-  default). The Android emulator is a `-read-only` instance of the AVD on a port from
-  5600 up, so the AVD itself never changes and your own emulators (5554+) are never
-  touched. Checks and the isobot shell see the devices as `$ISOBOT_IOS_SIMULATOR` and
+  default). The Android emulator boots the job's own AVD, `isobot-job-<job>-<port>`: a copy
+  of the named AVD's `config.ini` (same system image and hardware) with fresh data, cold-booted
+  (about 20 seconds, under 1 GB) on a port from 5600 up and deleted with the job. The named AVD
+  is only a template: it's never booted or modified, so an emulator you or another agent session
+  boot from it (even writable) can't block a job, and your own emulators (5554+) are never
+  touched. Several jobs run side by side (`maxConcurrentJobs`, 3 by default here), each with its
+  own simulator and emulator. Checks and the isobot shell see the devices as `$ISOBOT_IOS_SIMULATOR` and
   `$ANDROID_SERIAL` (adb and Gradle read the latter). The builder is told the ids and
   uses argent with exactly those devices to install, launch and screenshot UI changes.
   A device that won't boot retries the job later rather than failing the issue. At
-  startup the runner deletes any `isobot-*` simulators and isobot-port emulators a
-  crash left behind.
+  startup the runner deletes any `isobot-*` simulators, isobot-port emulators and
+  `isobot-job-*` AVDs a crash left behind.
 
 The `isobot-api35` AVD (Pixel 7, API 35, Google APIs, arm64) was made for the runner:
 
