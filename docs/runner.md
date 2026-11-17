@@ -132,8 +132,8 @@ message that spells it out, text planted in an issue can at most suggest somethi
 Configure it under `chat` in the runner config: `model` (default `sonnet`), `checkInHour`,
 `maxConcurrent` (turns at once, default 2), `timeoutMinutes` (default 15), `maxTurns` (default 40),
 `enabled: false` to switch it off. The bridge leaves mentions to the runner when its
-`ISOBOT_CHAT_CHANNEL_ID` secret is set (to the same channel id
-`npx --prefix bridge wrangler secret put ISOBOT_CHAT_CHANNEL_ID`). The bot needs View Channel,
+`ISOBOT_CHAT_CHANNEL_ID` secret is set to the same channel id
+(`npx --prefix bridge wrangler secret put ISOBOT_CHAT_CHANNEL_ID`). The bot needs View Channel,
 Send Messages, Read Message History, Create Public Threads, Send Messages in Threads, Add
 Reactions and Attach Files there, and View Channel, Read Message History and Add Reactions wherever
 you want to mention it. The runner finds new messages by reading the server's channel list and active
