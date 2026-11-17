@@ -87,6 +87,7 @@ export async function prepareDiscord(kind: string, args: Record<string, unknown>
       if (args.category !== undefined) {
         if (channel.type === CATEGORY) throw fail("a category can't go inside another category");
         const parent = args.category === "" || args.category === null ? null : find(channels, args.category, [CATEGORY], fail);
+        if (exposes(channel, parent, admin.guildId)) throw fail(`#${channel.name} is private and ${parent!.name} isn't: moving it there would show it to everyone. Change its permissions in Discord first if that's intended`);
         action.parentId = parent?.id ?? null;
         const access = parent ? `takes ${parent.name}'s permissions${hidesEveryone(parent, admin.guildId) ? " (private)" : " (visible to everyone)"}` : "keeps its own permissions";
         changes.push(`move ${where(parent?.id)}; it ${access}`);
@@ -126,6 +127,7 @@ export async function executeDiscord(action: DiscordAction, admin: DiscordAdmin)
       return `Created ${link(created.id)}.`;
     }
     case "create_category": {
+      if (channels.some(c => c.type === CATEGORY && c.name.toLowerCase() === action.name.toLowerCase())) throw new Error(`a category named ${action.name} already exists`);
       const created = await admin.api.request<Channel>("POST", `/guilds/${admin.guildId}/channels`, {
         name: action.name, type: CATEGORY, permission_overwrites: action.private ? hideFromEveryone([], admin.guildId) : [],
       });
@@ -133,7 +135,10 @@ export async function executeDiscord(action: DiscordAction, admin: DiscordAdmin)
     }
     case "edit_channel": {
       if (!channels.some(c => c.id === action.channelId)) throw new Error(`#${action.was} no longer exists`);
-      if (action.parentId && !channels.some(c => c.id === action.parentId)) throw new Error("the category no longer exists");
+      const channel = channels.find(c => c.id === action.channelId)!;
+      const parent = action.parentId ? channels.find(c => c.id === action.parentId) : undefined;
+      if (action.parentId && !parent) throw new Error("the category no longer exists");
+      if (exposes(channel, parent ?? null, admin.guildId)) throw new Error(`#${channel.name} is private now and ${parent!.name} isn't; not moving it`);
       await admin.api.request("PATCH", `/channels/${action.channelId}`, {
         ...(action.name !== undefined ? { name: action.name } : {}),
         ...(action.topic !== undefined ? { topic: action.topic || null } : {}),
@@ -198,6 +203,11 @@ function kindName(type: number): string {
 function hidesEveryone(channel: Channel, guildId: string): boolean {
   const everyone = channel.permission_overwrites?.find(o => o.id === guildId);
   return everyone ? (BigInt(everyone.deny) & VIEW_CHANNEL) !== 0n : false;
+}
+
+/** True when moving a private channel into this category (which syncs its permissions) would make it public. */
+function exposes(channel: Channel, parent: Channel | null, guildId: string): boolean {
+  return Boolean(parent) && hidesEveryone(channel, guildId) && !hidesEveryone(parent!, guildId);
 }
 
 /** The given overwrites with @everyone denied View Channel (the server owner and admins still see it). */

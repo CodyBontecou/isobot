@@ -156,7 +156,8 @@ Attach screenshots or logs and it reads them.
 - **Discord server:** it lists the server's categories and channels (which are private, their
   topics and ids) and proposes the changes above. Every proposal is checked against the server as it
   is (duplicate names, missing or ambiguous channels; name one as `category/name` or by id) and
-  checked again on 👍. Nothing can be deleted, and roles, members and server settings are out of
+  checked again on 👍. A private channel can't be moved into a public category, where it would show to
+  everyone. Nothing can be deleted, and roles, members and server settings are out of
   reach. Webhook URLs are runner secrets: `webhooks/` is off limits to builders, checks and the chat
   model like `runner.env`. The bot needs Manage Channels (and Manage Webhooks for webhooks); to make
   a private channel it must be able to see it, so give it Administrator or an allow on the category.

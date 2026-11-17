@@ -89,6 +89,18 @@ test("moving a channel says whose permissions it takes, and the edit syncs them"
   assert.deepEqual(guild.writes[0], { method: "PATCH", route: `/channels/${UPDATES_TIME}`, body: { name: "release-notes", topic: null, parent_id: STAFF, lock_permissions: true } });
 });
 
+test("a private channel can't be moved into a public category, where it would show to everyone", async () => {
+  const { guild, admin, prepare } = setup();
+  await assert.rejects(prepare("edit_channel", { channel: "modlog", category: "Vox.md" }), /modlog is private and Vox\.md isn't/);
+  const ok = await prepare("edit_channel", { channel: "modlog", category: "" });
+  assert.match(ok.summary, /keeps its own permissions/);
+  // Made private after the proposal: the 👍 re-checks.
+  const update = await prepare("edit_channel", { channel: `<#${UPDATES_TIME}>`, category: "Vox.md" });
+  (guild.channels.find(c => c.id === UPDATES_TIME) as { permission_overwrites: unknown }).permission_overwrites = hidden;
+  await assert.rejects(executeDiscord(update.action, admin), /private now/);
+  assert.equal(guild.writes.length, 0);
+});
+
 test("a webhook's URL goes to a private file on the runner, never into the reply", async () => {
   const { admin, prepare } = setup();
   const hook = await prepare("create_webhook", { channel: "modlog", name: "Vox inbox" });
@@ -109,6 +121,9 @@ test("a confirmed action re-checks the server first", async () => {
   const create = await prepare("create_channel", { name: "vox-inbox", category: "STAFF" });
   await executeDiscord(create.action, admin);
   await assert.rejects(executeDiscord(create.action, admin), /already exists/, "a second 👍 on a stale proposal doesn't make a duplicate");
+  const category = await prepare("create_category", { name: "THUMBLE" });
+  await executeDiscord(category.action, admin);
+  await assert.rejects(executeDiscord(category.action, admin), /already exists/, "nor a duplicate category");
   const edit = await prepare("edit_channel", { channel: "modlog", topic: "audit" });
   guild.channels = guild.channels.filter(c => c.id !== MODLOG);
   await assert.rejects(executeDiscord(edit.action, admin), /no longer exists/);
