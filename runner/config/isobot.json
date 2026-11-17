@@ -1,7 +1,7 @@
 {
   "pollSeconds": 60,
   "triageMinutes": 30,
-  "maxConcurrentJobs": 2,
+  "maxConcurrentJobs": 3,
   "maxProposalsPerTriage": 5,
   "builder": {
     "kind": "claude",

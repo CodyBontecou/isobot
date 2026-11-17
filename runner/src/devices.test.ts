@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { ANDROID_PORTS, emulatorArgs, emulatorExitError, emulatorSerials, freePort, LocalDevices, LOCKED_AVD_RETRY_MS, simulatorName, staleSimulators, type Exec } from "./devices.js";
@@ -56,22 +56,72 @@ test("a simulator that fails to boot is deleted and reported as transient", asyn
   assert.ok(calls.includes("simctl delete"));
 });
 
-test("emulators are read-only and expose token-protected gRPC for argent", () => {
-  const args = emulatorArgs("isobot-api35", 5602);
-  assert.deepEqual(args.slice(0, 3), ["-avd", "isobot-api35", "-read-only"]);
+test("job emulators boot fresh and expose token-protected gRPC for argent", () => {
+  const args = emulatorArgs("isobot-job-x-5602", 5602);
+  assert.deepEqual(args.slice(0, 2), ["-avd", "isobot-job-x-5602"]);
+  assert.ok(args.includes("-wipe-data") && args.includes("-no-snapshot"), "nothing carries over between jobs");
   assert.equal(args[args.indexOf("-port") + 1], "5602");
   assert.equal(args[args.indexOf("-grpc") + 1], "8702");
   assert.ok(args.includes("-grpc-use-token"));
 });
 
-test("an AVD held by someone else's writable emulator is waited out, not blamed on the job", async () => {
+/** A fake SDK whose emulator runs `script`, and an AVD home holding the isobot-api35 template. */
+function fakeAndroid(script: string) {
   const sdk = mkdtempSync(path.join(tmpdir(), "isobot-sdk-"));
   mkdirSync(path.join(sdk, "emulator"));
+  writeFileSync(path.join(sdk, "emulator", "emulator"), `#!/bin/sh\n${script}\n`);
+  chmodSync(path.join(sdk, "emulator", "emulator"), 0o755);
+  const avdHome = path.join(sdk, "avd");
+  mkdirSync(path.join(avdHome, "isobot-api35.avd"), { recursive: true });
+  writeFileSync(path.join(avdHome, "isobot-api35.avd", "config.ini"), "image.sysdir.1 = system-images/android-35/google_apis/arm64-v8a/\nhw.device.name = pixel_7\n");
+  writeFileSync(path.join(avdHome, "isobot-api35.avd", "userdata-qemu.img"), "the template's data");
+  writeFileSync(path.join(avdHome, "isobot-api35.ini"), "path=/x\ntarget=android-35\n");
+  return { sdk, avdHome, env: { ANDROID_HOME: sdk, ANDROID_AVD_HOME: avdHome } };
+}
+
+test("each job boots its own copy of the template AVD, deleted when the job ends", async () => {
+  const android = fakeAndroid("echo \"$@\" > \"$(dirname \"$0\")/args\"; sleep 30");
+  // "Booted" once the fake emulator has started (written its arguments).
+  const exec: Exec = async (_command, args) => ok(args.includes("getprop") ? (existsSync(path.join(android.sdk, "emulator", "args")) ? "1\n" : "") : "List of devices attached\n");
+  const devices = new LocalDevices(path.join(android.sdk, "logs"), exec, android.env, () => new Promise(r => setTimeout(r, 20)));
+  const lease = await devices.lease("codybontecou/health-md#342", { android: { avd: "isobot-api35" } });
+  const job = "isobot-job-codybontecou-health-md-342-5600";
+  assert.equal(lease.env.ANDROID_SERIAL, "emulator-5600");
+  assert.match(readFileSync(path.join(android.sdk, "emulator", "args"), "utf8"), new RegExp(`^-avd ${job} `));
+  assert.deepEqual(readdirSync(path.join(android.avdHome, `${job}.avd`)), ["config.ini"], "the template's config only, never its data");
+  assert.match(readFileSync(path.join(android.avdHome, `${job}.ini`), "utf8"), /target=android-35/);
+  await lease.release();
+  assert.equal(existsSync(path.join(android.avdHome, `${job}.avd`)), false);
+  assert.equal(existsSync(path.join(android.avdHome, `${job}.ini`)), false);
+  assert.ok(existsSync(path.join(android.avdHome, "isobot-api35.avd", "userdata-qemu.img")), "the template is untouched");
+});
+
+test("startup removes job AVDs a crashed runner left behind, and nothing else", async () => {
+  const android = fakeAndroid("exit 0");
+  mkdirSync(path.join(android.avdHome, "isobot-job-old-5600.avd"));
+  writeFileSync(path.join(android.avdHome, "isobot-job-old-5600.ini"), "");
+  const exec: Exec = async (_command, args) => ok(args[0] === "simctl" ? "{\"devices\":{}}" : "List of devices attached\n");
+  await new LocalDevices(path.join(android.sdk, "logs"), exec, android.env).cleanupStale();
+  assert.deepEqual(readdirSync(android.avdHome).sort(), ["isobot-api35.avd", "isobot-api35.ini"]);
+});
+
+test("a missing template AVD is a clear, permanent error", async () => {
+  const android = fakeAndroid("exit 0");
+  const exec: Exec = async () => ok("List of devices attached\n");
+  await assert.rejects(new LocalDevices(path.join(android.sdk, "logs"), exec, android.env).lease("o/r#5", { android: { avd: "nope" } }), (error: Error) => {
+    assert.ok(!(error instanceof TransientError));
+    assert.match(error.message, /template AVD nope doesn't exist/);
+    return true;
+  });
+});
+
+test("an AVD held by someone else's writable emulator is waited out, not blamed on the job", async () => {
+  const { sdk, env: androidEnv } = fakeAndroid("exit 1");
   // What the real emulator prints when a writable instance (e.g. an argent boot) holds the AVD.
   writeFileSync(path.join(sdk, "emulator", "emulator"), "#!/bin/sh\necho 'WARNING | Another emulator is still running, wait for a sec...'\necho 'ERROR | Another emulator instance is running. Please close it or run all emulators with -read-only flag.'\nexit 1\n");
   chmodSync(path.join(sdk, "emulator", "emulator"), 0o755);
   const exec: Exec = async () => ok("List of devices attached\n");
-  const devices = new LocalDevices(path.join(sdk, "logs"), exec, { ANDROID_HOME: sdk }, () => new Promise(r => setTimeout(r, 50)));
+  const devices = new LocalDevices(path.join(sdk, "logs"), exec, androidEnv, () => new Promise(r => setTimeout(r, 50)));
   await assert.rejects(devices.lease("o/r#3", { android: { avd: "isobot-api35" } }), (error: Error) => {
     assert.ok(error instanceof TransientError);
     assert.equal(error.retryAfterMs, LOCKED_AVD_RETRY_MS);

@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync, readSync, statSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { TransientError } from "./errors.js";
@@ -13,7 +13,11 @@ import { run, type RunResult } from "./proc.js";
 export interface DeviceSpec {
   /** A fresh simulator of this type, e.g. "iPhone 17". `runtime` defaults to the newest installed iOS. */
   ios?: { deviceType: string; runtime?: string };
-  /** A throwaway (read-only) instance of an existing AVD; the AVD itself is never modified. */
+  /**
+   * An existing AVD used as a template: each job gets its own copy of its configuration (same
+   * system image and hardware, fresh data), deleted when the job ends. The template is never
+   * booted or modified, so whatever else boots it can't get in a job's way.
+   */
   android?: { avd: string };
 }
 
@@ -34,6 +38,8 @@ export interface Devices {
 export type Exec = (command: string, args: string[], timeoutMs?: number) => Promise<RunResult>;
 
 export const SIMULATOR_PREFIX = "isobot-";
+/** Per-job AVDs; anything with this prefix is isobot's to delete. */
+export const JOB_AVD_PREFIX = "isobot-job-";
 /** Emulator console ports isobot uses; outside the default 5554-5584 range so your own emulators never collide. */
 export const ANDROID_PORTS = Array.from({ length: 16 }, (_, i) => 5600 + i * 2);
 
@@ -59,13 +65,17 @@ export function emulatorSerials(adbDevices: string): string[] {
 }
 
 /**
- * -read-only lets several instances share one AVD and leaves it untouched; nothing is saved on exit.
- * gRPC (on 127.0.0.1, token-protected) is what argent's gestures drive; without it the emulator also
- * writes no discovery file, so argent can describe the screen but never tap.
+ * A job's own AVD boots cold with fresh data (-wipe-data, -no-snapshot): nothing carries over between
+ * jobs. gRPC (on 127.0.0.1, token-protected) is what argent's gestures drive; without it the emulator
+ * also writes no discovery file, so argent can describe the screen but never tap.
  */
 export function emulatorArgs(avd: string, port: number): string[] {
-  return ["-avd", avd, "-read-only", "-no-window", "-no-audio", "-no-boot-anim", "-no-snapshot-save",
+  return ["-avd", avd, "-no-window", "-no-audio", "-no-boot-anim", "-no-snapshot", "-wipe-data",
     "-port", String(port), "-grpc", String(port + GRPC_PORT_OFFSET), "-grpc-use-token"];
+}
+
+export function jobAvdName(jobId: string, port: number): string {
+  return `${JOB_AVD_PREFIX}${jobId.replace(/[^\w-]/g, "-").slice(0, 60)}-${port}`;
 }
 
 /** 5600 → 8700: clear of the emulator's default gRPC ports (8554+). */
@@ -78,9 +88,11 @@ export function freePort(inUse: Set<number>): number | null {
 export class LocalDevices implements Devices {
   private ports = new Set<number>();
   private sdk: string;
+  private avdHome: string;
 
   constructor(private logDir: string, private exec: Exec = defaultExec, env: NodeJS.ProcessEnv = process.env, private sleep = (ms: number) => new Promise(r => setTimeout(r, ms))) {
     this.sdk = env.ANDROID_HOME ?? env.ANDROID_SDK_ROOT ?? path.join(homedir(), "Library", "Android", "sdk");
+    this.avdHome = env.ANDROID_AVD_HOME ?? path.join(env.ANDROID_USER_HOME ?? path.join(env.HOME ?? homedir(), ".android"), "avd");
   }
 
   private get adb(): string { return path.join(this.sdk, "platform-tools", "adb"); }
@@ -99,12 +111,12 @@ export class LocalDevices implements Devices {
         lines.push(`- iOS simulator ${spec.ios.deviceType}: UDID ${udid} (booted; in the isobot shell it's $ISOBOT_IOS_SIMULATOR, e.g. \`xcodebuild test -destination "id=$ISOBOT_IOS_SIMULATOR"\`).`);
       }
       if (spec.android) {
-        const { serial, stop } = await this.bootEmulator(spec.android.avd);
+        const { serial, stop } = await this.bootEmulator(jobId, spec.android.avd);
         releases.push(stop);
         env.ANDROID_SERIAL = serial;
         // Gradle needs the SDK too, and the runner's own environment usually doesn't name it.
         env.ANDROID_HOME = this.sdk;
-        lines.push(`- Android emulator (${spec.android.avd}, read-only): serial ${serial} (booted; adb and Gradle pick it up from $ANDROID_SERIAL in the isobot shell).`);
+        lines.push(`- Android emulator (a fresh copy of ${spec.android.avd}, yours alone): serial ${serial} (booted; adb and Gradle pick it up from $ANDROID_SERIAL in the isobot shell).`);
       }
     } catch (error) {
       await release();
@@ -131,13 +143,35 @@ export class LocalDevices implements Devices {
     await this.exec("xcrun", ["simctl", "delete", udid], 120_000);
   }
 
-  private async bootEmulator(avd: string): Promise<{ serial: string; stop: () => Promise<void> }> {
+  /** A job's own AVD: the template's config.ini (system image, hardware) and nothing else. */
+  private createJobAvd(template: string, name: string): () => void {
+    const config = path.join(this.avdHome, `${template}.avd`, "config.ini");
+    if (!existsSync(config)) throw new Error(`the template AVD ${template} doesn't exist (no ${config}); create it in Android Studio or with avdmanager`);
+    const dir = path.join(this.avdHome, `${name}.avd`);
+    const remove = () => { rmSync(dir, { recursive: true, force: true }); rmSync(path.join(this.avdHome, `${name}.ini`), { force: true }); };
+    remove();
+    mkdirSync(dir, { recursive: true });
+    copyFileSync(config, path.join(dir, "config.ini"));
+    const target = /^target=(.*)$/m.exec(readText(path.join(this.avdHome, `${template}.ini`)))?.[1];
+    writeFileSync(path.join(this.avdHome, `${name}.ini`), `avd.ini.encoding=UTF-8\npath=${dir}\npath.rel=avd/${name}.avd\n${target ? `target=${target}\n` : ""}`);
+    return remove;
+  }
+
+  private async bootEmulator(jobId: string, template: string): Promise<{ serial: string; stop: () => Promise<void> }> {
     await this.must(this.adb, ["start-server"], 60_000, "start adb");
     const running = emulatorSerials((await this.exec(this.adb, ["devices"], 30_000)).stdout).map(s => Number(s.slice("emulator-".length)));
     const port = freePort(new Set([...this.ports, ...running]));
     if (port === null) throw new TransientError("every isobot emulator port is in use");
     this.ports.add(port);
     const serial = `emulator-${port}`;
+    const avd = jobAvdName(jobId, port);
+    let removeAvd: () => void;
+    try {
+      removeAvd = this.createJobAvd(template, avd);
+    } catch (error) {
+      this.ports.delete(port);
+      throw error;
+    }
     mkdirSync(this.logDir, { recursive: true });
     const log = openSync(path.join(this.logDir, `${serial}.log`), "w");
     const child = spawn(this.emulator, emulatorArgs(avd, port), {
@@ -147,7 +181,9 @@ export class LocalDevices implements Devices {
     child.unref();
     const stop = async () => {
       await this.exec(this.adb, ["-s", serial, "emu", "kill"], 60_000);
+      for (let i = 0; i < 20 && child.exitCode === null; i++) await this.sleep(500);
       try { process.kill(-child.pid!, "SIGKILL"); } catch { /* already exited */ }
+      removeAvd();
       this.ports.delete(port);
     };
     try {
@@ -155,11 +191,11 @@ export class LocalDevices implements Devices {
       for (;;) {
         if (child.exitCode !== null) {
           const logFile = path.join(this.logDir, `${serial}.log`);
-          throw emulatorExitError(avd, child.exitCode, readTail(logFile), logFile);
+          throw emulatorExitError(template, child.exitCode, readTail(logFile), logFile);
         }
         const prop = await this.exec(this.adb, ["-s", serial, "shell", "getprop", "sys.boot_completed"], 30_000);
         if (prop.stdout.trim() === "1") break;
-        if (Date.now() > deadline) throw new TransientError(`the Android emulator ${avd} didn't finish booting in ${BOOT_TIMEOUT_MS / 60_000} minutes`);
+        if (Date.now() > deadline) throw new TransientError(`the Android emulator (${template}) didn't finish booting in ${BOOT_TIMEOUT_MS / 60_000} minutes`);
         await this.sleep(3000);
       }
     } catch (error) {
@@ -175,6 +211,10 @@ export class LocalDevices implements Devices {
     const adb = await this.exec(this.adb, ["devices"], 30_000).catch(() => null);
     for (const serial of emulatorSerials(adb?.stdout ?? "")) {
       if (ANDROID_PORTS.includes(Number(serial.slice("emulator-".length)))) await this.exec(this.adb, ["-s", serial, "emu", "kill"], 60_000);
+    }
+    // Job AVDs a crashed runner left behind (their emulators were just stopped).
+    for (const entry of existsSync(this.avdHome) ? readdirSync(this.avdHome) : []) {
+      if (entry.startsWith(JOB_AVD_PREFIX)) rmSync(path.join(this.avdHome, entry), { recursive: true, force: true });
     }
   }
 
@@ -205,6 +245,10 @@ export function emulatorExitError(avd: string, code: number, log: string, logFil
   }
   const last = log.split("\n").map(line => line.trim()).filter(line => /ERROR|FATAL|PANIC/i.test(line)).slice(-3).join(" / ");
   return new Error(`the emulator exited with ${code}${last ? `: ${last.slice(0, 400)}` : ""}; see ${logFile}`);
+}
+
+function readText(file: string): string {
+  try { return readTail(file, 64_000); } catch { return ""; }
 }
 
 function readTail(file: string, bytes = 16_384): string {
