@@ -230,6 +230,9 @@ export class LocalDevices implements Devices {
 /** How long to wait before trying again when someone else's emulator holds the AVD. */
 export const LOCKED_AVD_RETRY_MS = 15 * 60_000;
 
+/** How long to wait before trying again when the emulator finds too little free disk. */
+export const LOW_DISK_RETRY_MS = 30 * 60_000;
+
 /**
  * Why an emulator exited during boot. An AVD that another, writable emulator holds (one booted by
  * hand, Android Studio or another agent's argent session, without -read-only) is temporary: the job
@@ -241,6 +244,13 @@ export function emulatorExitError(avd: string, code: number, log: string, logFil
       `the AVD ${avd} is in use by an emulator isobot didn't start (booted without -read-only, e.g. by Android Studio or another agent's argent session). ` +
       `isobot retries in ${LOCKED_AVD_RETRY_MS / 60_000} minutes; shut that emulator down, or boot it with -read-only, to free it.`,
       LOCKED_AVD_RETRY_MS,
+    );
+  }
+  if (/not have enough disk space/i.test(log)) {
+    return new TransientError(
+      `the Mac is out of disk space for the Android emulator (it needs room for the AVD's data partition). ` +
+      `isobot retries in ${LOW_DISK_RETRY_MS / 60_000} minutes; free space (DerivedData, old simulators and AVDs) to unblock it. See ${logFile}`,
+      LOW_DISK_RETRY_MS,
     );
   }
   const last = log.split("\n").map(line => line.trim()).filter(line => /ERROR|FATAL|PANIC/i.test(line)).slice(-3).join(" / ");
