@@ -5,12 +5,13 @@ import { callTool, executeAction, formatCheckIn, needsMe, redact, type ChatActio
 import { ChatToolServer } from "./chatMcp.js";
 import type { DiscordApi, DiscordMessage, Upload } from "./discordApi.js";
 import { classifyModelFailure } from "./errors.js";
+import { CARD_FOOTER } from "./notify.js";
 import { run, tail, workerEnv } from "./proc.js";
 import type { Store } from "./store.js";
 
 /**
- * isobot's staff chat. Mention isobot in the staff chat channel (ISOBOT_CHAT_CHANNEL_ID) and it
- * answers in a thread; keep talking there without mentioning it. Each thread is one resumed Claude
+ * isobot's staff chat. Mention isobot in the staff chat channel (ISOBOT_CHAT_CHANNEL_ID), or reply to
+ * one of its messages there, and it answers in a thread; keep talking there without mentioning it. Each thread is one resumed Claude
  * Code session with read-only tools (chatTools.ts). Actions are proposed in the thread and run only
  * after an allowlisted user reacts 👍 on the proposal. Everything is polled over Discord's REST API,
  * so the runner needs no inbound connection; cursors in the store survive restarts.
@@ -99,6 +100,8 @@ export class StaffChat {
   private running = new Set<string>();
   private turns = new Set<Promise<void>>();
   private tick = 0;
+  /** Staff-channel threads isobot didn't open: whether each hangs off a job card, an isobot post or something else. */
+  private starters = new Map<string, { kind: "card" | "isobot" | "other"; message: DiscordMessage | null }>();
   private lastError = 0;
   private stopped = false;
   private now: () => Date;
@@ -159,6 +162,17 @@ export class StaffChat {
     return !m.author.bot && m.author.id !== this.o.botId && this.o.allowed.has(m.author.id);
   }
 
+  /** A mention of isobot, or a reply to one of its messages. */
+  private addressed(m: DiscordMessage): boolean {
+    return Boolean(m.mentions?.some(u => u.id === this.o.botId) || m.referenced_message?.author.id === this.o.botId);
+  }
+
+  private track(threadId: string, lastMessageId: string): Conversation {
+    // pollThreads reads it from now on; if it's ever pruned, pollGuild starts over from that moment.
+    delete this.state.seen[threadId];
+    return this.state.threads[threadId] = { threadId, sessionId: null, lastMessageId, updatedAt: Date.now(), events: [] };
+  }
+
   private async pollChannel(): Promise<void> {
     if (!this.state.channelCursor) {
       // First start: begin from now, not from the channel's history.
@@ -169,11 +183,11 @@ export class StaffChat {
     const messages = await this.o.discord.messagesAfter(this.o.channelId, this.state.channelCursor);
     for (const m of messages) {
       this.state.channelCursor = m.id;
-      if (!this.allowed(m) || ![0, 19].includes(m.type ?? 0) || !m.mentions?.some(u => u.id === this.o.botId)) continue;
+      if (!this.allowed(m) || ![0, 19].includes(m.type ?? 0) || !this.addressed(m)) continue;
       const threadId = m.thread?.id ?? (await this.o.discord.request<{ id: string }>("POST", `/channels/${this.o.channelId}/messages/${m.id}/threads`, {
         name: threadTitle(stripMention(m.content, this.o.botId)), auto_archive_duration: 1440,
       })).id;
-      this.state.threads[threadId] = { threadId, sessionId: null, lastMessageId: m.id, updatedAt: Date.now(), events: [] };
+      this.track(threadId, m.id);
       this.enqueue(threadId, m);
     }
     this.prune();
@@ -205,6 +219,8 @@ export class StaffChat {
    * Mentions anywhere else in the server. The answer never goes there: other channels are public,
    * shared with contributors, or customer support. isobot reacts 💬 and opens a thread in the staff
    * channel that pings the owner and links back, so the conversation stays among staff.
+   * Threads in the staff channel that isobot didn't open (one on a triage post, a pruned chat) are
+   * read here too, and isobot joins them in place (joinStaffThread).
    */
   private async pollGuild(): Promise<void> {
     const guild = this.o.guildId;
@@ -215,8 +231,8 @@ export class StaffChat {
       this.o.discord.request<{ threads: Place[] }>("GET", `/guilds/${guild}/threads/active`),
     ]);
     const places = [...channels, ...active.threads].filter(c =>
-      // Text, announcement, voice-chat and thread channels; the staff channel and its threads are read elsewhere.
-      [0, 2, 5, 10, 11, 12].includes(c.type) && c.last_message_id && c.id !== this.o.channelId && c.parent_id !== this.o.channelId);
+      // Text, announcement, voice-chat and thread channels; the staff channel and its chat threads are read elsewhere.
+      [0, 2, 5, 10, 11, 12].includes(c.type) && c.last_message_id && c.id !== this.o.channelId && !this.state.threads[c.id]);
     const names = new Map(channels.map(c => [c.id, c.name ?? c.id]));
     let changed = false;
     for (const place of places) {
@@ -231,6 +247,10 @@ export class StaffChat {
       const messages = await this.o.discord.messagesAfter(place.id, seen).catch(() => [] as DiscordMessage[]);
       this.state.seen[place.id] = messages.at(-1)?.id ?? place.last_message_id!;
       changed = true;
+      if (place.parent_id === this.o.channelId) {
+        await this.joinStaffThread(place.id, this.o.channelId, messages);
+        continue;
+      }
       for (const m of messages) {
         if (!this.allowed(m) || ![0, 19].includes(m.type ?? 0) || !m.mentions?.some(u => u.id === this.o.botId)) continue;
         await this.startElsewhere(m, place.name ?? names.get(place.id) ?? "a channel", guild);
@@ -242,6 +262,46 @@ export class StaffChat {
     if (changed) this.save();
   }
 
+  /**
+   * A staff-channel thread isobot didn't open. It joins on a mention, a reply to one of its messages, or
+   * any message in a thread on one of its posts (a triage summary), and answers right there. Job-card
+   * threads are left alone: replies there are notes to the build, relayed by the bridge.
+   */
+  private async joinStaffThread(threadId: string, parentId: string, messages: DiscordMessage[]): Promise<void> {
+    let conv: Conversation | null = null;
+    for (const m of messages) {
+      if (!this.allowed(m) || ![0, 19].includes(m.type ?? 0)) continue;
+      if (!conv) {
+        const starter = await this.starter(threadId, parentId);
+        if (starter.kind === "card") return;
+        if (starter.kind !== "isobot" && !this.addressed(m)) continue;
+        conv = this.track(threadId, m.id);
+        // What the thread hangs off comes along, the way a replied-to message does.
+        this.enqueue(threadId, m.referenced_message || !starter.message ? m : { ...m, referenced_message: starter.message });
+        continue;
+      }
+      this.enqueue(threadId, m);
+    }
+    if (conv) {
+      conv.lastMessageId = messages.at(-1)!.id;
+      this.starters.delete(threadId);
+      this.save();
+    }
+  }
+
+  private async starter(threadId: string, parentId: string): Promise<{ kind: "card" | "isobot" | "other"; message: DiscordMessage | null }> {
+    let known = this.starters.get(threadId);
+    if (known) return known;
+    // A thread started from a message has that message's id.
+    const message = await this.o.discord.request<DiscordMessage>("GET", `/channels/${parentId}/messages/${threadId}`).catch(() => null);
+    const kind = message?.author.id !== this.o.botId ? "other"
+      : message.embeds?.[0]?.footer?.text.startsWith(CARD_FOOTER) ? "card" : "isobot";
+    known = { kind, message };
+    if (this.starters.size > 500) this.starters.clear();
+    this.starters.set(threadId, known);
+    return known;
+  }
+
   private async startElsewhere(m: DiscordMessage, where: string, guild: string): Promise<void> {
     await this.o.discord.react(m.channel_id, m.id, "💬").catch(() => undefined);
     const link = `https://discord.com/channels/${guild}/${m.channel_id}/${m.id}`;
@@ -251,7 +311,7 @@ export class StaffChat {
     const thread = await this.o.discord.request<{ id: string }>("POST", `/channels/${this.o.channelId}/messages/${starter.id}/threads`, {
       name: threadTitle(stripMention(m.content, this.o.botId)), auto_archive_duration: 1440,
     });
-    this.state.threads[thread.id] = { threadId: thread.id, sessionId: null, lastMessageId: starter.id, updatedAt: Date.now(), events: [] };
+    this.track(thread.id, starter.id);
     this.enqueue(thread.id, { ...m, origin: `#${where}` });
     this.save();
   }
