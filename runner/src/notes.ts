@@ -65,8 +65,22 @@ export function noteFeedback(notes: OwnerNote[]): string {
   ].join("\n\n---\n\n");
 }
 
+const RETRY = /^(?:ok(?:ay)?[,\s]+)?(?:please[,\s]+)?(?:try(?:\s+it)?\s+again|retry|re-?build(?:\s+it)?|build(?:\s+it)?\s+again|re-?run(?:\s+it)?|run(?:\s+it)?\s+again|go\s+again)\b/i;
+
+/** A note asking a finished or failed job to build again ("try again", "retry", "rebuild it, and use…"). */
+export function asksToRetry(text: string): boolean {
+  return RETRY.test(text.trim());
+}
+
+/** A note that is only a retry request, with nothing for the builder to act on. */
+export function isBareRetry(text: string): boolean {
+  const rest = text.trim().replace(RETRY, "");
+  return rest !== text.trim() && /^[\s.!,]*(?:please)?[\s.!]*$/i.test(rest);
+}
+
 /** The task plus everything the owner has said since approving it, so reviewers judge against both. */
-export function withNotes(task: string, notes: OwnerNote[]): string {
+export function withNotes(task: string, all: OwnerNote[]): string {
+  const notes = all.filter(n => !isBareRetry(n.text));
   if (!notes.length) return task;
   return `${task}\n\n## Follow-up notes from the owner (newest last; these take precedence)\n\n${notes.map(n => n.text).join("\n\n---\n\n")}`;
 }

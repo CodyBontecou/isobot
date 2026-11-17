@@ -24,7 +24,8 @@ new Discord, GitHub, email and App Store review activity into proposals. Design:
    repo has `release.onShip`, the issue waits for you to add `isobot:ship`.
 
 Add `isobot:stop` at any time to stop. A failed issue gets `isobot:failed` and
-a comment; edit the issue and add `isobot:ready` again to retry.
+a comment. To retry, reply `retry` (or "try again") in the job's Discord thread or on
+the issue, run `npm run runner -- retry time.md#12`, or add `isobot:ready` again.
 
 ## Setup on a Mac
 
@@ -52,6 +53,7 @@ doesn't propose your whole backlog.
 | `triage` | One triage pass, printed as JSON |
 | `doctor` | Configuration, connectivity, sandbox and heartbeat checks |
 | `say <repo#n> <text>` | Send isobot a note about a job, as if you'd replied in its Discord thread |
+| `retry <repo#n> [note]` | Build an issue again (failed, merged, closed or stopped job, or one never built), optionally with a note for the builder |
 
 Logs: `~/Library/Application Support/isobot/logs/runner.log` (rotated at
 10 MB, three kept). State: `runner.sqlite` and `heartbeat.json` beside it.
@@ -68,6 +70,21 @@ you, release output. Runner-wide messages (started, cycle failing, usage-limit p
 digests) stay in the channel. With only `ISOBOT_DISCORD_WEBHOOK_URL`, you get the old one-line
 messages and no threads.
 
+**One-click controls.** isobot adds reactions you can click (only allowlisted users count; the bridge
+turns each into a label change with your GitHub token; ✅ and 🛑 are toggles and reacts 🏗️ or 👌 when it lands, 🚫 if the
+issue is closed or stopped):
+
+| React | On | Does |
+| --- | --- | --- |
+| ✅ start | triage digests, help-thread posts, job cards | adds `isobot:ready`; removing it before the runner claims the issue withdraws it |
+| 🛑 stop | job cards (any message about one issue) | adds `isobot:stop` (and withdraws a pending `isobot:ready`). It's a toggle: un-clicking it while the stop is in place continues, like 🔁 |
+| 🔁 continue | job cards | one-shot: lifts `isobot:stop`; on a failed or stopped job, adds `isobot:ready` to build it again |
+| 🧹 clean up | triage digests, job cards | one-shot (un-clicking does nothing): adds `isobot:cleanup`: on its next pass the runner removes the issue's leftover workspaces, DerivedData and branch refs, strips isobot's labels, comments and closes the issue as not planned. An open PR is left alone. |
+
+A digest with one proposal awaiting approval gets ✅ 🧹 on itself; with several, each gets a short
+message of its own (the bridge only acts on messages about exactly one issue). A running build
+notices 🛑 (or the 🛑 that 🧹 adds) at its merge gate, as with the label; the cleanup waits for it.
+
 **Talking back.** Reply in a job's thread. The bridge relays replies from allowlisted users
 (`ISOBOT_ALLOWED_USERS`, or the bot's owner) to the job's GitHub issue and reacts 📨. The runner
 treats your comments on the issue as **notes**, wherever they came from: the thread, the issue
@@ -78,8 +95,12 @@ itself, or `npm run runner -- say time.md#12 "use the system font"`.
 - **On an open PR**, a note queues a revision: the runner checks out the PR branch, resumes the
   builder's session with your note, re-runs checks and review, and updates the same PR. If the
   repo merges automatically, a note that hasn't been applied yet blocks the merge.
-- **After it's merged, closed or failed**, the thread says how to continue: add `isobot:ready`
-  to build again (your notes go with it), or open a new issue.
+- **After it's merged, closed or failed**, a note that starts with `retry`, "try again", "rebuild"
+  or "build it again" builds the issue again: the runner adds `isobot:ready` itself and every note
+  since the first approval goes to the builder ("try again, and use the system font" works; a bare
+  "retry" isn't passed on). Any other note gets told how to continue. This covers jobs that
+  finished in the last 48 hours; for older ones use `runner retry`. A retry never adds
+  `isobot:auto`, so the issue keeps the autonomy it had.
 
 Only comments written by your account (or `trustedAuthors`) count. The runner's own comments,
 triage proposals and relays of community `#help` threads never do. The bridge posts with its

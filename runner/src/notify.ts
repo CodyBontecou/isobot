@@ -23,7 +23,7 @@ export interface NotifierOptions {
 export type Phase =
   | "queued" | "devices" | "implementing" | "revising" | "checking" | "fixing" | "reviewing" | "addressing"
   | "pushing" | "ci" | "waiting" | "merged" | "releasing" | "released" | "releaseFailed"
-  | "ship" | "shipping" | "shipped" | "shipFailed" | "retrying" | "paused" | "failed" | "stopped" | "closed";
+  | "ship" | "shipping" | "shipped" | "shipFailed" | "retrying" | "paused" | "failed" | "stopped" | "cleaned" | "closed";
 
 type Mark = "active" | "wait" | "done" | "fail" | "stop";
 type Step = "Build" | "Checks" | "Review" | "PR" | "Merge" | "Release" | "Ship";
@@ -52,12 +52,21 @@ const PHASES: Record<Phase, { label: string; emoji: string; step: Step | "done" 
   paused: { label: "Paused: Claude usage limit", emoji: "⏸", step: null, mark: "wait" },
   failed: { label: "Failed", emoji: "⚠️", step: null, mark: "fail" },
   stopped: { label: "Stopped", emoji: "⏹", step: null, mark: "stop" },
+  cleaned: { label: "Dismissed and cleaned up", emoji: "🧹", step: null, mark: "stop" },
   closed: { label: "PR closed without merging", emoji: "⏹", step: null, mark: "stop" },
 };
 
+/**
+ * One-click controls the owner gets as reactions; the bridge acts on them (keep in sync with
+ * src/discord/approval.ts). A job card offers stop, continue and clean up; a proposal start and clean up.
+ */
+export const CONTROLS = { start: "✅", stop: "🛑", continue: "🔁", cleanup: "🧹" } as const;
+export const CARD_CONTROLS = [CONTROLS.stop, CONTROLS.continue, CONTROLS.cleanup];
+export const PROPOSAL_CONTROLS = [CONTROLS.start, CONTROLS.cleanup];
+
 const COLORS: Record<Mark, number> = { active: 0xfbca04, wait: 0x1d76db, done: 0x2ea043, fail: 0xd1242f, stop: 0x6e7781 };
 const ICONS: Record<Mark, string> = { active: "🔄", wait: "👀", done: "✅", fail: "❌", stop: "⏹" };
-const FINAL = new Set<Phase>(["merged", "released", "shipped", "failed", "stopped", "closed", "releaseFailed", "shipFailed"]);
+const FINAL = new Set<Phase>(["merged", "released", "shipped", "failed", "stopped", "cleaned", "closed", "releaseFailed", "shipFailed"]);
 
 /** Everything the card shows; persisted per job so a restarted runner keeps editing the same card. */
 export interface Card {
@@ -97,10 +106,19 @@ export class Notifier {
     return Boolean(this.options.bot);
   }
 
-  /** A channel-level message (runner started, triage digest, usage pause). */
-  async discord(content: string): Promise<void> {
+  /**
+   * A channel-level message (runner started, triage digest, usage pause). `reactions` are added as
+   * one-click controls; only a bot can add them, so a webhook posts the text alone.
+   */
+  async discord(content: string, reactions: readonly string[] = []): Promise<void> {
     if (this.options.bot) {
-      await this.bot("POST", `/channels/${this.options.bot.channelId}/messages`, message(content)).catch(warn);
+      const { channelId } = this.options.bot;
+      try {
+        const posted = await this.bot("POST", `/channels/${channelId}/messages`, message(content)) as { id: string };
+        await this.react(channelId, posted.id, reactions);
+      } catch (error) {
+        warn(error);
+      }
     } else if (this.options.webhookUrl) {
       await this.webhook(content);
     }
@@ -207,8 +225,17 @@ export class Notifier {
     this.save(job.id, card);
     await this.bot("POST", `/channels/${thread.id}/messages`, message(
       `Following ${card.issueUrl}\nReply here to talk to isobot about this job: your replies go to the builder ` +
-      `(during a build, or as a revision of an open PR). Comments on the issue and \`npm run runner -- say\` work the same way.`,
+      `(during a build, or as a revision of an open PR). Comments on the issue and \`npm run runner -- say\` work the same way.\n` +
+      `React on the card: ${CONTROLS.stop} stop (un-click to continue) · ${CONTROLS.continue} build again after a failure or stop · ${CONTROLS.cleanup} dismiss and clean up.`,
     ));
+    await this.react(channelId, created.id, CARD_CONTROLS);
+  }
+
+  /** Adds the bot's reactions in order, so they show up as buttons. A failed one is only logged. */
+  private async react(channelId: string, messageId: string, emojis: readonly string[]): Promise<void> {
+    for (const emoji of emojis) {
+      await this.bot("PUT", `/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}/@me`, undefined).catch(warn);
+    }
   }
 
   private jobLink(id: string): string | undefined {

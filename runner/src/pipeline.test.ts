@@ -515,6 +515,77 @@ test("a reply on a finished job explains how to continue instead of changing any
   assert.match(discord.cards().at(-1)!.description, /✅ Merged/);
 });
 
+test("replying retry to a failed job builds it again with the notes, without touching labels by hand", async () => {
+  const discord = new FakeDiscord();
+  const { github, pipeline, store, repo, builder } = setup(() => {}, [], discord);
+  repo.changes = false;
+  github.add(OWNER, NAME, 44, "Add CSV export", ["isobot:ready"]);
+  await cycle(pipeline);
+  assert.equal(store.get("codybontecou/time.md#44")!.state, "failed");
+  assert.match(discord.posts("1001").at(-1)!, /Reply `retry` here to try again/);
+
+  github.addComment(OWNER, NAME, 44, reply("Use semicolons as the separator"));
+  github.addComment(OWNER, NAME, 44, reply("try again"));
+  await pipeline.followUp();
+  assert.ok(github.get(OWNER, NAME, 44).labels.includes("isobot:ready"));
+  assert.match(discord.posts("1001").at(-1)!, /🔁 Building .* again/);
+
+  repo.changes = true;
+  await cycle(pipeline);
+  assert.equal(store.get("codybontecou/time.md#44")!.state, "pr_open");
+  assert.equal(builder.implementCalls, 2);
+  const task = builder.reviewTasks.at(-1)!;
+  assert.match(task, /Follow-up notes from the owner[\s\S]*Use semicolons as the separator/);
+  assert.doesNotMatch(task, /try again/, "a bare retry isn't a note for the builder");
+  assert.doesNotMatch(github.get(OWNER, NAME, 44).labels.join(), /isobot:failed/);
+});
+
+test("a retry while the job is still open, or with the stop label, changes nothing", async () => {
+  const { github, pipeline, store } = setup();
+  github.add(OWNER, NAME, 45, "Add CSV export", ["isobot:ready"]);
+  await cycle(pipeline);
+  assert.equal(store.get("codybontecou/time.md#45")!.state, "pr_open");
+  const open = await pipeline.rebuild(OWNER, NAME, 45);
+  assert.equal(open.ok, false);
+  assert.match(open.message, /already on this \(pr open, PR #100\)/);
+
+  github.add(OWNER, NAME, 46, "Stopped", ["isobot:stop"]);
+  assert.equal((await pipeline.rebuild(OWNER, NAME, 46)).ok, false);
+  assert.deepEqual(github.get(OWNER, NAME, 46).labels, ["isobot:stop"]);
+});
+
+test("🧹 cleanup closes the issue as not planned, strips isobot's labels and purges local leftovers", async () => {
+  const discord = new FakeDiscord();
+  const { github, pipeline, store, repo } = setup(() => {}, [], discord);
+  repo.changes = false;
+  github.add(OWNER, NAME, 50, "Add CSV export", ["isobot:ready"]);
+  await cycle(pipeline);
+  assert.equal(store.get("codybontecou/time.md#50")!.state, "failed");
+
+  await github.addLabels(OWNER, NAME, 50, ["isobot:cleanup"]);
+  await pipeline.cleanUp();
+  const issue = github.get(OWNER, NAME, 50);
+  assert.equal(issue.state, "closed");
+  assert.equal(github.closedAs.get(`${REPO}#50`), "not_planned");
+  assert.deepEqual(issue.labels, []);
+  assert.ok(repo.calls.includes("purge 50"));
+  assert.match(github.commentsFor(OWNER, NAME, 50).at(-1)!, /🧹 Dismissed from Discord/);
+  assert.match(discord.cards().at(-1)!.description, /🧹 Dismissed and cleaned up/);
+});
+
+test("🧹 from someone else is refused, and a proposal is never claimed while it waits for cleanup", async () => {
+  const { github, pipeline, store } = setup();
+  github.add(OWNER, NAME, 51, "Sneaky", ["isobot:cleanup"]);
+  github.labelers.set(`${REPO}#51:isobot:cleanup`, "stranger");
+  await pipeline.cleanUp();
+  assert.equal(github.get(OWNER, NAME, 51).state, "open");
+  assert.deepEqual(github.get(OWNER, NAME, 51).labels, []);
+
+  github.add(OWNER, NAME, 52, "Racing", ["isobot:ready", "isobot:cleanup"]);
+  await pipeline.discover();
+  assert.equal(store.get(`${REPO}#52`), null);
+});
+
 function implementCalls(builder: FakeBuilder): number {
   return builder.implementCalls;
 }

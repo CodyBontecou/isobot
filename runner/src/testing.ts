@@ -75,7 +75,11 @@ export class FakeGitHub implements GitHubApi {
   async comment(owner: string, repo: string, number: number, body: string): Promise<void> {
     this.comments.push({ id: this.nextComment++, key: `${owner}/${repo}#${number}`, body: `${body}\n\n${RUNNER_MARKER}` });
   }
-  async closeIssue(owner: string, repo: string, number: number): Promise<void> { this.get(owner, repo, number).state = "closed"; }
+  closedAs = new Map<string, string>();
+  async closeIssue(owner: string, repo: string, number: number, reason = "completed"): Promise<void> {
+    this.get(owner, repo, number).state = "closed";
+    this.closedAs.set(`${owner}/${repo}#${number}`, reason);
+  }
   async createIssue(owner: string, repo: string, title: string, body: string, labels: string[]): Promise<Issue> {
     const number = this.issues.size + 1;
     return this.add(owner, repo, number, title, labels, body);
@@ -157,6 +161,7 @@ export class FakeRepo implements RepoOps {
   async push(sha: string, branch: string): Promise<void> { this.calls.push(`push ${sha} ${branch}`); }
   async fetchBranch(branch: string): Promise<string> { this.calls.push(`fetch ${branch}`); return `pr-head-${branch}`; }
   async mergeBase(a: string, b: string): Promise<string> { this.calls.push(`merge-base ${a} ${b}`); return "base"; }
+  async purge(number: number): Promise<string[]> { this.calls.push(`purge ${number}`); return []; }
   async checkoutAt(sha: string, name: string): Promise<string> { this.calls.push(`checkout ${sha} ${name}`); return "/tmp/release"; }
   published: { prefix: string; names: string[] }[] = [];
   publishError?: Error;

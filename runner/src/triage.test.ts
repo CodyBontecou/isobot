@@ -5,7 +5,7 @@ import type { TriageDecision, TriageItem } from "./builder.js";
 import { Notifier } from "./notify.js";
 import { Store } from "./store.js";
 import { AppStoreSource, autoApproves, DiscordSource, GitHubSource, triage, VoxSource } from "./triage.js";
-import { FakeBuilder, FakeGitHub } from "./testing.js";
+import { FakeBuilder, FakeDiscord, FakeGitHub } from "./testing.js";
 
 const channels = [
   { id: "1000000000000000001", name: "TIME.MD", type: 4, parentId: null },
@@ -362,4 +362,42 @@ test("autoApprove respects its sources, kinds and confidence", () => {
   assert.equal(autoApproves(config, item("discord"), decision({ confidence: 0.7 })), false, "not confident enough");
   assert.equal(autoApproves(config, item("discord"), decision({ scope: "major" })), false, "major always waits");
   assert.equal(autoApproves({}, item("discord"), decision()), false, "off unless configured");
+});
+
+function botTriage(titles: string[], digest = "") {
+  const config = { ...loadConfig(), autoApprove: undefined };
+  const github = new FakeGitHub();
+  const builder = new FakeBuilder();
+  builder.triageResult = {
+    digest,
+    decisions: titles.map((title, i) => ({ id: `discord:${i}`, action: "propose" as const, repo: "codybontecou/time.md", kind: "feature" as const, scope: "major" as const, title, spec: "Spec", confidence: 0.8, reason: "asked" })),
+  };
+  const discord = new FakeDiscord();
+  const notifier = new Notifier({ bot: { token: "t", channelId: "123456789012345678" }, fetcher: discord.fetch });
+  const sources = [{
+    name: "fake",
+    collect: async () => ({ cursors: {}, items: titles.map((_, i) => ({ id: `discord:${i}`, source: "discord" as const, repo: "codybontecou/time.md", author: "fan", url: null, text: "ask" })) }),
+  }];
+  return { discord, run: () => triage({ config, store: new Store(":memory:"), github, builder, notifier, sources }) };
+}
+
+const reacted = (discord: FakeDiscord) => discord.calls.filter(c => c.method === "PUT")
+  .map(c => `${c.path.split("/")[4]} ${decodeURIComponent(c.path.split("/")[6])}`);
+
+test("one proposal awaiting approval gets ✅ and 🧹 right on the digest, and escaped newlines are fixed", async () => {
+  const { discord, run } = botTriage(["Recording quality setting"], "**time.md**\\n- #2 – Recording quality");
+  await run();
+  const [digest] = discord.posts("123456789012345678");
+  assert.match(digest, /react ✅ to have isobot build it, or 🧹 to dismiss it/);
+  assert.match(digest, /\*\*time\.md\*\*\n- #2/);
+  assert.deepEqual(reacted(discord), ["1000 ✅", "1000 🧹"]);
+});
+
+test("several proposals each get a message of their own to react on", async () => {
+  const { discord, run } = botTriage(["First", "Second"]);
+  await run();
+  const posts = discord.posts("123456789012345678");
+  assert.equal(posts.length, 3);
+  assert.match(posts[1], /🗳 \*\*First\*\* <https:\/\/github.com\/codybontecou\/time.md\/issues\/1>/);
+  assert.deepEqual(reacted(discord), ["1001 ✅", "1001 🧹", "1004 ✅", "1004 🧹"]);
 });

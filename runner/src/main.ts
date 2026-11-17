@@ -202,6 +202,7 @@ async function loop(rt: Runtime): Promise<void> {
         await rt.pipeline.discover();
         rt.pipeline.startQueued();
         await rt.pipeline.followUp();
+        await rt.pipeline.cleanUp();
         await rt.train.tick();
         lastCycleError = null;
         if (!triageRunning && Date.now() - lastTriage > rt.config.triageMinutes * 60_000) {
@@ -361,7 +362,8 @@ const HELP = `isobot runner
   doctor              Check Claude Code, GitHub, Pi and optional sources
   pause | resume      Stop or restart new work (running builds finish)
   checks <repo>       Run a repo's configured checks on its default branch, sandboxed like a build
-  say <repo#n> <text> Send isobot a note about a job, like replying in its Discord thread`;
+  say <repo#n> <text> Send isobot a note about a job, like replying in its Discord thread
+  retry <repo#n> [note] Build an issue again (a failed or finished job, or a new one); the note goes to the builder`;
 
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "help";
@@ -377,6 +379,7 @@ async function main(): Promise<void> {
       console.log(`[once] claimed ${claimed.length} issue(s)`);
       await Promise.all(rt.pipeline.startQueued());
       await rt.pipeline.followUp();
+      await rt.pipeline.cleanUp();
       return;
     }
     case "triage": {
@@ -455,6 +458,22 @@ async function main(): Promise<void> {
       const url = await rt.github.note(ref.owner, ref.repo, ref.number, `${text}\n\n${TERMINAL_MARKER}`);
       const job = rt.store.get(Store.jobId(ref.owner, ref.repo, ref.number));
       console.log(`noted on ${url}${job ? ` (job is ${job.state.replace("_", " ")}; the runner picks it up on its next pass)` : " (no isobot job for this issue yet)"}`);
+      return;
+    }
+    case "retry": {
+      const [target, ...words] = process.argv.slice(3);
+      const ref = target && resolveIssue(rt.config, target);
+      if (!ref) {
+        console.error("Usage: retry <owner/repo#n | repo#n> [note for the builder]");
+        process.exitCode = 2;
+        return;
+      }
+      const result = await rt.pipeline.rebuild(ref.owner, ref.repo, ref.number);
+      if (result.ok && words.join(" ").trim()) {
+        await rt.github.note(ref.owner, ref.repo, ref.number, `${words.join(" ").trim()}\n\n${TERMINAL_MARKER}`);
+      }
+      console.log(result.message);
+      if (!result.ok) process.exitCode = 1;
       return;
     }
     default:

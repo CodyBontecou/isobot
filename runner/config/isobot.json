@@ -31,7 +31,8 @@
     "failed": "isobot:failed",
     "ship": "isobot:ship",
     "stop": "isobot:stop",
-    "auto": "isobot:auto"
+    "auto": "isobot:auto",
+    "cleanup": "isobot:cleanup"
   },
   "trustedAuthors": [],
   "discordCategories": {

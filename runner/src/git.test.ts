@@ -64,6 +64,15 @@ test("workspace lifecycle: build in a throwaway clone, judge and push from the r
   assert.ok(existsSync(path.join(release, "README.md")));
   await repo.removeWorkspace("release__1-merge");
   assert.ok(!existsSync(release));
+
+  // 🧹 removes whatever a job left behind, and only that job's.
+  const leftover = await repo.createWorkspace("isobot/1-test", base);
+  const other = await repo.createWorkspace("isobot/12-other", base);
+  assert.equal(await repo.fetchBranch("isobot/1-test"), sha);
+  assert.deepEqual((await repo.purge(1)).sort(), ["ref isobot/1-test", "workspace isobot/1-test"]);
+  assert.ok(!existsSync(leftover));
+  assert.ok(existsSync(other), "issue 12's workspace isn't issue 1's");
+  assert.deepEqual(await repo.purge(1), []);
 });
 
 test("a rename into a protected folder shows the real destination path", async () => {
