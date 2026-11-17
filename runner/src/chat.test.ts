@@ -179,6 +179,26 @@ test("a mention in the staff channel starts a thread; replies there continue the
   } finally { t.done(); }
 });
 
+test("moving the chat to another channel starts there from now, not from its history", async () => {
+  const t = await setup(async () => "hi");
+  try {
+    const OTHER = "500000000000000002";
+    t.discord.say(OTHER, ME, `<@${BOT}> an old question in the other channel`);
+    const moved = new StaffChat({
+      discord: t.discord as unknown as DiscordApi, channelId: OTHER, botId: BOT, allowed: new Set([ME]), store: t.store, tools: t.tools,
+      model: async () => ({ text: "moved", sessionId: "s" }), config: {}, server: t.server,
+    });
+    await moved.poll();
+    await moved.poll();
+    await moved.idle();
+    assert.equal(t.discord.inChannel(OTHER).length, 0, "history in the new channel is ignored");
+    const ask = t.discord.say(OTHER, ME, `<@${BOT}> new question`);
+    await moved.poll();
+    await moved.idle();
+    assert.deepEqual(t.discord.inChannel(ask.id), ["moved"]);
+  } finally { t.done(); }
+});
+
 test("only allowlisted people are heard, and only when they mention isobot in the channel", async () => {
   const t = await setup(async () => "hi");
   try {

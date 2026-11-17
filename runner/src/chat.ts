@@ -66,6 +66,8 @@ interface Pending {
 }
 
 interface ChatState {
+  /** The channel channelCursor belongs to; a different configured channel starts from now. */
+  channelId: string | null;
   channelCursor: string | null;
   threads: Record<string, Conversation>;
   pending: Pending[];
@@ -100,6 +102,10 @@ export class StaffChat {
   constructor(private o: StaffChatOptions) {
     this.now = o.now ?? (() => new Date());
     this.state = loadState(o.store.cursor(STATE_KEY));
+    if (this.state.channelId !== o.channelId) {
+      this.state.channelId = o.channelId;
+      this.state.channelCursor = null;
+    }
     // A confirmation that was executing when the runner stopped may or may not have happened.
     for (const p of this.state.pending.filter(p => p.state === "running")) {
       void this.finish(p, `⚠️ The runner restarted while doing this. Check before asking again.`);
@@ -359,7 +365,7 @@ export class StaffChat {
 }
 
 function loadState(raw: string | null): ChatState {
-  const empty: ChatState = { channelCursor: null, threads: {}, pending: [], checkInDate: null };
+  const empty: ChatState = { channelId: null, channelCursor: null, threads: {}, pending: [], checkInDate: null };
   if (!raw) return empty;
   try { return { ...empty, ...JSON.parse(raw) as Partial<ChatState> }; } catch { return empty; }
 }
