@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ANDROID_PORTS, emulatorArgs, emulatorSerials, freePort, LocalDevices, simulatorName, staleSimulators, type Exec } from "./devices.js";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { ANDROID_PORTS, emulatorArgs, emulatorExitError, emulatorSerials, freePort, LocalDevices, LOCKED_AVD_RETRY_MS, simulatorName, staleSimulators, type Exec } from "./devices.js";
+import { TransientError } from "./errors.js";
 import type { RunResult } from "./proc.js";
 
 const ok = (stdout = ""): RunResult => ({ code: 0, stdout, stderr: "", timedOut: false });
@@ -58,4 +62,26 @@ test("emulators are read-only and expose token-protected gRPC for argent", () =>
   assert.equal(args[args.indexOf("-port") + 1], "5602");
   assert.equal(args[args.indexOf("-grpc") + 1], "8702");
   assert.ok(args.includes("-grpc-use-token"));
+});
+
+test("an AVD held by someone else's writable emulator is waited out, not blamed on the job", async () => {
+  const sdk = mkdtempSync(path.join(tmpdir(), "isobot-sdk-"));
+  mkdirSync(path.join(sdk, "emulator"));
+  // What the real emulator prints when a writable instance (e.g. an argent boot) holds the AVD.
+  writeFileSync(path.join(sdk, "emulator", "emulator"), "#!/bin/sh\necho 'WARNING | Another emulator is still running, wait for a sec...'\necho 'ERROR | Another emulator instance is running. Please close it or run all emulators with -read-only flag.'\nexit 1\n");
+  chmodSync(path.join(sdk, "emulator", "emulator"), 0o755);
+  const exec: Exec = async () => ok("List of devices attached\n");
+  const devices = new LocalDevices(path.join(sdk, "logs"), exec, { ANDROID_HOME: sdk }, () => new Promise(r => setTimeout(r, 50)));
+  await assert.rejects(devices.lease("o/r#3", { android: { avd: "isobot-api35" } }), (error: Error) => {
+    assert.ok(error instanceof TransientError);
+    assert.equal(error.retryAfterMs, LOCKED_AVD_RETRY_MS);
+    assert.match(error.message, /isobot-api35 is in use by an emulator isobot didn't start/);
+    return true;
+  });
+});
+
+test("other emulator exits name the error from its log", () => {
+  const error = emulatorExitError("a", 1, "INFO | starting\nERROR | x86 emulation currently requires hardware acceleration\n", "/l.log");
+  assert.ok(!(error instanceof TransientError));
+  assert.match(error.message, /exited with 1: ERROR \| x86 emulation currently requires hardware acceleration; see \/l.log/);
 });

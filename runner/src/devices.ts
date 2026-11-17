@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { TransientError } from "./errors.js";
@@ -153,7 +153,10 @@ export class LocalDevices implements Devices {
     try {
       const deadline = Date.now() + BOOT_TIMEOUT_MS;
       for (;;) {
-        if (child.exitCode !== null) throw new Error(`the emulator exited with ${child.exitCode}; see ${path.join(this.logDir, `${serial}.log`)}`);
+        if (child.exitCode !== null) {
+          const logFile = path.join(this.logDir, `${serial}.log`);
+          throw emulatorExitError(avd, child.exitCode, readTail(logFile), logFile);
+        }
         const prop = await this.exec(this.adb, ["-s", serial, "shell", "getprop", "sys.boot_completed"], 30_000);
         if (prop.stdout.trim() === "1") break;
         if (Date.now() > deadline) throw new TransientError(`the Android emulator ${avd} didn't finish booting in ${BOOT_TIMEOUT_MS / 60_000} minutes`);
@@ -181,6 +184,39 @@ export class LocalDevices implements Devices {
       throw new TransientError(`couldn't ${what}: ${(result.stderr || result.stdout).trim().slice(-500) || (result.timedOut ? "timed out" : `exit ${result.code}`)}`);
     }
     return result;
+  }
+}
+
+/** How long to wait before trying again when someone else's emulator holds the AVD. */
+export const LOCKED_AVD_RETRY_MS = 15 * 60_000;
+
+/**
+ * Why an emulator exited during boot. An AVD that another, writable emulator holds (one booted by
+ * hand, Android Studio or another agent's argent session, without -read-only) is temporary: the job
+ * waits for it rather than failing. Anything else is reported with the end of the emulator's log.
+ */
+export function emulatorExitError(avd: string, code: number, log: string, logFile: string): Error {
+  if (/Another emulator instance is running/i.test(log)) {
+    return new TransientError(
+      `the AVD ${avd} is in use by an emulator isobot didn't start (booted without -read-only, e.g. by Android Studio or another agent's argent session). ` +
+      `isobot retries in ${LOCKED_AVD_RETRY_MS / 60_000} minutes; shut that emulator down, or boot it with -read-only, to free it.`,
+      LOCKED_AVD_RETRY_MS,
+    );
+  }
+  const last = log.split("\n").map(line => line.trim()).filter(line => /ERROR|FATAL|PANIC/i.test(line)).slice(-3).join(" / ");
+  return new Error(`the emulator exited with ${code}${last ? `: ${last.slice(0, 400)}` : ""}; see ${logFile}`);
+}
+
+function readTail(file: string, bytes = 16_384): string {
+  try {
+    const size = statSync(file).size;
+    const length = Math.min(size, bytes);
+    const buffer = Buffer.alloc(length);
+    const fd = openSync(file, "r");
+    try { readSync(fd, buffer, 0, length, size - length); } finally { closeSync(fd); }
+    return buffer.toString("utf8");
+  } catch {
+    return "";
   }
 }
 
