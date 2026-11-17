@@ -264,6 +264,12 @@ async function startChat(rt: Runtime, live: () => LiveStatus): Promise<StaffChat
       repoFor: (owner, repo) => new Repo(rt.env.home, owner, repo, rt.env.githubToken, undefined, path.join(chatDir, "checkouts")),
       setPaused: paused => paused ? writeFileSync(pausedFile(rt.env), new Date().toISOString()) : rmSync(pausedFile(rt.env), { force: true }),
       card: id => rt.notifier.card({ id }),
+      asc: async (args, { readOnly }) => {
+        const result = await run("asc", args, {
+          cwd: chatDir, env: workerEnv(readOnly ? { ASC_READ_ONLY: "1" } : {}), timeoutMs: (readOnly ? 3 : 15) * 60_000, maxBytes: 400_000,
+        });
+        return { ok: result.code === 0 && !result.timedOut, output: `${result.stdout}\n${result.stderr}`.trim() };
+      },
     },
   });
   void chat.run();

@@ -115,6 +115,18 @@ Attach screenshots or logs and it reads them.
   | "merge PR #40" | merge | squash-merges exactly the commit that was proposed, only if CI isn't failing or pending; release steps follow on the next pass |
   | "ship #12" | ship | adds `isobot:ship` to a job waiting to ship (App Store / Google Play step) |
   | "stop #12" / "pause" / "resume" | stop / pause / resume | the stop label, or pauses / resumes the whole runner |
+  | "submit 3.0.1 for review", "reply to that review", "release it" | asc | runs the exact `asc …` command shown in the proposal |
+
+- **App Store Connect:** it reads App Store Connect with the runner's `asc` CLI (review and submission
+  state, builds, TestFlight, customer reviews, metadata, sales and analytics) with `ASC_READ_ONLY=1`,
+  so asc itself refuses any change. Changes are `asc` proposals: the confirmation shows the literal
+  command, and only commands for versions, localizations, metadata, builds, build localizations,
+  TestFlight, review, customer reviews, submit, release, release notes, in-app events and Xcode Cloud
+  are allowed. Users, keys, signing, certificates, pricing and raw API calls are never allowed.
+  Arguments starting with `@` (asc's `@file:` / `@env:` expansion) and flags that take files, paths or
+  keys or switch profiles are refused, so text planted in an issue can't copy a local file or secret
+  into App Store metadata. Builders and checks can't read `~/.asc` (asc's config); release and ship
+  steps, which run unsandboxed, still can.
 
 - **Daily check-in:** at `chat.checkInHour` (local time; 9 by default, `null` for none) the
   channel gets a summary of what needs you: PRs to review, jobs ready to ship, failures this week,

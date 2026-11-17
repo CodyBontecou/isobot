@@ -5,7 +5,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { split, StaffChat, stripMention, type ChatModel, type ChatModelInput } from "./chat.js";
 import { ChatToolServer } from "./chatMcp.js";
-import { formatCheckIn, insideChatDir, prepareAction, redact, ToolError, type ChatToolDeps, type LiveStatus, type PullDetails } from "./chatTools.js";
+import { ascArgs, formatCheckIn, insideChatDir, prepareAction, redact, ToolError, type ChatToolDeps, type LiveStatus, type PullDetails } from "./chatTools.js";
 import { configuredRepos, loadConfig } from "./config.js";
 import type { DiscordApi, DiscordMessage, Upload } from "./discordApi.js";
 import type { Repo } from "./git.js";
@@ -146,6 +146,8 @@ function scriptedModel(script: (input: ChatModelInput, tool: (name: string, args
   return { model, calls };
 }
 
+const ascCalls: { args: string[]; readOnly: boolean }[] = [];
+
 async function setup(script: Parameters<typeof scriptedModel>[0], options: { checkInHour?: number; now?: () => Date } = {}) {
   const discord = new FakeDiscord();
   const github = new ChatGitHub();
@@ -156,6 +158,7 @@ async function setup(script: Parameters<typeof scriptedModel>[0], options: { che
   const tools: ChatToolDeps = {
     config, store, github, home: chatDir, chatDir, live: () => ({ ...live, manuallyPaused: paused }),
     repoFor: () => { throw new Error("no git in tests"); }, setPaused: p => { paused = p; }, card: () => null,
+    asc: async (args, { readOnly }) => { ascCalls.push({ args, readOnly }); return { ok: true, output: readOnly ? '{"summary":{"nextAction":"Wait for App Store review outcome."}}' : "submitted" }; },
   };
   const server = new ChatToolServer();
   await server.start();
@@ -427,6 +430,42 @@ test("the tool server answers only live turns", async () => {
     close();
     assert.equal((await call(headers.Authorization)).status, 404, "a finished turn's token stops working");
   } finally { server.stop(); }
+});
+
+test("App Store Connect: reads run read-only; changes run only after 👍, exactly as shown", async () => {
+  ascCalls.length = 0;
+  const t = await setup(async (_input, tool) => {
+    const read = await tool("asc", { args: ["status", "--app", "6758960270", "--output", "json"] });
+    assert.match(read.text, /Wait for App Store review outcome/);
+    const sneaky = await tool("asc", { args: ["users", "list"] });
+    assert.ok(sneaky.isError);
+    await tool("propose", { action: "asc", args: ["submit", "create", "--app", "6758960270", "--version", "3.0.1", "--confirm"] });
+    return "It's waiting for review. I proposed submitting 3.0.1.";
+  });
+  try {
+    const ask = t.discord.say(CHANNEL, ME, `<@${BOT}> where's the gitsync review? submit 3.0.1 if needed`);
+    await t.step();
+    assert.deepEqual(ascCalls, [{ args: ["status", "--app", "6758960270", "--output", "json"], readOnly: true }]);
+    const proposal = t.discord.channels.get(ask.id)!.filter(m => m.author.id === BOT).at(-1)!;
+    assert.match(proposal.content, /Change App Store Connect[\s\S]*asc submit create --app 6758960270 --version 3.0.1 --confirm/);
+    await t.discord.react(ask.id, proposal.id, "👍", ME);
+    await t.step();
+    assert.deepEqual(ascCalls[1], { args: ["submit", "create", "--app", "6758960270", "--version", "3.0.1", "--confirm"], readOnly: false });
+    assert.match(t.discord.edits.at(-1)!.content, /✅ Done[\s\S]*submitted/);
+  } finally { t.done(); }
+});
+
+test("asc arguments can't read local files or secrets, switch credentials, or reach commands outside the lists", () => {
+  assert.deepEqual(ascArgs(["reviews", "list", "--app", "1"], "read"), ["reviews", "list", "--app", "1"]);
+  assert.throws(() => ascArgs(["review", "details-update", "--notes", "@file:/Users/x/Library/Application Support/isobot/runner.env"], "write"), /can't start with @/);
+  assert.throws(() => ascArgs(["versions", "update", "--whats-new", "@env:ISOBOT_GITHUB_TOKEN"], "write"), /can't start with @/);
+  assert.throws(() => ascArgs(["status", "--profile", "other"], "read"), /--profile isn't allowed/);
+  assert.throws(() => ascArgs(["builds", "upload", "--ipa-path", "/tmp/x.ipa"], "write"), /--ipa-path isn't allowed/);
+  assert.throws(() => ascArgs(["users", "invite"], "write"), /isn't allowed as a change/);
+  assert.throws(() => ascArgs(["certificates", "revoke"], "write"), ToolError);
+  assert.throws(() => ascArgs(["api", "/v1/apps"], "read"), ToolError);
+  assert.throws(() => ascArgs(["release", "run"], "read"), /isn't allowed/, "release workflows are changes, not reads");
+  assert.deepEqual(ascArgs(["versions", "--help"], "read"), ["versions", "--help"]);
 });
 
 test("helpers: mentions, splitting, redaction, chat-directory paths", () => {
