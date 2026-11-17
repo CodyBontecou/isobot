@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { ANDROID_PORTS, emulatorArgs, emulatorExitError, emulatorSerials, freePort, LocalDevices, LOCKED_AVD_RETRY_MS, simulatorName, staleSimulators, type Exec } from "./devices.js";
+import { ANDROID_PORTS, emulatorArgs, emulatorExitError, emulatorSerials, freePort, LocalDevices, LOCKED_AVD_RETRY_MS, LOW_DISK_RETRY_MS, simulatorName, staleSimulators, type Exec } from "./devices.js";
 import { TransientError } from "./errors.js";
 import type { RunResult } from "./proc.js";
 
@@ -128,6 +128,15 @@ test("an AVD held by someone else's writable emulator is waited out, not blamed 
     assert.match(error.message, /isobot-api35 is in use by an emulator isobot didn't start/);
     return true;
   });
+});
+
+test("an emulator out of disk space waits and retries instead of failing the job", () => {
+  // What the real emulator printed for vox.md#97 when the Mac's disk was full.
+  const log = "INFO         |   Checking: hasSufficientDiskSpace\nINFO         |      Error: Your device does not have enough disk space to run avd: `isobot-job-o-r-1-5600`\nFATAL        | Your device does not have enough disk space to run avd: `isobot-job-o-r-1-5600`.\n";
+  const error = emulatorExitError("isobot-api35", 1, log, "/l.log");
+  assert.ok(error instanceof TransientError);
+  assert.equal(error.retryAfterMs, LOW_DISK_RETRY_MS);
+  assert.match(error.message, /out of disk space/);
 });
 
 test("other emulator exits name the error from its log", () => {
