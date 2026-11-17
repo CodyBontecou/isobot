@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cleanNotes, fallbackNotes, launchMessage, mediaRefs, summaryText } from "./launch.js";
+import { cleanNotes, fallbackNotes, LAUNCH_MAX_CHARS, launchMessage, mediaRefs, summaryText } from "./launch.js";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
@@ -27,6 +27,17 @@ test("the launch post groups changes by kind, or shows What's New when there are
   ], whatsNew: "" }, url);
   assert.equal(grouped, "# 🎉 Sync.md 1.2.3 is out\n\nHi\n\n✨ **New**\n• A\n\n🐛 **Fixed**\n• B\n\n💅 **Improved**\n• C\n\n📲 Update on the App Store: <https://apps.apple.com/app/id1>");
   assert.match(launchMessage("X", "1", { headline: "", items: [], whatsNew: "Bug fixes." }, url), /is out\n\nBug fixes\.\n\n📲/);
+});
+
+test("a long launch post leaves out its last items, never the App Store link", () => {
+  const url = "https://apps.apple.com/app/id1";
+  const items = Array.from({ length: 20 }, (_, i) => ({ kind: "new" as const, text: `${i} ${"x".repeat(290)}` }));
+  const post = launchMessage("App", "2.0", { headline: "h".repeat(200), items, whatsNew: "" }, url);
+  assert.ok(post.length <= LAUNCH_MAX_CHARS, `${post.length} characters`);
+  assert.match(post, /…and \d+ more\n\n📲 Update on the App Store: <https:\/\/apps\.apple\.com\/app\/id1>$/);
+  const plain = launchMessage("App", "2.0", { headline: "", items: [], whatsNew: "w".repeat(4000) }, url);
+  assert.ok(plain.length <= LAUNCH_MAX_CHARS);
+  assert.match(plain, /w…\n\n📲 Update on the App Store/);
 });
 
 test("captures come only from the repo's own media commits, images first", () => {

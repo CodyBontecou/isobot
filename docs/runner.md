@@ -318,12 +318,13 @@ Add `launch` to a train to tell users when a version is out:
 Once the App Store shows the submitted version as `READY_FOR_DISTRIBUTION` (the runner checks every
 15 minutes), the bot posts the notes to that channel, with an App Store link and one capture from
 each change: the builder's screenshot, or a recording when there's no screenshot. Captures over
-Discord's 10 MB limit are skipped. The staff channel gets a note that the post went out. A version
+Discord's 10 MB limit are skipped, and a post too long for one Discord message leaves out its last
+items (never the App Store link). The staff channel gets a note that the post went out. A version
 that never goes live, or that a later version replaces, gets no post. `name` defaults to the
 scheme and `storeUrl` to `https://apps.apple.com/app/id<appId>`. Launch posts need the Discord bot;
 a webhook alone can't post to another channel.
 
-For GitSync.md, iso.me and Vox.md, the train posts in each app's `#updates`, and
+For GitSync.md, Whereday (the iso.me channels) and Vox.md, the train posts in each app's `#updates`, and
 `asc-webhook-worker` (which announces every other App Store release from Apple's webhooks) skips
 their iOS releases via `skipPlatforms`. An iOS version of those apps released outside the train
 gets no post; Vox.md's Mac releases are still the worker's.

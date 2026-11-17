@@ -66,15 +66,29 @@ export function cleanNotes(value: unknown): ReleaseNotes {
   };
 }
 
-/** The Discord launch post. */
+/** Discord truncates longer messages (notify.ts message()), which would cut off the App Store link. */
+export const LAUNCH_MAX_CHARS = 1900;
+
+/** The Discord launch post, kept under LAUNCH_MAX_CHARS by leaving out the last items rather than the link. */
 export function launchMessage(app: string, version: string, notes: ReleaseNotes, storeUrl: string): string {
-  const sections = (Object.keys(KINDS) as ChangeKind[])
-    .map(kind => ({ kind, lines: notes.items.filter(item => item.kind === kind).map(item => `• ${item.text}`) }))
-    .filter(section => section.lines.length)
-    .map(section => `${KINDS[section.kind]}\n${section.lines.join("\n")}`);
-  const body = sections.length ? sections.join("\n\n") : notes.whatsNew;
-  return [`# 🎉 ${app} ${version} is out`, notes.headline, body, `📲 Update on the App Store: <${storeUrl}>`]
-    .filter(Boolean).join("\n\n");
+  const title = `# 🎉 ${app} ${version} is out`;
+  const link = `📲 Update on the App Store: <${storeUrl}>`;
+  const join = (parts: string[]) => parts.filter(Boolean).join("\n\n");
+  const render = (items: ReleaseNotes["items"], more: number) => {
+    const sections = (Object.keys(KINDS) as ChangeKind[]).flatMap(kind => {
+      const lines = items.filter(item => item.kind === kind).map(item => `• ${item.text}`);
+      return lines.length ? [`${KINDS[kind]}\n${lines.join("\n")}`] : [];
+    });
+    return join([title, notes.headline, sections.length ? sections.join("\n\n") : notes.whatsNew, more ? `…and ${more} more` : "", link]);
+  };
+  for (let n = notes.items.length; n > 0; n--) {
+    const message = render(notes.items.slice(0, n), notes.items.length - n);
+    if (message.length <= LAUNCH_MAX_CHARS) return message;
+  }
+  // No item fits (or there are none): What's New, shortened to leave room for the link.
+  const room = LAUNCH_MAX_CHARS - join([title, notes.headline, "", link]).length - 3;
+  const whatsNew = notes.whatsNew.length > room ? `${notes.whatsNew.slice(0, Math.max(0, room - 1)).trimEnd()}…` : notes.whatsNew;
+  return join([title, notes.headline, whatsNew, link]);
 }
 
 export interface MediaRef {
