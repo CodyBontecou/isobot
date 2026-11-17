@@ -7,12 +7,37 @@ const CHECK_INTERVAL_MS = 30_000;
 export class DiscordBridge extends DurableObject<Env> {
   private starting?: Promise<void>;
 
+  /** What the container is started with; a change (a new secret value) restarts it. */
+  private containerEnv(): Record<string, string> {
+    return {
+      NODE_ENV: "production",
+      PORT: "8080",
+      DISCORD_HISTORY_GUILD_ID: this.env.DISCORD_HISTORY_GUILD_ID,
+      DISCORD_BOT_TOKEN: this.env.DISCORD_BOT_TOKEN,
+      GITHUB_TOKEN: this.env.GITHUB_TOKEN,
+      GITHUB_WEBHOOK_SECRET: this.env.GITHUB_WEBHOOK_SECRET,
+      ISOBOT_API_TOKEN: this.env.ISOBOT_API_TOKEN,
+      ISOBOT_AGENT_URL: this.env.ISOBOT_AGENT_URL,
+      ISOBOT_ALLOWED_USERS: this.env.ISOBOT_ALLOWED_USERS,
+      ISOBOT_RUNNER_CHANNEL_ID: this.env.ISOBOT_RUNNER_CHANNEL_ID,
+      ISOBOT_CHAT_CHANNEL_ID: this.env.ISOBOT_CHAT_CHANNEL_ID,
+      SUPPORT_BRIDGE_TOKEN: this.env.SUPPORT_BRIDGE_TOKEN,
+      SUPPORT_DISCORD_CHANNEL_ID: this.env.SUPPORT_DISCORD_CHANNEL_ID,
+      SUPPORT_DISCORD_STAFF_IDS: this.env.SUPPORT_DISCORD_STAFF_IDS,
+    };
+  }
+
   private async ensureReady(): Promise<void> {
     const container = this.ctx.container;
     if (!container) throw new Error("Discord Container binding is missing");
     const current = await container.inspect();
-    // Named-image updates do not replace running instances automatically.
-    if (current?.image && current.image !== container.images.base) {
+    const env = this.containerEnv();
+    const fingerprint = await digest(JSON.stringify(env));
+    // Named-image updates do not replace running instances automatically, and neither do new
+    // secret or variable values: the container only reads its environment when it starts.
+    const stale = (current?.image && current.image !== container.images.base) || await this.ctx.storage.get<string>("envFingerprint") !== fingerprint;
+    if (stale && container.running) {
+      console.log(JSON.stringify({ event: "bridge_restarting", reason: current?.image !== container.images.base ? "image" : "environment" }));
       await container.destroy();
     }
     if (!container.running) {
@@ -20,25 +45,11 @@ export class DiscordBridge extends DurableObject<Env> {
         image: container.images.base,
         instance: "lite",
         enableInternet: true,
-        env: {
-          NODE_ENV: "production",
-          PORT: "8080",
-          DISCORD_HISTORY_GUILD_ID: this.env.DISCORD_HISTORY_GUILD_ID,
-          DISCORD_BOT_TOKEN: this.env.DISCORD_BOT_TOKEN,
-          GITHUB_TOKEN: this.env.GITHUB_TOKEN,
-          GITHUB_WEBHOOK_SECRET: this.env.GITHUB_WEBHOOK_SECRET,
-          ISOBOT_API_TOKEN: this.env.ISOBOT_API_TOKEN,
-          ISOBOT_AGENT_URL: this.env.ISOBOT_AGENT_URL,
-          ISOBOT_ALLOWED_USERS: this.env.ISOBOT_ALLOWED_USERS,
-          ISOBOT_RUNNER_CHANNEL_ID: this.env.ISOBOT_RUNNER_CHANNEL_ID,
-          ISOBOT_CHAT_CHANNEL_ID: this.env.ISOBOT_CHAT_CHANNEL_ID,
-          SUPPORT_BRIDGE_TOKEN: this.env.SUPPORT_BRIDGE_TOKEN,
-          SUPPORT_DISCORD_CHANNEL_ID: this.env.SUPPORT_DISCORD_CHANNEL_ID,
-          SUPPORT_DISCORD_STAFF_IDS: this.env.SUPPORT_DISCORD_STAFF_IDS,
-        },
+        env,
       });
       console.log(JSON.stringify({ event: "bridge_starting", image: container.images.base }));
     }
+    await this.ctx.storage.put("envFingerprint", fingerprint);
     await container.setInactivityTimeout(10 * 60_000);
     const port = container.getTcpPort(8080);
     for (let attempt = 0; attempt < 60; attempt++) {
@@ -85,6 +96,11 @@ export class DiscordBridge extends DurableObject<Env> {
     await this.ctx.storage.put("paused", false);
     return this.fetch(new Request("http://container/health"));
   }
+}
+
+async function digest(text: string): Promise<string> {
+  const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
+  return [...bytes].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
 async function authorized(request: Request, env: Env): Promise<boolean> {
