@@ -300,6 +300,28 @@ A repo with `train` in its policy ships merged isobot work to the App Store:
    for the next train.
 
 A repo's first train waits for you to add `isobot:ready` to its ship issue. Later trains don't.
+
+### Release notes and launch posts
+
+When a train is announced, the model rewrites the shipped changes (issue titles and PR descriptions)
+into notes for users: a headline, what's ✨ new, 🐛 fixed and 💅 improved, and the App Store's
+What's New. Internal-only changes are left out, and links and mentions are stripped. The ship issue
+shows both during the hold, so close it or add `isobot:stop` if the wording is wrong. If the model
+is unavailable, What's New falls back to the bullet list of issue titles.
+
+Add `launch` to a train to tell users when a version is out:
+
+```json
+"train": { "...": "...", "launch": { "channelId": "<the app's Discord channel id>", "name": "Voxboard" } }
+```
+
+Once the App Store shows the submitted version as `READY_FOR_DISTRIBUTION` (the runner checks every
+15 minutes), the bot posts the notes to that channel, with an App Store link and one capture from
+each change: the builder's screenshot, or a recording when there's no screenshot. Captures over
+Discord's 10 MB limit are skipped. The staff channel gets a note that the post went out. A version
+that never goes live, or that a later version replaces, gets no post. `name` defaults to the
+scheme and `storeUrl` to `https://apps.apple.com/app/id<appId>`. Launch posts need the Discord bot;
+a webhook alone can't post to another channel.
 The runner uses the App Store Connect key `asc` already has in the keychain, and signs with this
 Mac's keychain, so it must run as a user who can archive and sign the app in Xcode.
 

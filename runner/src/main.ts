@@ -103,6 +103,9 @@ function runtime(): Runtime {
   const train = new ReleaseTrain({
     config, store, github, notifier, repo: repoFor,
     stopping: () => shuttingDown,
+    notes: input => builder.releaseNotes(input),
+    pullBody: async (owner, repo, number) => (await github.pullDetails(owner, repo, number)).body,
+    fileAt: (owner, repo, ref, file) => github.fileAt(owner, repo, ref, file),
     run: async (cwd, command, timeoutMs) => {
       const result = await sh(command, { cwd, env: workerEnv(), timeoutMs });
       return { ok: result.code === 0 && !result.timedOut, output: `${result.stdout}\n${result.stderr}` };

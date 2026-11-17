@@ -20,6 +20,12 @@ export interface NotifierOptions {
   fetcher?: typeof fetch;
 }
 
+export interface UploadFile {
+  name: string;
+  data: Uint8Array;
+  description: string;
+}
+
 export type Phase =
   | "queued" | "devices" | "implementing" | "revising" | "checking" | "fixing" | "reviewing" | "addressing"
   | "pushing" | "ci" | "waiting" | "merged" | "releasing" | "released" | "releaseFailed"
@@ -159,24 +165,42 @@ export class Notifier {
     const fits = files.filter(f => f.bytes <= DISCORD_MAX_BYTES).slice(0, 10);
     const tooBig = files.filter(f => f.bytes > DISCORD_MAX_BYTES).map(f => `${f.caption} (${mb(f.bytes)}, too big for Discord; it's on the PR)`);
     const content = [text, ...fits.map((f, i) => `${i + 1}. ${f.caption}`), ...tooBig.map(line => `- ${line}`)].join("\n");
-    const form = new FormData();
-    form.append("payload_json", JSON.stringify({
-      ...message(content),
-      attachments: fits.map((f, i) => ({ id: i, filename: f.name, description: f.caption.slice(0, 1024) })),
-    }));
-    fits.forEach((f, i) => form.append(`files[${i}]`, new Blob([readFileSync(f.file)]), f.name));
     try {
-      const response = await this.fetcher(`${API}/channels/${card.threadId}/messages`, {
-        method: "POST",
-        headers: { Authorization: `Bot ${this.options.bot.token}`, "User-Agent": "isobot-runner (https://github.com, 0.1)" },
-        body: form,
-        signal: AbortSignal.timeout(120_000),
-      });
-      if (!response.ok) throw new Error(`Discord media upload returned HTTP ${response.status}: ${(await response.text().catch(() => "")).slice(0, 200)}`);
-      await response.body?.cancel();
+      await this.upload(card.threadId, content, fits.map(f => ({ name: f.name, data: readFileSync(f.file), description: f.caption })));
     } catch (error) {
       warn(error);
     }
+  }
+
+  /** True when the runner can post to channels other than its own (a bot, not just a webhook). */
+  get canPost(): boolean {
+    return Boolean(this.options.bot);
+  }
+
+  /**
+   * Posts to any channel the bot can write to (e.g. an app's public release channel), with up to
+   * ten attachments. Throws, so the caller can retry later; without a bot it does nothing.
+   */
+  async post(channelId: string, content: string, files: UploadFile[] = []): Promise<void> {
+    if (!this.options.bot) return;
+    await this.upload(channelId, content, files.slice(0, 10));
+  }
+
+  private async upload(channelId: string, content: string, files: UploadFile[]): Promise<void> {
+    const form = new FormData();
+    form.append("payload_json", JSON.stringify({
+      ...message(content),
+      attachments: files.map((f, i) => ({ id: i, filename: f.name, description: f.description.slice(0, 1024) })),
+    }));
+    files.forEach((f, i) => form.append(`files[${i}]`, new Blob([f.data]), f.name));
+    const response = await this.fetcher(`${API}/channels/${channelId}/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bot ${this.options.bot!.token}`, "User-Agent": "isobot-runner (https://github.com, 0.1)" },
+      body: form,
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!response.ok) throw new Error(`Discord upload returned HTTP ${response.status}: ${(await response.text().catch(() => "")).slice(0, 200)}`);
+    await response.body?.cancel();
   }
 
   /** Forgets a job's card, so the next update starts a new card and thread (a fresh approval). */
