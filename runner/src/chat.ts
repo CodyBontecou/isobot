@@ -69,6 +69,8 @@ interface ChatState {
   /** The channel channelCursor belongs to; a different configured channel starts from now. */
   channelId: string | null;
   channelCursor: string | null;
+  /** Last message read in every other channel and thread of the server, for mentions there. */
+  seen: Record<string, string>;
   threads: Record<string, Conversation>;
   pending: Pending[];
   checkInDate: string | null;
@@ -77,6 +79,8 @@ interface ChatState {
 export interface StaffChatOptions {
   discord: DiscordApi;
   channelId: string;
+  /** The server: a mention anywhere in it starts a conversation in channelId. */
+  guildId?: string;
   botId: string;
   allowed: Set<string>;
   store: Pick<Store, "cursor" | "setCursor">;
@@ -133,7 +137,7 @@ export class StaffChat {
   async poll(): Promise<void> {
     this.tick++;
     // Each step on its own, so one failing (a Discord hiccup, a lost permission) doesn't stall the others.
-    for (const step of [() => this.pollChannel(), () => this.pollThreads(), () => this.pollPending(), () => this.checkIn()]) {
+    for (const step of [() => this.pollChannel(), () => this.pollThreads(), () => this.pollGuild(), () => this.pollPending(), () => this.checkIn()]) {
       try {
         await step();
       } catch (error) {
@@ -197,6 +201,61 @@ export class StaffChat {
     }
   }
 
+  /**
+   * Mentions anywhere else in the server. The answer never goes there: other channels are public,
+   * shared with contributors, or customer support. isobot reacts 💬 and opens a thread in the staff
+   * channel that pings the owner and links back, so the conversation stays among staff.
+   */
+  private async pollGuild(): Promise<void> {
+    const guild = this.o.guildId;
+    if (!guild) return;
+    type Place = { id: string; type: number; name?: string; parent_id?: string | null; last_message_id?: string | null };
+    const [channels, active] = await Promise.all([
+      this.o.discord.request<Place[]>("GET", `/guilds/${guild}/channels`),
+      this.o.discord.request<{ threads: Place[] }>("GET", `/guilds/${guild}/threads/active`),
+    ]);
+    const places = [...channels, ...active.threads].filter(c =>
+      // Text, announcement, voice-chat and thread channels; the staff channel and its threads are read elsewhere.
+      [0, 2, 5, 10, 11, 12].includes(c.type) && c.last_message_id && c.id !== this.o.channelId && c.parent_id !== this.o.channelId);
+    const names = new Map(channels.map(c => [c.id, c.name ?? c.id]));
+    let changed = false;
+    for (const place of places) {
+      const seen = this.state.seen[place.id];
+      if (!seen) {
+        // First sight of a channel: start from now, not its history.
+        this.state.seen[place.id] = place.last_message_id!;
+        changed = true;
+        continue;
+      }
+      if (BigInt(place.last_message_id!) <= BigInt(seen)) continue;
+      const messages = await this.o.discord.messagesAfter(place.id, seen).catch(() => [] as DiscordMessage[]);
+      this.state.seen[place.id] = messages.at(-1)?.id ?? place.last_message_id!;
+      changed = true;
+      for (const m of messages) {
+        if (!this.allowed(m) || ![0, 19].includes(m.type ?? 0) || !m.mentions?.some(u => u.id === this.o.botId)) continue;
+        await this.startElsewhere(m, place.name ?? names.get(place.id) ?? "a channel", guild);
+      }
+    }
+    const ids = Object.keys(this.state.seen);
+    // Threads come and go; keep the map bounded.
+    if (ids.length > 2000) for (const id of ids.sort((a, b) => (BigInt(this.state.seen[a]) < BigInt(this.state.seen[b]) ? -1 : 1)).slice(0, ids.length - 1500)) delete this.state.seen[id];
+    if (changed) this.save();
+  }
+
+  private async startElsewhere(m: DiscordMessage, where: string, guild: string): Promise<void> {
+    await this.o.discord.react(m.channel_id, m.id, "💬").catch(() => undefined);
+    const link = `https://discord.com/channels/${guild}/${m.channel_id}/${m.id}`;
+    const starter = await this.o.discord.request<DiscordMessage>("POST", `/channels/${this.o.channelId}/messages`, {
+      content: `💬 <@${m.author.id}> asked in <#${m.channel_id}>: ${link}`, allowed_mentions: { users: [m.author.id] },
+    });
+    const thread = await this.o.discord.request<{ id: string }>("POST", `/channels/${this.o.channelId}/messages/${starter.id}/threads`, {
+      name: threadTitle(stripMention(m.content, this.o.botId)), auto_archive_duration: 1440,
+    });
+    this.state.threads[thread.id] = { threadId: thread.id, sessionId: null, lastMessageId: starter.id, updatedAt: Date.now(), events: [] };
+    this.enqueue(thread.id, { ...m, origin: `#${where}` });
+    this.save();
+  }
+
   private enqueue(threadId: string, m: DiscordMessage): void {
     this.queued.set(threadId, [...(this.queued.get(threadId) ?? []), m]);
   }
@@ -258,7 +317,7 @@ export class StaffChat {
     if (conv.events.length) parts.push(`Since your last reply:\n${conv.events.map(e => `- ${e}`).join("\n")}`);
     for (const m of messages) {
       const who = m.author.global_name || m.author.username;
-      parts.push(`${who}: ${stripMention(m.content, this.o.botId) || "(no text)"}`);
+      parts.push(`${who}${m.origin ? ` (in ${m.origin}; you answer in a private staff thread, so speak freely)` : ""}: ${stripMention(m.content, this.o.botId) || "(no text)"}`);
       const ref = m.referenced_message;
       if (ref) {
         const author = ref.author.bot ? "a bot" : ref.author.global_name || ref.author.username;
@@ -365,7 +424,7 @@ export class StaffChat {
 }
 
 function loadState(raw: string | null): ChatState {
-  const empty: ChatState = { channelId: null, channelCursor: null, threads: {}, pending: [], checkInDate: null };
+  const empty: ChatState = { channelId: null, channelCursor: null, seen: {}, threads: {}, pending: [], checkInDate: null };
   if (!raw) return empty;
   try { return { ...empty, ...JSON.parse(raw) as Partial<ChatState> }; } catch { return empty; }
 }

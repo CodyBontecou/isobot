@@ -244,7 +244,11 @@ async function loop(rt: Runtime): Promise<void> {
 async function startChat(rt: Runtime, live: () => LiveStatus): Promise<StaffChat | null> {
   if (!rt.env.discordBot || rt.config.chat?.enabled === false) return null;
   const discord = new DiscordApi(rt.env.discordBot.token);
-  const [me, allowed] = await Promise.all([discord.request<{ id: string }>("GET", "/users/@me"), chatAllowlist(discord)]);
+  const channelId = rt.env.chatChannelId ?? rt.env.discordBot.channelId;
+  const [me, allowed, channel] = await Promise.all([
+    discord.request<{ id: string }>("GET", "/users/@me"), chatAllowlist(discord),
+    discord.request<{ guild_id?: string }>("GET", `/channels/${channelId}`),
+  ]);
   if (allowed.size === 0) throw new Error("nobody is allowed to chat (set ISOBOT_CHAT_USERS)");
   const chatDir = path.join(rt.env.home, "chat");
   mkdirSync(chatDir, { recursive: true });
@@ -252,7 +256,7 @@ async function startChat(rt: Runtime, live: () => LiveStatus): Promise<StaffChat
   await server.start();
   const config = rt.config.chat ?? {};
   const chat = new StaffChat({
-    discord, channelId: rt.env.chatChannelId ?? rt.env.discordBot.channelId, botId: me.id, allowed, store: rt.store, server, config,
+    discord, channelId, guildId: channel.guild_id, botId: me.id, allowed, store: rt.store, server, config,
     model: claudeChatModel({ bin: rt.env.claudeBin, config, chatDir, settingsJson: JSON.stringify(builderSettings({}, { secrets: rt.secrets, noWrite: [] })) }),
     tools: {
       config: rt.config, store: rt.store, github: rt.github, home: rt.env.home, chatDir, live,
@@ -263,7 +267,7 @@ async function startChat(rt: Runtime, live: () => LiveStatus): Promise<StaffChat
     },
   });
   void chat.run();
-  console.log(`[chat] listening in the staff channel for ${allowed.size} user(s)`);
+  console.log(`[chat] listening for ${allowed.size} user(s): answers in channel ${channelId}, mentions from anywhere in the server`);
   return chat;
 }
 

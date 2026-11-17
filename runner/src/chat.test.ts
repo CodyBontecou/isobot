@@ -20,6 +20,8 @@ const BOT = "900000000000000001";
 const ME = "100000000000000001";
 const STRANGER = "100000000000000002";
 const CHANNEL = "500000000000000001";
+const GUILD = "400000000000000001";
+const PUBLIC = "500000000000000009";
 
 class ChatGitHub extends FakeGitHub {
   details = new Map<number, PullDetails>();
@@ -46,6 +48,10 @@ class FakeDiscord {
   reactions = new Map<string, Map<string, string[]>>();
   posted: { channel: string; content: string; files?: string[] }[] = [];
   edits: { id: string; content: string }[] = [];
+  /** Thread id → parent channel. */
+  parents = new Map<string, string>();
+  /** Bodies of every POST, for checking what was pinged. */
+  bodies: Record<string, unknown>[] = [];
   private next = 700000000000000000n;
 
   id(): string { return String(this.next++); }
@@ -67,12 +73,20 @@ class FakeDiscord {
 
   async request<T>(method: string, route: string, body?: Record<string, unknown>): Promise<T> {
     let match: RegExpExecArray | null;
+    if (method === "GET" && route === `/guilds/${GUILD}/channels`) {
+      return [...this.channels.keys()].filter(id => !this.parents.has(id)).map(id => ({ id, type: 0, name: id === PUBLIC ? "general" : `c${id}`, last_message_id: this.channels.get(id)!.at(-1)?.id ?? null })) as T;
+    }
+    if (method === "GET" && route === `/guilds/${GUILD}/threads/active`) {
+      return { threads: [...this.parents].map(([id, parent]) => ({ id, type: 11, parent_id: parent, last_message_id: this.channels.get(id)!.at(-1)?.id ?? null })) } as T;
+    }
     if (method === "POST" && (match = /^\/channels\/(\d+)\/messages\/(\d+)\/threads$/.exec(route))) {
       this.channels.set(match[2], []);
+      this.parents.set(match[2], match[1]);
       return { id: match[2] } as T;
     }
     if (method === "POST" && (match = /^\/channels\/(\d+)\/messages$/.exec(route))) {
       const m = this.say(match[1], BOT, String(body?.content ?? ""));
+      this.bodies.push(body ?? {});
       this.posted.push({ channel: match[1], content: m.content });
       return m as T;
     }
@@ -147,8 +161,9 @@ async function setup(script: Parameters<typeof scriptedModel>[0], options: { che
   await server.start();
   const { model, calls } = scriptedModel(script);
   discord.say(CHANNEL, ME, "old history, before isobot listened <@" + BOT + ">");
+  discord.say(PUBLIC, ME, "old history in a public channel <@" + BOT + ">");
   const chat = new StaffChat({
-    discord: discord as unknown as DiscordApi, channelId: CHANNEL, botId: BOT, allowed: new Set([ME]), store, tools, model,
+    discord: discord as unknown as DiscordApi, channelId: CHANNEL, guildId: GUILD, botId: BOT, allowed: new Set([ME]), store, tools, model,
     config: { checkInHour: options.checkInHour ?? null }, server, now: options.now,
   });
   await chat.poll(); // first poll: starts from now
@@ -196,6 +211,32 @@ test("moving the chat to another channel starts there from now, not from its his
     await moved.poll();
     await moved.idle();
     assert.deepEqual(t.discord.inChannel(ask.id), ["moved"]);
+  } finally { t.done(); }
+});
+
+test("a mention anywhere in the server is answered in a staff thread, never where it was asked", async () => {
+  const t = await setup(async () => "Here's what I found.");
+  try {
+    await t.step();
+    assert.equal(t.calls.length, 0, "history elsewhere is ignored too");
+    const question = t.discord.say(PUBLIC, STRANGER, "the sync button does nothing on iPad");
+    t.discord.say(PUBLIC, STRANGER, `<@${BOT}> help me`);
+    const ask = t.discord.say(PUBLIC, ME, `<@${BOT}> is this a known bug?`, { type: 19, referenced_message: question });
+    await t.step();
+    assert.equal(t.calls.length, 1, "only the owner's mention starts a conversation");
+    assert.match(t.calls[0].prompt, /owner \(in #general; .*\): is this a known bug\?/);
+    assert.match(t.calls[0].prompt, /<quoted>\nthe sync button does nothing on iPad/);
+    assert.deepEqual(t.discord.reactions.get(ask.id)?.get("💬"), [BOT]);
+    assert.deepEqual(t.discord.inChannel(PUBLIC), [], "nothing is posted in the public channel");
+    const [starter] = t.discord.inChannel(CHANNEL);
+    assert.match(starter, new RegExp(`<@${ME}> asked in <#${PUBLIC}>: https://discord.com/channels/${GUILD}/${PUBLIC}/${ask.id}`));
+    assert.deepEqual(t.discord.bodies[0].allowed_mentions, { users: [ME] }, "it pings only the owner");
+    const thread = [...t.discord.parents].find(([, parent]) => parent === CHANNEL)![0];
+    assert.deepEqual(t.discord.inChannel(thread), ["Here's what I found."]);
+
+    t.discord.say(thread, ME, "can you dig into the code?");
+    await t.step();
+    assert.equal(t.calls[1].sessionId, "session-1", "the conversation continues in the staff thread");
   } finally { t.done(); }
 });
 

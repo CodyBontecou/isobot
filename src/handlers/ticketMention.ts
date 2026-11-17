@@ -25,11 +25,9 @@ function shouldReplyDenial(userId: string): boolean {
   return true;
 }
 
-/** Whether a message is in the runner's staff chat channel (ISOBOT_CHAT_CHANNEL_ID) or a thread under it. */
-export function inChatChannel(message: Pick<Message, "channelId"> & { channel: { isThread(): boolean; parentId?: string | null } }): boolean {
-  const channel = process.env.ISOBOT_CHAT_CHANNEL_ID;
-  if (!channel) return false;
-  return message.channelId === channel || (message.channel.isThread() && message.channel.parentId === channel);
+/** Whether the runner's staff chat is on (ISOBOT_CHAT_CHANNEL_ID): it then answers allowlisted mentions everywhere. */
+export function chatAnswersMentions(): boolean {
+  return Boolean(process.env.ISOBOT_CHAT_CHANNEL_ID?.trim());
 }
 
 export function registerTicketMention(client: Client): void {
@@ -43,8 +41,9 @@ export function registerTicketMention(client: Client): void {
 
       const explicitMention = new RegExp(`<@!?${client.user.id}>`).test(message.content);
       if (!explicitMention) return;
-      // The runner's staff chat answers mentions in its own channel and threads there (runner/src/chat.ts).
-      if (inChatChannel(message)) return;
+      // With the runner's staff chat on, it answers the owner's mentions anywhere (runner/src/chat.ts) and
+      // nobody else's, so the bridge stays out of it: no tickets from mentions, no replies to others.
+      if (chatAnswersMentions()) return;
 
       if (!isAllowed(message.author.id)) {
         if (shouldReplyDenial(message.author.id)) {
