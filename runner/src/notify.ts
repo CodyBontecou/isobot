@@ -2,6 +2,9 @@ import { readFileSync } from "node:fs";
 import { DISCORD_MAX_BYTES, mb, type MediaFile } from "./media.js";
 import type { Job, Store } from "./store.js";
 
+/** Every job card's footer starts with this; the bridge and the staff chat recognize cards by it. */
+export const CARD_FOOTER = "Reply in the thread";
+
 /**
  * Posts runner activity to Discord.
  *
@@ -322,7 +325,7 @@ export function renderCard(card: Card, jobUrl?: string): { content: string; embe
         track,
         [timing, ...counts].join(" · "),
       ].join("\n\n"),
-      footer: { text: card.finishedAt ? "Reply in the thread to follow up" : "Reply in the thread to steer this build" },
+      footer: { text: card.finishedAt ? `${CARD_FOOTER} to follow up` : `${CARD_FOOTER} to steer this build` },
     }],
     components: [{ type: 1, components: buttons }],
   };

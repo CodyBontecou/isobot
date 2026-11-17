@@ -67,6 +67,13 @@ class FakeDiscord {
     return m;
   }
 
+  /** A thread someone (not isobot) opened on a message. */
+  openThread(parent: string, starter: DiscordMessage): string {
+    this.channels.set(starter.id, []);
+    this.parents.set(starter.id, parent);
+    return starter.id;
+  }
+
   inChannel(channel: string): string[] {
     return this.posted.filter(p => p.channel === channel).map(p => p.content);
   }
@@ -89,6 +96,11 @@ class FakeDiscord {
       this.bodies.push(body ?? {});
       this.posted.push({ channel: match[1], content: m.content });
       return m as T;
+    }
+    if (method === "GET" && (match = /^\/channels\/(\d+)\/messages\/(\d+)$/.exec(route))) {
+      const found = this.channels.get(match[1])?.find(m => m.id === match![2]);
+      if (!found) throw Object.assign(new Error("Unknown Message"), { status: 404 });
+      return found as T;
     }
     if (method === "PATCH" && (match = /^\/channels\/\d+\/messages\/(\d+)$/.exec(route))) {
       this.edits.push({ id: match[1], content: String(body?.content ?? "") });
@@ -240,6 +252,58 @@ test("a mention anywhere in the server is answered in a staff thread, never wher
     t.discord.say(thread, ME, "can you dig into the code?");
     await t.step();
     assert.equal(t.calls[1].sessionId, "session-1", "the conversation continues in the staff thread");
+  } finally { t.done(); }
+});
+
+test("in staff threads isobot didn't open, it joins on a mention, a reply to it, or a thread on its own post", async () => {
+  const t = await setup(async input => input.sessionId ? "Again." : "Joined.");
+  try {
+    // A thread the owner opened on isobot's triage post: talking there is talking to isobot.
+    const triage = t.discord.say(CHANNEL, BOT, "📂 **isobot triage**: 1 new item, 0 proposals.");
+    const onTriage = t.discord.openThread(CHANNEL, triage);
+    // A thread on the owner's own note: only a mention or a reply to isobot counts.
+    const note = t.discord.say(CHANNEL, ME, "notes for later");
+    const onNote = t.discord.openThread(CHANNEL, note);
+    // A job card's thread: replies there are build notes for the bridge, never chat.
+    const card = t.discord.say(CHANNEL, BOT, "", { embeds: [{ title: "#12", url: `https://github.com/${FULL}/issues/12`, footer: { text: "Reply in the thread to steer this build" } }] });
+    const onCard = t.discord.openThread(CHANNEL, card);
+    for (const thread of [onTriage, onNote, onCard]) t.discord.say(thread, ME, "before isobot looked");
+    await t.step();
+    await t.step();
+    assert.equal(t.calls.length, 0, "a thread's history from before isobot saw it is ignored");
+
+    t.discord.say(onTriage, ME, "we already have the entitlement from Apple");
+    t.discord.say(onNote, ME, "just thinking out loud");
+    t.discord.say(onCard, ME, `<@${BOT}> use the system font`);
+    const bot = t.discord.say(onCard, BOT, "a status line");
+    t.discord.say(onCard, ME, "and bigger", { type: 19, referenced_message: bot });
+    await t.step();
+    assert.equal(t.calls.length, 1, "only the triage thread starts a conversation");
+    assert.match(t.calls[0].prompt, /owner: we already have the entitlement from Apple/);
+    assert.match(t.calls[0].prompt, /<quoted>\n📂 \*\*isobot triage\*\*/, "the post it hangs off comes along");
+    assert.deepEqual(t.discord.inChannel(onTriage), ["Joined."], "the answer goes in that thread");
+    assert.deepEqual(t.discord.inChannel(onCard), [], "job-card threads are left to the bridge");
+
+    t.discord.say(onTriage, ME, "so what's left?");
+    await t.step();
+    assert.equal(t.calls[1].sessionId, "session-1", "the thread continues its session");
+
+    t.discord.say(onNote, ME, `<@${BOT}> what do you make of this?`);
+    await t.step();
+    assert.deepEqual(t.discord.inChannel(onNote), ["Joined."], "a mention joins any staff thread");
+    assert.match(t.calls[2].prompt, /<quoted>\nnotes for later/);
+  } finally { t.done(); }
+});
+
+test("a reply to isobot in the staff channel starts a conversation without a mention", async () => {
+  const t = await setup(async () => "Sure.");
+  try {
+    const checkIn = t.discord.say(CHANNEL, BOT, "Needs you: PR #40 to review.");
+    t.discord.say(CHANNEL, ME, "unrelated chatter");
+    const ask = t.discord.say(CHANNEL, ME, "what changed in it?", { type: 19, referenced_message: checkIn });
+    await t.step();
+    assert.equal(t.calls.length, 1);
+    assert.deepEqual(t.discord.inChannel(ask.id), ["Sure."]);
   } finally { t.done(); }
 });
 

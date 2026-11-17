@@ -15,7 +15,7 @@ export interface DiscordMessage {
   referenced_message?: DiscordMessage | null;
   message_reference?: { message_id?: string };
   thread?: { id: string };
-  embeds?: { title?: string; description?: string; url?: string }[];
+  embeds?: { title?: string; description?: string; url?: string; footer?: { text: string } }[];
   /** Set by the staff chat (not Discord) on a message from another channel: where it was asked. */
   origin?: string;
   type?: number;

@@ -96,7 +96,11 @@ back. Nothing is posted in public, contributor or support channels, because the 
 private context (logs, private repositories, email triage). Whatever you replied to comes along, so
 "@isobot is this a known bug?" in reply to a community message works. Keep
 talking in that thread without mentioning it; each thread is one Claude Code session that
-remembers the conversation. Reply to a job card while mentioning isobot to ask about that job.
+remembers the conversation. In the staff channel, replying to any of isobot's messages works like a
+mention (reply to a job card to ask about that job), and so does talking in a thread you opened on
+one of its posts, such as a triage summary: it answers in that thread, with the post as context. In
+any other staff-channel thread, mention it and it joins there. Job-card threads are the exception:
+replies there are notes to the build, so ask about a job by replying to its card instead.
 Attach screenshots or logs and it reads them.
 
 - **Ask anything:** status, what needs you, why a build failed or a gate refused a merge, what a
