@@ -90,7 +90,11 @@ from that channel.
 ## Staff chat
 
 Mention isobot in the staff chat channel (`ISOBOT_CHAT_CHANNEL_ID` in `runner.env`; without it,
-the job-card channel) and it answers in a thread. Keep
+the job-card channel) and it answers in a thread. Mention it anywhere else in the server and it
+reacts 💬 where you asked and answers in a new thread in the staff channel that pings you and links
+back. Nothing is posted in public, contributor or support channels, because the answers can carry
+private context (logs, private repositories, email triage). Whatever you replied to comes along, so
+"@isobot is this a known bug?" in reply to a community message works. Keep
 talking in that thread without mentioning it; each thread is one Claude Code session that
 remembers the conversation. Reply to a job card while mentioning isobot to ask about that job.
 Attach screenshots or logs and it reads them.
@@ -118,7 +122,8 @@ Attach screenshots or logs and it reads them.
 
 Who can talk to it: `ISOBOT_CHAT_USERS` (comma-separated Discord user ids), else
 `ISOBOT_ALLOWED_USERS`, else the bot application's owner. Everyone else is ignored, and only their
-👍 counts. The model runs with Read, Grep and Glob limited to `chat/` in the runner's home
+👍 counts. With the chat on, the bridge no longer turns mentions into tickets or answers anyone
+else's mentions; ask the chat to file it instead. The model runs with Read, Grep and Glob limited to `chat/` in the runner's home
 (checkouts and your uploads), plus isobot's own tools served from inside the runner on 127.0.0.1;
 it never sees the runner's tokens, your other MCP servers or a shell. Everything it reads from
 issues, reviews, email or code is treated as data, and because every action needs your 👍 on a
@@ -126,11 +131,13 @@ message that spells it out, text planted in an issue can at most suggest somethi
 
 Configure it under `chat` in the runner config: `model` (default `sonnet`), `checkInHour`,
 `maxConcurrent` (turns at once, default 2), `timeoutMinutes` (default 15), `maxTurns` (default 40),
-`enabled: false` to switch it off. The bridge must leave that channel to the runner: set its
-`ISOBOT_CHAT_CHANNEL_ID` secret to the same channel id
-(`npx --prefix bridge wrangler secret put ISOBOT_CHAT_CHANNEL_ID`). The bot needs View Channel,
+`enabled: false` to switch it off. The bridge leaves mentions to the runner when its
+`ISOBOT_CHAT_CHANNEL_ID` secret is set (to the same channel id
+`npx --prefix bridge wrangler secret put ISOBOT_CHAT_CHANNEL_ID`). The bot needs View Channel,
 Send Messages, Read Message History, Create Public Threads, Send Messages in Threads, Add
-Reactions and Attach Files there.
+Reactions and Attach Files there, and View Channel, Read Message History and Add Reactions wherever
+you want to mention it. The runner finds new messages by reading the server's channel list and active
+threads every 5 seconds, then only the channels that changed.
 
 ## When things go wrong
 
