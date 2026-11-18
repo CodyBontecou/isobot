@@ -96,7 +96,7 @@
     ]
   },
   "defaults": {
-    "autonomy": "pr",
+    "autonomy": "merge",
     "checks": [],
     "protectedPaths": [
       ".github/**",
@@ -162,6 +162,11 @@
   },
   "repos": {
     "codybontecou/time.md": {
+      "checks": [
+        "xcodebuild build -scheme time.md -destination 'platform=macOS' -configuration Debug -quiet CODE_SIGNING_ALLOWED=NO",
+        "npm ci --prefix mobile --no-audit --no-fund && npm run mobile:check",
+        "npm ci --prefix sync-worker --no-audit --no-fund && npm run sync-worker:check"
+      ],
       "notes": "macOS app distributed outside the App Store (Developer ID, Sparkle), plus mobile/ (Expo) and sync-worker/. PR CI builds and tests macOS. CI uses Xcode 16.2; the regression tests don't compile under newer Xcode's stricter concurrency checking, so don't chase those errors unless the issue is about them."
     },
     "codybontecou/health-md": {
@@ -210,7 +215,6 @@
         }
       },
       "notes": "iOS git client (Sync.md.xcodeproj, scheme Sync.md) plus an Android app under android/. CURRENT_PROJECT_VERSION must stay a 12-digit YYYYMMDDHHMM value. The runner's checks run the SyncMDTests unit suite on the job's simulator, like PR CI (xctest.yml). For Android changes, run the relevant Gradle tests (connected ones through the isobot shell on the job's emulator) and check the app there with argent.",
-      "ownerAutonomy": "merge",
       "train": {
         "appId": "6758960270",
         "testflight": { "group": "External" },
@@ -250,7 +254,6 @@
         }
       },
       "notes": "iOS app (Xcode project IsoMe.xcodeproj, scheme IsoMe) plus Android under android/. The runner's checks run the IsoMe XCTest suite on the job's simulator (scripts/test-ios.sh), like PR CI, except one StoreKit restore test that waits forever on an Apple Account prompt on a simulator without App Store sign-in. Android's emulator suite takes hours and runs nightly in CI (android-heavy-tests.yml), so for Android changes run just the relevant connected tests through the isobot shell, e.g. `cd android && ./gradlew :app:connectedMapQaAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=<the test classes you touched>`, plus the unit tests in android-tests.yml.",
-      "ownerAutonomy": "merge",
       "train": {
         "appId": "6761960794",
         "testflight": { "group": "Beta Testers", "joinUrl": "https://testflight.apple.com/join/Tn2hDXRG" },
@@ -279,7 +282,6 @@
         }
       },
       "notes": "SwiftUI iOS/Mac/Watch app plus an Android app under apps/android. The runner's checks run the app-hosted VoxboardTests on the job's simulator, as Apple CI does; GitHub Apple CI also runs the full suite on every PR. For Android changes, run the relevant tests through the isobot shell (./apps/android/gradlew -p apps/android …, connected tests on the job's emulator) and check the app there with argent.",
-      "ownerAutonomy": "merge",
       "train": {
         "appId": "6758967337",
         "testflight": { "group": "Public beta", "joinUrl": "https://testflight.apple.com/join/dQXXSTxv" },

@@ -239,10 +239,14 @@ Release commands run on a clean checkout of the merge commit with the runner's
 scrubbed environment, so tools that need credentials (App Store Connect API
 keys, Wrangler) must find them in their own config on the machine.
 
+Every configured repository currently runs at `"autonomy": "merge"` (set in
+`defaults`): isobot merges any trusted issue once every gate passes. Issues
+written by someone outside `trustedAuthors` still never merge without you.
+
 ## End to end for your own work
 
 A repository can give your own work more autonomy than community reports with
-`ownerAutonomy`:
+`ownerAutonomy` (no repository needs it while `defaults.autonomy` is `merge`):
 
 ```json
 "codybontecou/vox.md": { "autonomy": "pr", "ownerAutonomy": "merge", "checks": ["./scripts/test-project-contracts.sh"] }

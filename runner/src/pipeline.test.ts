@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { loadConfig, type RunnerConfig } from "./config.js";
+import type { RunnerConfig } from "./config.js";
 import { Notifier } from "./notify.js";
 import { buildTask, Pipeline, slug } from "./pipeline.js";
 import type { CheckReport } from "./policy.js";
 import { Store } from "./store.js";
 import { DISCORD_REPLY_MARKER } from "./notes.js";
-import { FakeBuilder, FakeDiscord, FakeGitHub, FakeRepo, MP4, PNG } from "./testing.js";
+import { FakeBuilder, FakeDiscord, FakeGitHub, FakeRepo, MP4, PNG, testConfig } from "./testing.js";
 import type { DeviceSpec, Devices } from "./devices.js";
 import { TransientError } from "./errors.js";
 import path from "node:path";
@@ -16,7 +16,7 @@ const [OWNER, NAME] = REPO.split("/");
 const CHANNEL = "123456789012345678";
 
 function setup(configure: (config: RunnerConfig) => void = () => {}, checks: CheckReport[] = [], discord?: FakeDiscord, devices?: Devices) {
-  const config = loadConfig();
+  const config = testConfig();
   configure(config);
   const store = new Store(":memory:");
   const github = new FakeGitHub();
@@ -395,7 +395,7 @@ test("unconfigured repositories are never touched", async () => {
 });
 
 test("task text strips markers and the old Codex trigger, and adds repo notes", () => {
-  const config = loadConfig();
+  const config = testConfig();
   const task = buildTask({
     title: "T", url: "u",
     body: "Do X\n\n@codex implement this\n<!-- isobot:discord-event:1 -->",

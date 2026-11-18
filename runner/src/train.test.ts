@@ -2,17 +2,17 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
-import { loadConfig, type RunnerConfig } from "./config.js";
+import type { RunnerConfig } from "./config.js";
 import { Notifier } from "./notify.js";
 import { Store } from "./store.js";
-import { FakeGitHub } from "./testing.js";
+import { FakeGitHub, testConfig } from "./testing.js";
 import { compareVersions, isBusy, nextVersion, publishCommand, ReleaseTrain, timestampBuildNumber, trainVersion, whatsNew, type AppStatus } from "./train.js";
 
 const REPO = "codybontecou/vox.md";
 const [OWNER, NAME] = REPO.split("/");
 
 function setup(status: AppStatus = { version: "3.0", state: "READY_FOR_DISTRIBUTION" }) {
-  const config: RunnerConfig = loadConfig();
+  const config: RunnerConfig = testConfig();
   config.repos = {
     [REPO]: { ownerAutonomy: "merge", checks: ["make test"], train: { appId: "6758967337", project: "Voxboard.xcodeproj", scheme: "Voxboard", everyHours: 24, holdMinutes: 60 } },
   };
@@ -165,7 +165,7 @@ test("a failed ship reports the output and keeps the work for the next train", a
 
 test("train config is validated", async () => {
   const { validateConfig } = await import("./config.js");
-  const config = loadConfig();
+  const config = testConfig();
   config.repos[REPO] = { ownerAutonomy: "merge", checks: ["x"], train: { appId: "abc", project: "a", scheme: "s", everyHours: 24, holdMinutes: 60 } };
   assert.throws(() => validateConfig(config), /train.appId/);
   config.repos[REPO] = { ownerAutonomy: "merge", checks: ["x"], train: { appId: "123456", scheme: "s", everyHours: 24, holdMinutes: 60 } };
@@ -179,7 +179,7 @@ const SHA = "0123456789abcdef0123456789abcdef01234567";
 
 /** A train with a Discord bot, model-written notes and a capture on each PR, for the launch post. */
 function launchSetup() {
-  const config: RunnerConfig = loadConfig();
+  const config: RunnerConfig = testConfig();
   config.repos = {
     [REPO]: { ownerAutonomy: "merge", checks: ["make test"], train: {
       appId: "6758967337", project: "Voxboard.xcodeproj", scheme: "Voxboard", everyHours: 24, holdMinutes: 60,
@@ -290,7 +290,7 @@ test("a version replaced before going live gets no launch post", async () => {
 
 /** A TestFlight train: same flow, but builds go to an external beta group. */
 function betaSetup() {
-  const config: RunnerConfig = loadConfig();
+  const config: RunnerConfig = testConfig();
   config.repos = {
     [REPO]: { ownerAutonomy: "merge", checks: ["make test"], train: {
       appId: "6758967337", project: "Voxboard.xcodeproj", scheme: "Voxboard", everyHours: 24, holdMinutes: 60,
@@ -389,7 +389,7 @@ test("a rejected beta gets no launch post and doesn't hold the train", async () 
 
 test("TestFlight config is validated", async () => {
   const { validateConfig } = await import("./config.js");
-  const config = loadConfig();
+  const config = testConfig();
   const train = { appId: "123456", project: "a", scheme: "s", everyHours: 24, holdMinutes: 60 };
   config.repos[REPO] = { ownerAutonomy: "merge", checks: ["x"], train: { ...train, testflight: { group: " " } } };
   assert.throws(() => validateConfig(config), /train.testflight.group/);
