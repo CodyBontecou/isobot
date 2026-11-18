@@ -120,6 +120,41 @@ test("reviewer change requests trigger a revision before the gate", async () => 
   assert.deepEqual(github.merged, [100]);
 });
 
+test("an approval below the confidence bar gets another round, then merges", async () => {
+  const { github, pipeline, builder } = setup(config => {
+    config.repos[REPO] = { autonomy: "merge", checks: ["make test"] };
+  });
+  builder.reviews = [{ verdict: "approve", confidence: 0.82, risk: "low", summary: "Mostly right", concerns: ["No test for the empty state"] }];
+  github.add(OWNER, NAME, 31, "Feature", ["isobot:ready"]);
+  await cycle(pipeline);
+  assert.match(builder.reviseFeedback[0], /approved, but[\s\S]*confidence 0\.82 is below 0\.85[\s\S]*No test for the empty state/);
+  assert.deepEqual(github.merged, [100]);
+});
+
+test("low-confidence approvals stop after maxReviewRounds and leave the merge to a human", async () => {
+  const { github, pipeline, builder } = setup(config => {
+    config.repos[REPO] = { autonomy: "merge", checks: ["make test"] };
+    config.builder.maxReviewRounds = 2;
+  });
+  const low = { verdict: "approve" as const, confidence: 0.8, risk: "low" as const, summary: "Unsure", concerns: ["Edge case"] };
+  builder.reviews = [low, low, low, low, low];
+  github.add(OWNER, NAME, 32, "Feature", ["isobot:ready"]);
+  await cycle(pipeline);
+  assert.equal(builder.reviseFeedback.length, 2);
+  assert.equal(github.merged.length, 0);
+  assert.match(github.commentsFor(OWNER, NAME, 32).at(-1)!, /confidence 0\.80 is below 0\.85/);
+});
+
+test("pr autonomy doesn't spend rounds raising an approval's confidence", async () => {
+  const { github, pipeline, builder } = setup(config => {
+    config.repos[REPO] = { autonomy: "pr", checks: ["make test"] };
+  });
+  builder.reviews = [{ verdict: "approve", confidence: 0.82, risk: "low", summary: "Fine", concerns: [] }];
+  github.add(OWNER, NAME, 33, "Feature", ["isobot:ready"]);
+  await cycle(pipeline);
+  assert.equal(builder.reviseFeedback.length, 0);
+});
+
 test("no changes from the builder fails the job with its explanation", async () => {
   const { github, pipeline, store, repo, builder } = setup();
   repo.changes = false;

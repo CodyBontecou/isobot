@@ -15,7 +15,10 @@ new Discord, GitHub, email and App Store review activity into proposals. Design:
 4. The runner runs the repo's `checks`. Failures go back to the builder
    (up to `maxFixRounds`).
 5. A separate read-only Claude Code reviewer judges the diff. Change requests go
-   back to the builder (up to `maxReviewRounds`).
+   back to the builder (up to `maxReviewRounds`). When the repo can merge, so does
+   an approval that misses the merge bar (confidence below `minReviewConfidence`,
+   or high risk): the builder gets the reviewer's concerns and another round,
+   sharing the same `maxReviewRounds` budget.
 6. The runner pushes and opens a PR with the summary, check results and review.
 7. If every gate passes and the repo's autonomy is `merge`, it waits for GitHub
    CI, re-checks the gates, and squash-merges exactly the reviewed commit.
