@@ -386,6 +386,66 @@ gets no post; Vox.md's Mac releases are still the worker's.
 The runner uses the App Store Connect key `asc` already has in the keychain, and signs with this
 Mac's keychain, so it must run as a user who can archive and sign the app in Xcode.
 
+## Content train
+
+A repo with `content` in its policy gets website content written for search, every day, by the
+content train (`runner/src/content.ts`). Health.md (healthmd.app), GitSync.md (gitsync.md), Whereday
+(whereday.com) and Vox.md (vox.isolated.tech) run it at three pieces a day each.
+
+1. **Research.** `perDay` times a day, spread evenly over `content.hours` (06:00–22:00 by default),
+   a Claude run reads the site in a fresh checkout of main and the site's OpenSEO project: its
+   context and research log, 28 days of Search Console data, and keyword, SERP and competitor
+   tools within `maxCreditsPerRun`. It picks one piece of work: a new post, guide or tutorial, a
+   small free browser tool, or a refresh of a page that already gets impressions. It skips when
+   nothing is worth doing, and holds back while three or more content issues are still open.
+2. **Issue.** The brief becomes an issue labelled `isobot:content`, `isobot:ready` and `isobot:auto`,
+   and 📝 goes to the staff channel. The repos are public, so the brief has no Search Console numbers:
+   those stay in the runner's store and reach the builder through the task.
+3. **Build and merge.** The usual build, checks, review and gates, under the site's content policy
+   (`contentPolicy` in config.ts) instead of the app's:
+   - checks are `content.checks` (the site's build and tests), and no simulators or emulators are booted;
+   - every changed file must match `content.allowedPaths`, or the merge is left to you;
+   - protected paths are CI, deploy and secret configuration, agent instructions and package manifests,
+     not the app's list (whose `**/*premium*` and the like match ordinary post slugs);
+   - `requireCi` is `content.requireCi` (default off), and there are no release or ship steps;
+   - the builder and reviewer get the content standard: claims about the app checked against its
+     source, primary sources for other products, no duplicate pages, links both ways, the site's
+     conventions (`content.notes`), and a `Published URLs:` line at the end of the summary.
+   Content merges with `content.autonomy` (default `merge`) and never rides the release train.
+   At most `content.maxConcurrentJobs` (default 1) content builds run at once, so app work isn't held up.
+4. **Publish.** Once every published URL answers 200 on the live site, the site's `indexNow`
+   command runs with the URLs (or OpenSEO's IndexNow when there is none), the OpenSEO research
+   log gets one line, and the job's thread hears about it. Pages still not live 3 hours after the
+   merge are reported instead.
+5. **Weekly report.** On `content.reportWeekday` (Monday by default), each site's Search Console
+   picture goes to the staff channel: clicks and impressions week over week, movers, how the week's
+   pages are doing, refresh candidates and anything broken. It uses only free tools.
+
+**Credits.** Each research run reports the OpenSEO balance before and after. Research stops for the
+day at `maxCreditsPerDay` (default 1500), and stops entirely below `minCreditsRemaining`
+(default 300), with one ⏸ message a day saying so. Builders can't use OpenSEO at all (the builder
+settings deny `mcp__plugin_openseo_openseo`); only the research, publish and report runs may, with
+a fixed list of tools. None of them can delete anything or change OpenSEO schedules and trackers.
+
+Run one now with `npm run runner -- content <repo> research` (files an issue; add `--dry-run` to print the brief and file nothing) or
+`npm run runner -- content <repo> report`. To stop a site, set its `content.autonomy` to `off`
+(or `pr` to review every post yourself). To stop one post, add `isobot:stop` to its issue.
+
+```json
+"content": {
+  "site": "healthmd.app",
+  "openseoProjectId": "a62f2923-…",
+  "perDay": 3,
+  "allowedPaths": ["apps/website/**"],
+  "checks": ["npm --prefix apps/website ci && npm --prefix apps/website run build"],
+  "indexNow": "node apps/website/scripts/submit-indexnow.mjs",
+  "notes": "Posts go in apps/website/content/blog/<slug>.md …"
+}
+```
+
+Runner-wide limits go under the top-level `content`: `maxConcurrentJobs`, `maxCreditsPerRun`,
+`maxCreditsPerDay`, `minCreditsRemaining`, `reportWeekday`, `hours`.
+
 ## Builder sandbox
 
 Builders run with Claude Code's shell sandbox on. It allows writes to the

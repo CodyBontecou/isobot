@@ -49,6 +49,11 @@ export function evaluateGate(input: GateInput): GateDecision {
   if (diff.files.length === 0) reasons.push("the change is empty");
   const protectedHits = diff.files.filter(file => policy.protectedPaths.some(glob => matchesGlob(file.path, glob))).map(file => file.path);
   if (protectedHits.length) reasons.push(`touches protected paths: ${protectedHits.slice(0, 8).join(", ")}`);
+  if (policy.allowedPaths) {
+    const allowed = policy.allowedPaths;
+    const outside = diff.files.filter(file => !allowed.some(glob => matchesGlob(file.path, glob))).map(file => file.path);
+    if (outside.length) reasons.push(`changes files outside the allowed paths: ${outside.slice(0, 8).join(", ")}`);
+  }
   // Deleting test lines is how an agent "fixes" a failing test; additions are fine.
   const weakenedTests = diff.files.filter(file => TEST_FILE.test(file.path) && file.removed > file.added).map(file => file.path);
   if (weakenedTests.length) reasons.push(`removes more test lines than it adds: ${weakenedTests.slice(0, 5).join(", ")}`);

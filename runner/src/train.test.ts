@@ -81,6 +81,14 @@ test("nothing merged, nothing announced", async () => {
   assert.equal(t.github.issues.size, 0);
 });
 
+test("merged website content never rides the release train", async () => {
+  const t = setup();
+  t.store.enqueue(OWNER, NAME, 90, "Voice notes guide", "content");
+  t.store.update(`${REPO}#90`, { state: "merged", prNumber: 190 });
+  await t.run();
+  assert.equal(t.github.issues.size, 0);
+});
+
 test("the first train waits for the owner's ready label, then ships, tags and reports", async () => {
   const t = setup();
   t.merged(85, "Lock screen capture fix");

@@ -46,6 +46,56 @@ export interface RepoPolicy {
    * see them as $ISOBOT_IOS_SIMULATOR and $ANDROID_SERIAL; the builder can also drive them with argent.
    */
   devices?: DeviceSpec;
+  /** The app's marketing site: daily SEO research turns into content issues that build and merge (content.ts). */
+  content?: ContentConfig;
+  /**
+   * Only files matching these globs may change for an automatic merge. Set by the content train for its
+   * own jobs (the site's directory); unset means anywhere.
+   */
+  allowedPaths?: string[];
+}
+
+/**
+ * One marketing site fed by the content train. Content jobs replace the repo's checks, devices, protected
+ * paths and release steps with these, never ship through the release train, and merge on `autonomy`.
+ */
+export interface ContentConfig {
+  /** The site's host, e.g. healthmd.app. Published URLs must be on it. */
+  site: string;
+  /** The OpenSEO project for the site (list_projects). */
+  openseoProjectId: string;
+  /** Content issues (and so research runs) per day. */
+  perDay: number;
+  /** Files a content change may touch; anything else leaves the merge to a human. */
+  allowedPaths: string[];
+  /** Commands that build and validate the site; required to merge. */
+  checks: string[];
+  /** Wait for GitHub CI on content PRs (only where site PRs actually run CI). Default false. */
+  requireCi?: boolean;
+  /** Protected paths for content jobs, besides the always-protected ones (CI, secrets, agent config). */
+  protectedPaths?: string[];
+  /** Command run in a checkout of main after the site is live, with the new URLs as arguments (IndexNow). */
+  indexNow?: string;
+  /** House rules for writing on this site: where posts go, frontmatter, CTAs, translations. */
+  notes: string;
+  /** off: research nothing; pr: build and leave the merge to you; merge: merge when every gate passes. Default merge. */
+  autonomy?: Autonomy;
+}
+
+/** Runner-wide limits for the content train. */
+export interface ContentLimits {
+  /** Content builds at once, so app work isn't starved. Default 1. */
+  maxConcurrentJobs?: number;
+  /** OpenSEO credits one research run may spend. Default 100. */
+  maxCreditsPerRun?: number;
+  /** OpenSEO credits all research may spend in a day. Default 1500. */
+  maxCreditsPerDay?: number;
+  /** Below this balance research stops and the owner hears about it once. Default 300. */
+  minCreditsRemaining?: number;
+  /** Local weekday (0 = Sunday) for each site's weekly search report; null for none. Default 1 (Monday). */
+  reportWeekday?: number | null;
+  /** Local hours research may start, [from, to). Default [6, 22]. */
+  hours?: [number, number];
 }
 
 export interface TrainConfig {
@@ -117,6 +167,8 @@ export interface RunnerConfig {
   appStore?: AppStoreConfig;
   /** The staff chat in the job-card channel (chat.ts). On by default when the bot is configured. */
   chat?: ChatConfig;
+  /** Limits for the content train (content.ts); per-site settings live in each repo's `content`. */
+  content?: ContentLimits;
   defaults: RepoPolicy;
   repos: Record<string, Partial<RepoPolicy>>;
 }
@@ -162,6 +214,8 @@ export interface Labels {
   auto: string;
   /** Dismiss: the runner removes what it made locally, strips its labels and closes the issue. Default isobot:cleanup. */
   cleanup: string;
+  /** Marks content-train issues: they build with the site's content policy. Default isobot:content. */
+  content: string;
 }
 
 export interface Environment {
@@ -199,6 +253,7 @@ export function validateConfig(config: RunnerConfig): void {
   if (config.builder?.kind !== "claude") fail("builder.kind must be \"claude\"");
   // Added after the others; older configs get the default.
   if (config.labels && !config.labels.cleanup) config.labels.cleanup = "isobot:cleanup";
+  if (config.labels && !config.labels.content) config.labels.content = "isobot:content";
   for (const key of ["proposed", "ready", "building", "review", "failed", "ship", "stop", "auto"] as const) {
     if (!config.labels?.[key]) fail(`labels.${key} is required`);
   }
@@ -237,6 +292,18 @@ export function validateConfig(config: RunnerConfig): void {
     if (c.timeoutMinutes !== undefined && !(c.timeoutMinutes >= 1 && c.timeoutMinutes <= 60)) fail("chat.timeoutMinutes must be 1-60");
     if (c.maxTurns !== undefined && !(Number.isInteger(c.maxTurns) && c.maxTurns >= 1)) fail("chat.maxTurns must be a positive integer");
   }
+  if (config.content) {
+    const c = config.content;
+    const positive = (v: number | undefined, key: string) => { if (v !== undefined && !(Number.isInteger(v) && v >= 1)) fail(`content.${key} must be a positive integer`); };
+    positive(c.maxConcurrentJobs, "maxConcurrentJobs");
+    positive(c.maxCreditsPerRun, "maxCreditsPerRun");
+    positive(c.maxCreditsPerDay, "maxCreditsPerDay");
+    if (c.minCreditsRemaining !== undefined && !(Number.isInteger(c.minCreditsRemaining) && c.minCreditsRemaining >= 0)) fail("content.minCreditsRemaining must be 0 or more");
+    if (c.reportWeekday !== undefined && c.reportWeekday !== null && !(Number.isInteger(c.reportWeekday) && c.reportWeekday >= 0 && c.reportWeekday <= 6)) fail("content.reportWeekday must be 0-6 or null");
+    if (c.hours !== undefined && !(Array.isArray(c.hours) && c.hours.length === 2 && c.hours.every(h => Number.isInteger(h) && h >= 0 && h <= 24) && c.hours[0] < c.hours[1])) {
+      fail("content.hours must be [from, to) local hours with from < to");
+    }
+  }
   for (const [name, partial] of Object.entries(config.repos ?? {})) {
     if (!/^[\w.-]+\/[\w.-]+$/.test(name)) fail(`repo key ${name} must be owner/repo`);
     const policy = policyFor(config, name);
@@ -271,6 +338,16 @@ export function validateConfig(config: RunnerConfig): void {
       if (d.ios && !d.ios.deviceType?.trim()) fail(`${name}: devices.ios.deviceType is required (e.g. "iPhone 17")`);
       if (d.android && !/^[\w.-]+$/.test(d.android.avd ?? "")) fail(`${name}: devices.android.avd must be an AVD name`);
     }
+    if (policy.content) {
+      const c = policy.content;
+      if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(c.site ?? "")) fail(`${name}: content.site must be a host name like example.com`);
+      if (!/^[\w-]{8,}$/.test(c.openseoProjectId ?? "")) fail(`${name}: content.openseoProjectId must be an OpenSEO project id`);
+      if (!(Number.isInteger(c.perDay) && c.perDay >= 1 && c.perDay <= 12)) fail(`${name}: content.perDay must be 1-12`);
+      if (!Array.isArray(c.allowedPaths) || c.allowedPaths.length === 0) fail(`${name}: content.allowedPaths must list the site's files`);
+      if (c.autonomy !== undefined && !["off", "pr", "merge"].includes(c.autonomy)) fail(`${name}: unknown content.autonomy "${c.autonomy}"`);
+      if ((c.autonomy ?? "merge") === "merge" && !(c.checks?.length)) fail(`${name}: content.checks must build the site before content merges automatically`);
+      if (!c.notes?.trim()) fail(`${name}: content.notes must tell the builder how this site's content works`);
+    }
     if (!(policy.minReviewConfidence > 0 && policy.minReviewConfidence <= 1)) fail(`${name}: minReviewConfidence must be in (0, 1]`);
     void partial;
   }
@@ -287,6 +364,47 @@ export function policyFor(config: RunnerConfig, repo: string): RepoPolicy {
     protectedPaths: [...base.protectedPaths, ...(own?.protectedPaths ?? [])],
     release: { onMerge: own?.release?.onMerge ?? base.release.onMerge, onShip: own?.release?.onShip ?? base.release.onShip },
   };
+}
+
+/**
+ * Protected for content jobs whatever the site says: CI, deploy and secret configuration, agent
+ * instructions and hooks. Content globs replace the app's (`**\/*premium*` and the like), which match
+ * ordinary post slugs.
+ */
+export const CONTENT_PROTECTED_PATHS = [
+  ".github/**", "**/.env*", "**/wrangler.json*", "**/wrangler.toml", "**/vercel.json", "**/netlify.toml", "**/_headers",
+  "**/migrations/**", ".claude/**", "**/CLAUDE.md", "**/AGENTS.md", ".mcp.json", ".codex/**", ".agents/**", ".pi/**",
+  ".gitmodules", "**/.githooks/**", "**/.husky/**", "**/package.json", "**/package-lock.json",
+];
+
+/** The policy a content-train job builds and merges under (see ContentConfig). */
+export function contentPolicy(policy: RepoPolicy): RepoPolicy {
+  const content = policy.content;
+  if (!content) throw new Error("this repository has no content configuration");
+  const autonomy = content.autonomy ?? "merge";
+  return {
+    ...policy,
+    autonomy,
+    ownerAutonomy: autonomy,
+    checks: content.checks,
+    protectedPaths: [...CONTENT_PROTECTED_PATHS, ...(content.protectedPaths ?? [])],
+    allowedPaths: content.allowedPaths,
+    requireCi: content.requireCi ?? false,
+    release: { onMerge: [], onShip: [] },
+    notes: content.notes,
+    devices: undefined,
+    train: undefined,
+  };
+}
+
+/** Repositories whose site the content train writes for. */
+export function contentRepos(config: RunnerConfig): { owner: string; repo: string; content: ContentConfig }[] {
+  return Object.keys(config.repos).flatMap(key => {
+    const content = policyFor(config, key).content;
+    if (!content || (content.autonomy ?? "merge") === "off") return [];
+    const [owner, repo] = key.split("/");
+    return [{ owner, repo, content }];
+  });
 }
 
 export function configuredRepos(config: RunnerConfig): { owner: string; repo: string }[] {

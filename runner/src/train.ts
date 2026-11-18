@@ -212,7 +212,8 @@ export class ReleaseTrain {
 
   private waiting(owner: string, repo: string): Job[] {
     const name = `${owner}/${repo}`.toLowerCase();
-    return this.deps.store.inState(...SHIPPABLE).filter(job => `${job.owner}/${job.repo}`.toLowerCase() === name);
+    // Content-train work is on the website, which deploys on merge; it never needs an app release.
+    return this.deps.store.inState(...SHIPPABLE).filter(job => job.kind !== "content" && `${job.owner}/${job.repo}`.toLowerCase() === name);
   }
 
   /** Decides what this repo's train does now; returns the ship itself when it should start. */

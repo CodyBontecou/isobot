@@ -7,13 +7,14 @@ import { hasDevices, type DeviceLease, type Devices } from "./devices.js";
 import { collectMedia, mediaMarkdown, type MediaFile } from "./media.js";
 import { isTransient, UsageLimitError } from "./errors.js";
 import { failureFeedback, formatChecks } from "./checks.js";
-import { configuredRepos, policyFor, type Environment, type RepoPolicy, type RunnerConfig } from "./config.js";
+import { configuredRepos, contentPolicy, policyFor, type Environment, type RepoPolicy, type RunnerConfig } from "./config.js";
+import { contentEvidenceKey, CONTENT_BUILD_RULES } from "./content.js";
 import type { DiffStat } from "./git.js";
 import type { CiState, GitHubApi, Issue, IssueComment, PullRequest } from "./github.js";
 import { asksToRetry, maxCommentId, noteFeedback, ownerNotes, quoteNote, withNotes, type OwnerNote } from "./notes.js";
 import type { CardUpdate, Notifier } from "./notify.js";
 import { evaluateGate, matchesGlob, reviewShortfalls, type CheckReport, type GateDecision } from "./policy.js";
-import type { Job, Store } from "./store.js";
+import type { Job, JobKind, Store } from "./store.js";
 
 /** The git operations the pipeline needs; `Repo` implements it, tests fake it. */
 export interface RepoOps {
@@ -150,7 +151,8 @@ export class Pipeline {
             await github.comment(owner, repo, issue.number, `isobot only builds issues approved by its owner; \`${this.labels.ready}\` was added by @${approver ?? "unknown"}.`);
             continue;
           }
-          const job = store.enqueue(owner, repo, issue.number, issue.title);
+          const kind = this.kindOf(owner, repo, issue);
+          const job = store.enqueue(owner, repo, issue.number, issue.title, kind);
           await github.removeLabel(owner, repo, issue.number, this.labels.ready);
           if (!job) {
             const existing = store.get(storeId(owner, repo, issue.number));
@@ -162,7 +164,7 @@ export class Pipeline {
           await github.comment(owner, repo, issue.number,
             `🤖 isobot picked this up and is building it now. Add the \`${this.labels.stop}\` label at any time to stop.`);
           await this.listenForNotes(job);
-          const { release } = policyFor(this.deps.config, `${owner}/${repo}`);
+          const { release } = this.policyOf(owner, repo, kind);
           await this.feed(job, {
             phase: "queued", title: issue.title,
             extraSteps: [...(release.onMerge.length ? ["Release" as const] : []), ...(release.onShip.length ? ["Ship" as const] : [])],
@@ -176,13 +178,30 @@ export class Pipeline {
     return claimed;
   }
 
+  /** A content-train issue (content label) in a repo with a site; everything else is ordinary work. */
+  kindOf(owner: string, repo: string, issue: Pick<Issue, "labels">): JobKind {
+    return hasLabel(issue, this.labels.content) && policyFor(this.deps.config, `${owner}/${repo}`).content ? "content" : "issue";
+  }
+
+  /** The repo's policy, or the site's content policy for content-train work. */
+  policyOf(owner: string, repo: string, kind: JobKind): RepoPolicy {
+    const policy = policyFor(this.deps.config, `${owner}/${repo}`);
+    return kind === "content" && policy.content ? contentPolicy(policy) : policy;
+  }
+
   /** Starts queued jobs up to the concurrency limit. Returns the promises for the jobs it started. */
   startQueued(): Promise<void>[] {
     const started: Promise<void>[] = [];
     if (this.deps.store.pausedUntil()) return started;
+    const contentLimit = this.deps.config.content?.maxConcurrentJobs ?? 1;
+    const kinds = new Map(this.deps.store.inState("building").map(job => [job.id, job.kind]));
+    let content = [...this.running].filter(id => kinds.get(id) === "content").length;
     for (const job of this.deps.store.runnable()) {
       if (this.running.size >= this.deps.config.maxConcurrentJobs) break;
       if (this.running.has(job.id)) continue;
+      // Content work takes its own few slots, so a day of posts never holds up app builds.
+      if (job.kind === "content" && content >= contentLimit) continue;
+      if (job.kind === "content") content++;
       this.running.add(job.id);
       started.push(this.build(job).finally(() => this.running.delete(job.id)));
     }
@@ -250,8 +269,14 @@ export class Pipeline {
     const viewer = await this.viewerLogin();
     const comments: IssueComment[] = await this.deps.github.issueComments(issue.owner, issue.repo, issue.number);
     const proposal = comments.filter(c => c.author.toLowerCase() === viewer.toLowerCase() && c.body.includes(PROPOSAL_MARKER)).at(-1);
-    const policy = policyFor(this.deps.config, `${issue.owner}/${issue.repo}`);
-    const task = buildTask(proposal ? { ...issue, body: proposal.body } : issue, policy);
+    const kind = this.kindOf(issue.owner, issue.repo, issue);
+    const policy = this.policyOf(issue.owner, issue.repo, kind);
+    let task = buildTask(proposal ? { ...issue, body: proposal.body } : issue, policy);
+    if (kind === "content") {
+      // The research's private evidence (Search Console figures) never goes on the public issue.
+      const evidence = this.deps.store.cursor(contentEvidenceKey(issue.owner, issue.repo, issue.number));
+      task = [task, CONTENT_BUILD_RULES, ...(evidence ? ["## Private research evidence (keep out of the repository, commits and PR)", evidence] : [])].join("\n\n");
+    }
     const fingerprint = createHash("sha256").update(`${issue.title}\n${issue.body}\n${proposal?.body ?? ""}`).digest("hex");
     // A stranger's issue that isobot's own proposal replaced, and that isobot itself approved as small,
     // builds from the vetted proposal, so it may go as far as the owner's own work.
@@ -266,7 +291,7 @@ export class Pipeline {
 
   async build(job: Job): Promise<void> {
     const { github, store, builder } = this.deps;
-    const policy = policyFor(this.deps.config, `${job.owner}/${job.repo}`);
+    const policy = this.policyOf(job.owner, job.repo, job.kind);
     const repo = this.deps.repo(job.owner, job.repo);
     const attempts = job.attempts + 1;
     if (attempts > MAX_ATTEMPTS) return this.fail(job, new Error(`gave up after ${MAX_ATTEMPTS} interrupted attempts`));
@@ -610,7 +635,7 @@ export class Pipeline {
           }
           store.update(job.id, { state: "merged" });
           await this.feed(job, { phase: "merged" }, `✅ ${pr.url} was merged.`);
-          await this.afterMerge(store.get(job.id)!, pr.mergeCommitSha, policyFor(this.deps.config, `${job.owner}/${job.repo}`));
+          await this.afterMerge(store.get(job.id)!, pr.mergeCommitSha, this.policyOf(job.owner, job.repo, job.kind));
         } else if (pr.state === "closed") {
           store.update(job.id, { state: "closed" });
           await github.removeLabel(job.owner, job.repo, job.number, this.labels.review);
@@ -636,7 +661,7 @@ export class Pipeline {
       try {
         await github.removeLabel(job.owner, job.repo, job.number, this.labels.ship);
         const pr = await github.pull(job.owner, job.repo, job.prNumber!);
-        const policy = policyFor(this.deps.config, `${job.owner}/${job.repo}`);
+        const policy = this.policyOf(job.owner, job.repo, job.kind);
         await this.feed(job, { phase: "shipping" });
         const report = await this.release(job, pr.mergeCommitSha!, policy.release.onShip, "ship");
         store.update(job.id, { state: report.passed ? "shipped" : "awaiting_ship", lastError: report.passed ? null : "ship step failed" });
@@ -881,7 +906,7 @@ function reviewFeedback(review: Review, shortfalls: string[]): string {
   ].join("\n\n");
 }
 
-function hasLabel(issue: Issue, label: string): boolean {
+function hasLabel(issue: Pick<Issue, "labels">, label: string): boolean {
   return issue.labels.some(l => l.toLowerCase() === label.toLowerCase());
 }
 

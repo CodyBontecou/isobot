@@ -14,7 +14,8 @@
         "deny": [
           "Skill(create-payment-credential)",
           "Skill(financial-insights)",
-          "Skill(use-link-identity)"
+          "Skill(use-link-identity)",
+          "mcp__plugin_openseo_openseo"
         ]
       }
     }
@@ -22,6 +23,14 @@
   "chat": {
     "model": "sonnet",
     "checkInHour": 9
+  },
+  "content": {
+    "maxConcurrentJobs": 1,
+    "maxCreditsPerRun": 100,
+    "maxCreditsPerDay": 1500,
+    "minCreditsRemaining": 300,
+    "reportWeekday": 1,
+    "hours": [6, 22]
   },
   "labels": {
     "proposed": "isobot:proposed",
@@ -32,7 +41,8 @@
     "ship": "isobot:ship",
     "stop": "isobot:stop",
     "auto": "isobot:auto",
-    "cleanup": "isobot:cleanup"
+    "cleanup": "isobot:cleanup",
+    "content": "isobot:content"
   },
   "trustedAuthors": [],
   "discordCategories": {
@@ -184,6 +194,27 @@
         }
       },
       "notes": "Monorepo: Apple app under apps/apple (HealthMd.xcodeproj, scheme HealthMd), Android under apps/android, Rust core and CLI. PR CI only runs scripts/ci/run.py; the runner's checks build the iOS app and its tests and run scripts/ci/android.sh (instrumented tests and the live Rust pairing test) on the job's emulator. Run that script yourself through the isobot shell before finishing (HEALTHMD_CI_ANDROID_ABI=arm64-v8a bash scripts/ci/android.sh). For Android behaviour changes, especially upgrades and background work, install the previous release and then your build on the job's emulator (adb install -r keeps data) and check it with argent. The full Apple CI runs at release.",
+      "content": {
+        "site": "healthmd.app",
+        "openseoProjectId": "a62f2923-f6c2-4e4e-9d81-96e77e85532b",
+        "perDay": 3,
+        "allowedPaths": [
+          "apps/website/content/blog/*.md",
+          "apps/website/content/blog/_review/*.md",
+          "apps/website/assets/blog/**",
+          "apps/website/assets/guides/**",
+          "apps/website/scripts/build-blog.mjs",
+          "apps/website/sitemap.xml"
+        ],
+        "checks": [
+          "cd apps/website && npm ci --no-audit --no-fund && npm --prefix docs-src ci --no-audit --no-fund",
+          "cd apps/website && node --test $(ls test/*.test.mjs | grep -v -e public-privacy -e reference-ownership -e visualization-catalog)",
+          "cd apps/website && npm run three:bundle && npm run docs:build && node scripts/build-site.mjs && npm run visualizations:seo && node scripts/check-site-links.mjs && node scripts/check-built-locales.mjs && node scripts/check-agent-surfaces.mjs"
+        ],
+        "requireCi": true,
+        "indexNow": "cd apps/website && npm ci --no-audit --no-fund >/dev/null && node scripts/submit-indexnow.mjs --submit",
+        "notes": "Site source: apps/website (Vercel builds it from main). Add posts as apps/website/content/blog/<slug>.md; the filename is the slug (lowercase, hyphenated). Never edit generated HTML or dist/. Frontmatter: title, description, lead, date, updated, category, draft: false, tags, platform (apple|android|both; picks the App Store / Google Play badges), related (up to 3 existing published slugs). Every post needs verified (YYYY-MM-DD), verified_by and verified_method (executed|traced|mixed) plus a claim ledger at content/blog/_review/<slug>.md; test/blog-verification.test.mjs enforces this. Optional image/imageAlt are root-relative, with files under assets/blog/<slug>/. English only. Anything about privacy names the local folder export workflow; describe the Health.md Cloud pilot as separate, opt-in, single-owner and not generally available, and never claim Health.md has no cloud. Hub links can go in the topic clusters in scripts/build-blog.mjs. Avoid slugs containing auth, unlock, subscription, purchase or privacy. Free tools aren't supported here yet (they need build configuration changes): propose posts, guides, tutorials and refreshes only. The project context lists protected experiment pages: leave them alone."
+      },
       "ownerAutonomy": "merge",
       "train": {
         "appId": "6757763969",
@@ -214,6 +245,32 @@
         }
       },
       "notes": "iOS git client (Sync.md.xcodeproj, scheme Sync.md) plus an Android app under android/. CURRENT_PROJECT_VERSION must stay a 12-digit YYYYMMDDHHMM value. The runner's checks run the SyncMDTests unit suite on the job's simulator, like PR CI (xctest.yml). For Android changes, run the relevant Gradle tests (connected ones through the isobot shell on the job's emulator) and check the app there with argent.",
+      "content": {
+        "site": "gitsync.md",
+        "openseoProjectId": "3663814f-99f6-40c7-b9c9-99cc78d4db40",
+        "perDay": 3,
+        "allowedPaths": [
+          "site/blog/**",
+          "site/compare/**",
+          "site/tools/**",
+          "site/social/blog/**",
+          "site/social/compare/**",
+          "site/social/tools/**",
+          "site/sitemap.xml",
+          "site/llms.txt",
+          "site/agent-instructions.md",
+          "site/index.html"
+        ],
+        "checks": [
+          "python3 -m unittest discover -s .github/scripts -p 'test_*.py'",
+          "python3 scripts/check_site_seo.py",
+          "python3 -m unittest discover -s scripts/tests -p 'test_site_*.py'",
+          "node --test scripts/tests/site-testimonials.test.mjs site-router/scripts/markdown.test.mjs",
+          "out=\"$(mktemp -d)/site\" && python3 scripts/build_site.py \"$out\" && python3 scripts/check_site_seo.py --site \"$out\""
+        ],
+        "requireCi": true,
+        "notes": "Site source: site/ (hand-written HTML; Cloudflare Pages deploys main). New guide: site/blog/<slug>.html, copying the head and layout of an existing guide such as site/blog/git-lfs-ios.html; media in site/blog/<slug>/. Canonical URLs and internal links are extensionless (https://gitsync.md/blog/<slug>). Required: description, og:title/description/url/image and twitter:card; og:image and twitter:image pointing to a local 1200x630 PNG at site/social/blog/<slug>.png with matching width, height, type and alt meta (scripts/build_social_cards.py crashes when run whole on main, so call its render(title, category, path) function directly from a short Python snippet); BlogPosting JSON-LD with author.url https://gitsync.md/about and a visible /about author link; exactly one BreadcrumbList Home > /blog/ > page with matching visible breadcrumbs. By hand: the card and JSON-LD entry in site/blog/index.html, a <loc> in site/sitemap.xml (it must list exactly the indexable pages), a link from at least one related guide, and an llms.txt entry when relevant. Header CTA is /#download; the aside CTA is /v/web-homepage-<NNN> with a number not used by another page (existing posts use 101-110); Google Play: https://play.google.com/store/apps/details?id=com.bontecou.syncmd. Comparison pages go in site/compare/, free tools in site/tools/<slug>.html (client-side only). English only."
+      },
       "train": {
         "appId": "6758960270",
         "testflight": { "group": "External" },
@@ -253,6 +310,38 @@
         }
       },
       "notes": "iOS app (Xcode project IsoMe.xcodeproj, scheme IsoMe) plus Android under android/. The runner's checks run the IsoMe XCTest suite on the job's simulator (scripts/test-ios.sh), like PR CI, except one StoreKit restore test that waits forever on an Apple Account prompt on a simulator without App Store sign-in. Android's emulator suite takes hours and runs nightly in CI (android-heavy-tests.yml), so for Android changes run just the relevant connected tests through the isobot shell, e.g. `cd android && ./gradlew :app:connectedMapQaAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=<the test classes you touched>`, plus the unit tests in android-tests.yml.",
+      "content": {
+        "site": "whereday.com",
+        "openseoProjectId": "0e1fd2af-8434-4364-a635-ef57be220fa4",
+        "perDay": 3,
+        "allowedPaths": [
+          "marketing/content/**",
+          "marketing/scripts/build_seo_pages.py",
+          "marketing/scripts/build_site.py",
+          "marketing/public/blog/**",
+          "marketing/public/compare/**",
+          "marketing/public/tools/**",
+          "marketing/public/integrations/**",
+          "marketing/public/docs/**",
+          "marketing/public/_markdown/**",
+          "marketing/public/_worker.js",
+          "marketing/public/sitemap.xml",
+          "marketing/public/llms.txt",
+          "marketing/public/screenshots/**",
+          "marketing/public/samples/**",
+          "marketing/public/assets/**"
+        ],
+        "checks": [
+          "python3 -m unittest discover -s .github/scripts -p 'test_*.py'",
+          "npm ci --ignore-scripts --no-audit --no-fund --prefix marketing && npm test --prefix marketing",
+          "python3 marketing/scripts/build_site.py",
+          "python3 -m unittest discover -s marketing/scripts -p 'test_*.py'",
+          "git diff --exit-code -- marketing/public"
+        ],
+        "requireCi": true,
+        "indexNow": "$HOME/.local/bin/indexnow submit --host whereday.com --key-dir marketing/public --confirm",
+        "notes": "Site source: marketing/ (Cloudflare Pages deploys main). New article: body HTML in marketing/content/<slug>.html (sections with h2 ids, an article-toc nav, no <html>/<head>). Add a PAGES entry in marketing/scripts/build_seo_pages.py with path /blog/<slug>/, section Guides, section_path /blog/, breadcrumb, type BlogPosting, title ('… — Whereday'), headline, description, lede, published, modified, source, optional image/image_alt from /screenshots/, and RELATED next steps. Add a visible link in marketing/public/blog/index.html (the build syncs its JSON-LD). Run python3 marketing/scripts/build_site.py and commit all regenerated marketing/public output; never patch generated HTML. Tools go under /tools/ with local_file_tool: true (no analytics) and get linked from /tools/. App Store CTA: https://apps.apple.com/app/id6761960794 ('Download free for iPhone'). Real dates; change modified only on a material update. Example data is synthetic and labelled as such. Keep the distinction between new-user plans and existing-user rights. English only."
+      },
       "train": {
         "appId": "6761960794",
         "testflight": { "group": "Beta Testers", "joinUrl": "https://testflight.apple.com/join/Tn2hDXRG" },
@@ -281,6 +370,42 @@
         }
       },
       "notes": "SwiftUI iOS/Mac/Watch app plus an Android app under apps/android. The runner's checks run the app-hosted VoxboardTests on the job's simulator, as Apple CI does; GitHub Apple CI also runs the full suite on every PR. For Android changes, run the relevant tests through the isobot shell (./apps/android/gradlew -p apps/android …, connected tests on the job's emulator) and check the app there with argent.",
+      "content": {
+        "site": "vox.isolated.tech",
+        "openseoProjectId": "b399ac99-f23c-40ca-8817-00d4316e8934",
+        "perDay": 3,
+        "allowedPaths": [
+          "website-content/guides/**",
+          "website-content/pages/blog/**",
+          "website-content/pages/compare/**",
+          "website-content/pages/docs/**",
+          "website-content/locales/*.json",
+          "website-content/downloads.json",
+          "website-content/llms.txt",
+          "website/blog/**",
+          "website/compare/**",
+          "website/docs/**",
+          "website/*/blog/**",
+          "website/*/compare/**",
+          "website/*/docs/**",
+          "website/sitemap.xml",
+          "website/*/sitemap.xml",
+          "website/llms.txt",
+          "website/screenshots/**",
+          "website/assets/**"
+        ],
+        "checks": [
+          "python3 -m unittest discover -s .github/scripts -p 'test_*.py'",
+          "npm run website:build && npm run website:check",
+          "python3 -m unittest discover -s scripts/tests -p test_website_markdown.py",
+          "node --test worker/website/index.test.mjs",
+          "git diff --exit-code -- website",
+          "out=\"$(mktemp -d)/site\" && python3 scripts/build-website.py \"$out\""
+        ],
+        "requireCi": true,
+        "indexNow": "$HOME/.local/bin/indexnow submit --host vox.isolated.tech --key-dir website --confirm",
+        "notes": "Site sources: website-content/; everything in website/ is generated and committed (Cloudflare Pages deploys main). New guide: website-content/guides/<slug>.html, starting with a JSON comment {slug (equal to the filename), title, description, subtitle, eyebrow, requirements, published, modified, image: /screenshots/...}, then body HTML (answer-box, toc nav, h2 ids, relative links like ../other-slug/). Add \"section\": \"compare\" for /compare/. By hand: a card and JSON-LD entry in website-content/pages/blog/index.html, contextual links from related guides and docs, an entry in website-content/llms.txt, and an English campaign in downloads.json (unique, 30 characters max). Then run build_locales.py --extract, translate every new or changed key in all 22 non-English locales/*.json (metadata status requires-human-review, source machine; follow docs/localization-glossary.md; keep app UI labels, URLs, code and placeholders exact), run build_locales.py --sync-campaigns, then npm run website:build && npm run website:check, and commit the generated website/**. Never set VOX_WEBSITE_PILOT. Don't touch the shared nav or footer (that regenerates the privacy pages). App Store links come from downloads.json."
+      },
       "train": {
         "appId": "6758967337",
         "testflight": { "group": "Public beta", "joinUrl": "https://testflight.apple.com/join/dQXXSTxv" },
