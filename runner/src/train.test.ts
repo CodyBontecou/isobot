@@ -283,3 +283,112 @@ test("a version replaced before going live gets no launch post", async () => {
   assert.equal(t.launches.length, 0);
   assert.equal(t.store.cursor(`train:${REPO}:launch`.toLowerCase()), "");
 });
+
+/** A TestFlight train: same flow, but builds go to an external beta group. */
+function betaSetup() {
+  const config: RunnerConfig = loadConfig();
+  config.repos = {
+    [REPO]: { ownerAutonomy: "merge", checks: ["make test"], train: {
+      appId: "6758967337", project: "Voxboard.xcodeproj", scheme: "Voxboard", everyHours: 24, holdMinutes: 60,
+      launch: { channelId: CHANNEL, name: "Vox.md" },
+      testflight: { group: "Public beta", joinUrl: "https://testflight.apple.com/join/dQXXSTxv" },
+    } },
+  };
+  const store = new Store(":memory:");
+  store.setCursor(`train:${REPO}:confirmed`.toLowerCase(), "1");
+  const github = new FakeGitHub();
+  let now = new Date("2026-11-16T12:00:00Z");
+  const commands: string[] = [];
+  const tags: string[] = [];
+  const staff: string[] = [];
+  const launches: string[] = [];
+  const beta = { state: "WAITING_FOR_BETA_REVIEW" as string | null, asked: [] as string[] };
+  const notifier = new Notifier({ bot: { token: "t", channelId: "999999999999999999" }, fetcher: (async (url: string, init: RequestInit) => {
+    const channel = /channels\/(\d+)\/messages/.exec(url)?.[1] ?? "";
+    const body = init.body instanceof FormData ? JSON.parse(String(init.body.get("payload_json"))) : init.body ? JSON.parse(String(init.body)) : null;
+    if (body) (channel === CHANNEL ? launches : staff).push(body.content);
+    return Response.json({ id: "1" });
+  }) as typeof fetch });
+  const train = new ReleaseTrain({
+    config, store, github, notifier,
+    now: () => now,
+    repo: () => ({ sync: async () => "abc123def4567890", checkoutAt: async () => "/tmp/isobot-train-test", removeWorkspace: async () => {},
+      pushTag: async (sha, tag) => { tags.push(`${tag}@${sha}`); } }),
+    run: async (_cwd, command) => { commands.push(command); return { ok: true, output: "uploaded" }; },
+    // App Review state is irrelevant to TestFlight: even a version in review doesn't hold the train.
+    appStatus: async () => ({ version: "3.0", state: "WAITING_FOR_REVIEW" }),
+    betaState: async (_app, _platform, build) => { beta.asked.push(build); return beta.state; },
+  });
+  const merged = (number: number, title: string) => {
+    store.enqueue(OWNER, NAME, number, title);
+    store.update(`${REPO}#${number}`, { state: "merged", prNumber: number + 100 });
+    github.add(OWNER, NAME, number, title, []);
+  };
+  const run = async () => { for (const ship of await train.tick()) await ship; };
+  return { store, github, commands, tags, staff, launches, beta, merged, run, advance: (minutes: number) => { now = new Date(now.getTime() + minutes * 60_000); } };
+}
+
+test("a TestFlight train uploads to the external group, waits out Beta App Review, then posts the beta", async () => {
+  const t = betaSetup();
+  t.merged(85, "One-tap recording");
+  await t.run();
+  const ship = [...t.github.issues.values()].find(i => i.title === "Ship 3.0.1")!;
+  assert.match(ship.body, /goes to TestFlight \(external group \*\*Public beta\*\*, after Beta App Review\)/);
+  assert.match(ship.body, /\*\*What to Test\*\*/);
+  assert.match(ship.body, /beta is on TestFlight/);
+
+  t.advance(61);
+  await t.run();
+  assert.equal(t.commands.length, 1);
+  assert.match(t.commands[0], /^asc publish testflight --app '6758967337' --project 'Voxboard.xcodeproj' --scheme 'Voxboard' --platform IOS --version '3\.0\.1' --group 'Public beta' --test-notes 'Fixes and improvements in this update:\n• One-tap recording' --locale en-US/);
+  assert.match(t.commands[0], /CURRENT_PROJECT_VERSION=202611161301'.* --submit --confirm/);
+  assert.doesNotMatch(t.commands[0], /appstore|--metadata-dir/);
+  assert.deepEqual(t.tags, ["testflight/3.0.1-202611161301@abc123def4567890"]);
+  assert.equal(t.store.get(`${REPO}#85`)!.state, "shipped");
+  assert.match(t.github.commentsFor(OWNER, NAME, 85).at(-1)!, /Submitted to TestFlight in 3\.0\.1 \(build 202611161301/);
+  assert.match(t.staff.at(-1)!, /🧪 \*\*codybontecou\/vox.md 3\.0\.1\*\* \(build 202611161301\) submitted to TestFlight for Public beta/);
+
+  t.advance(20);
+  await t.run();
+  assert.equal(t.launches.length, 0, "nothing while Apple reviews the beta");
+
+  t.merged(86, "Lock screen fix");
+  t.advance(24 * 60);
+  await t.run();
+  assert.equal([...t.github.issues.values()].filter(i => i.title.startsWith("Ship")).length, 1, "a build in Beta App Review holds the next train");
+
+  t.beta.state = "IN_BETA_TESTING";
+  t.advance(15);
+  await t.run();
+  assert.equal(t.launches.length, 1);
+  assert.match(t.launches[0], /^# 🧪 Vox\.md 3\.0\.1 beta is on TestFlight/);
+  assert.match(t.launches[0], /Join the beta on TestFlight: <https:\/\/testflight\.apple\.com\/join\/dQXXSTxv>/);
+  assert.doesNotMatch(t.launches[0], /apps\.apple\.com/);
+  assert.ok(t.staff.some(m => /on TestFlight for external testers \(build 202611161301\)/.test(m)));
+  assert.ok(t.beta.asked.every(build => build === "202611161301"));
+  assert.ok([...t.github.issues.values()].some(i => i.title === "Ship 3.0.1" && i.state === "open"), "the next build reuses the version");
+});
+
+test("a rejected beta gets no launch post and doesn't hold the train", async () => {
+  const t = betaSetup();
+  t.store.setCursor(`train:${REPO}:launch`.toLowerCase(), JSON.stringify({
+    version: "3.0.1", build: "202611150000", jobs: [], notes: { headline: "", items: [], whatsNew: "Bug fixes and improvements." },
+  }));
+  t.store.setCursor(`train:${REPO}:beta`.toLowerCase(), "202611150000");
+  t.beta.state = "BETA_REJECTED";
+  t.merged(90, "Another fix");
+  await t.run();
+  assert.equal(t.launches.length, 0);
+  assert.match(t.staff[0], /won't reach testers: TestFlight says BETA_REJECTED/);
+  assert.ok([...t.github.issues.values()].some(i => i.title === "Ship 3.0.1"));
+});
+
+test("TestFlight config is validated", async () => {
+  const { validateConfig } = await import("./config.js");
+  const config = loadConfig();
+  const train = { appId: "123456", project: "a", scheme: "s", everyHours: 24, holdMinutes: 60 };
+  config.repos[REPO] = { ownerAutonomy: "merge", checks: ["x"], train: { ...train, testflight: { group: " " } } };
+  assert.throws(() => validateConfig(config), /train.testflight.group/);
+  config.repos[REPO] = { ownerAutonomy: "merge", checks: ["x"], train: { ...train, testflight: { group: "Beta", joinUrl: "https://example.com/x" } } };
+  assert.throws(() => validateConfig(config), /train.testflight.joinUrl/);
+});

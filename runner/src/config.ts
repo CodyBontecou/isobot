@@ -40,7 +40,7 @@ export interface RepoPolicy {
    * Vox.md notes). Defaults to `autonomy`. Every merge gate still applies.
    */
   ownerAutonomy?: Autonomy;
-  /** Ship merged isobot work to the App Store on a schedule (see train.ts). */
+  /** Ship merged isobot work to the App Store, or to TestFlight, on a schedule (see train.ts). */
   train?: TrainConfig;
   /**
    * Devices the runner boots for each job (devices.ts). Checks and the builder's isobot shell
@@ -65,6 +65,19 @@ export interface TrainConfig {
   prepare?: string[];
   /** Announce each version to users in Discord once it's live on the App Store (launch.ts). */
   launch?: LaunchConfig;
+  /**
+   * Ship to TestFlight instead of the App Store: each train uploads a build, adds it to this external
+   * group and submits it for Beta App Review. Nothing goes to App Review, and the launch post
+   * goes out when external testers can install the build.
+   */
+  testflight?: TestFlightConfig;
+}
+
+export interface TestFlightConfig {
+  /** The external beta group's name or id in App Store Connect. */
+  group: string;
+  /** The group's public TestFlight link, for the launch post. Without it the post tells existing testers to update. */
+  joinUrl?: string;
 }
 
 export interface LaunchConfig {
@@ -246,6 +259,12 @@ export function validateConfig(config: RunnerConfig): void {
       if (t.launch) {
         if (!/^\d{17,20}$/.test(t.launch.channelId ?? "")) fail(`${name}: train.launch.channelId must be a Discord channel id`);
         if (t.launch.storeUrl !== undefined && !/^https:\/\/\S+$/.test(t.launch.storeUrl)) fail(`${name}: train.launch.storeUrl must be an https URL`);
+      }
+      if (t.testflight) {
+        if (!t.testflight.group?.trim()) fail(`${name}: train.testflight.group must name an external beta group`);
+        if (t.testflight.joinUrl !== undefined && !/^https:\/\/testflight\.apple\.com\/join\/\w+$/.test(t.testflight.joinUrl)) {
+          fail(`${name}: train.testflight.joinUrl must be a https://testflight.apple.com/join/… link`);
+        }
       }
     }
     if (policy.devices) {

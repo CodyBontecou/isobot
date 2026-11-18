@@ -307,7 +307,7 @@ checks, the reviewer, protected paths, the line limit, CI, and an unchanged issu
 
 ## Release train
 
-A repo with `train` in its policy ships merged isobot work to the App Store:
+A repo with `train` in its policy ships merged isobot work to the App Store (or to TestFlight, below):
 
 1. When merged jobs are waiting, the last train left at least `everyHours` ago, and no version is
    in App Review (`asc status`), the runner opens a **Ship x.y.z** issue listing the changes and
@@ -320,6 +320,29 @@ A repo with `train` in its policy ships merged isobot work to the App Store:
    for the next train.
 
 A repo's first train waits for you to add `isobot:ready` to its ship issue. Later trains don't.
+
+### TestFlight instead of the App Store
+
+Add `testflight` to a train to send each build to external testers instead of App Review:
+
+```json
+"train": { "...": "...", "testflight": { "group": "Public beta", "joinUrl": "https://testflight.apple.com/join/XXXXXXXX" } }
+```
+
+Step 2 then runs `asc publish testflight`: archive, upload, add the build to that external group,
+set What to Test (the same model-written text as What's New) and submit it for Beta App Review.
+Nothing is submitted to App Review, so App Store state doesn't hold the train. A build still waiting
+on Beta App Review holds the next one. The version is the App Store's current one with the patch
+bumped, so builds pile up under it until you release one yourself. Each build gets a timestamp build
+number and a `testflight/<version>-<build>` tag. Testers get TestFlight's own update notification.
+
+With `launch` set, the post goes out once the build reaches external testers (`IN_BETA_TESTING`),
+titled as a beta, with `joinUrl` (the group's public link) in place of the App Store link. Without
+`joinUrl` it tells existing testers to update. A rejected or expired build gets no post, and the
+staff channel hears about it.
+
+GitSync.md, Whereday and Vox.md trains ship to TestFlight. To put one on the App Store, submit it
+yourself.
 
 ### Release notes and launch posts
 

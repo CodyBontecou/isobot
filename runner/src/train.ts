@@ -19,6 +19,12 @@ import type { Job, Store } from "./store.js";
  *
  * The notes (and What's New) are written by the model at step 2, so the owner sees them during the hold.
  *
+ * With `testflight` set, step 2 runs `asc publish testflight` instead: the build goes to that external
+ * group and to Beta App Review, never to App Review. The version is still the App Store's with the
+ * patch bumped (so builds pile up under it until a real release), the tag is
+ * `testflight/<version>-<build>`, a build waiting on Beta App Review holds the next train, and the
+ * launch post goes out once external testers can install it.
+ *
  * A repo's first train waits for the owner to add the ready label to the ship issue; later ones don't.
  */
 
@@ -42,6 +48,13 @@ export interface TrainRepo {
   pushTag(sha: string, tag: string): Promise<void>;
 }
 
+/** TestFlight external build states in which Apple is still deciding: the next build waits. */
+const BETA_BUSY_STATES = new Set(["PROCESSING", "IN_EXPORT_COMPLIANCE_REVIEW", "WAITING_FOR_BETA_REVIEW", "IN_BETA_REVIEW"]);
+/** External testers can install the build. */
+const BETA_LIVE_STATES = new Set(["BETA_APPROVED", "IN_BETA_TESTING"]);
+/** The build will never reach external testers. */
+const BETA_DEAD_STATES = new Set(["BETA_REJECTED", "EXPIRED", "PROCESSING_EXCEPTION"]);
+
 export interface TrainDeps {
   config: RunnerConfig;
   store: Store;
@@ -51,6 +64,8 @@ export interface TrainDeps {
   /** Runs a shell command unsandboxed (it signs and uploads), returning its outcome. */
   run(cwd: string, command: string, timeoutMs: number): Promise<{ ok: boolean; output: string }>;
   appStatus(appId: string, platform: string): Promise<AppStatus>;
+  /** A TestFlight build's external state (WAITING_FOR_BETA_REVIEW, IN_BETA_TESTING, …), or null if it can't be found. */
+  betaState?(appId: string, platform: string, buildNumber: string): Promise<string | null>;
   now?: () => Date;
   /** True once the runner is stopping: a ship killed by shutdown stays pending and starts over next time. */
   stopping?: () => boolean;
@@ -75,6 +90,8 @@ interface Pending {
 /** A submitted version waiting to go live, so its launch post can go out. */
 interface Launch {
   version: string;
+  /** Set for a TestFlight build: the post waits for it to reach external testers. */
+  build?: string;
   notes: ReleaseNotes;
   jobs: { number: number; prNumber: number | null }[];
   failures?: number;
@@ -125,6 +142,17 @@ export function publishCommand(train: TrainConfig, version: string, buildNumber:
   return [
     "asc publish appstore", `--app ${q(train.appId)}`, target, `--scheme ${q(train.scheme)}`, `--platform ${train.platform ?? "IOS"}`,
     `--version ${q(version)}`, `--metadata-dir ${q(metadataDir)}`,
+    `--archive-xcodebuild-flag ${q(`MARKETING_VERSION=${version}`)}`, `--archive-xcodebuild-flag ${q(`CURRENT_PROJECT_VERSION=${buildNumber}`)}`,
+    "--wait --timeout 90m --submit --confirm --output json",
+  ].join(" ");
+}
+
+export function testflightCommand(train: TrainConfig, version: string, buildNumber: string, testNotes: string): string {
+  const q = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+  const target = train.workspace ? `--workspace ${q(train.workspace)}` : `--project ${q(train.project!)}`;
+  return [
+    "asc publish testflight", `--app ${q(train.appId)}`, target, `--scheme ${q(train.scheme)}`, `--platform ${train.platform ?? "IOS"}`,
+    `--version ${q(version)}`, `--group ${q(train.testflight!.group)}`, `--test-notes ${q(testNotes.slice(0, 3900))}`, "--locale en-US",
     `--archive-xcodebuild-flag ${q(`MARKETING_VERSION=${version}`)}`, `--archive-xcodebuild-flag ${q(`CURRENT_PROJECT_VERSION=${buildNumber}`)}`,
     "--wait --timeout 90m --submit --confirm --output json",
   ].join(" ");
@@ -190,24 +218,24 @@ export class ReleaseTrain {
       const last = store.cursor(this.key(owner, repo, "last"));
       if (last && now.getTime() - Date.parse(last) < train.everyHours * 3_600_000) return null;
       const status = await this.deps.appStatus(train.appId, train.platform ?? "IOS");
-      if (isBusy(status)) {
-        await this.busyNote(owner, repo, status);
-        return null;
-      }
+      if (await this.busy(owner, repo, train, status)) return null;
       const version = nextVersion(status.version);
       const sha = await this.deps.repo(owner, repo).sync(await github.defaultBranch(owner, repo));
       const firstTrain = !store.cursor(this.key(owner, repo, "confirmed"));
       const list = jobs.map(job => `- #${job.number} ${job.title}${job.prNumber ? ` (PR #${job.prNumber})` : ""}`).join("\n");
       const notes = await this.notesFor(owner, repo, train, version, jobs);
+      const beta = train.testflight;
       const preview = train.launch
-        ? `\n\n**Discord launch post** (in <#${train.launch.channelId}> once the version is live)\n\n${quote(launchMessage(appName(train), version, notes, storeUrl(train)))}`
+        ? `\n\n**Discord launch post** (in <#${train.launch.channelId}> once ${beta ? "external testers can install it" : "the version is live"})\n\n` +
+          quote(launchMessage(appName(train), version, notes, storeUrl(train), beta))
         : "";
+      const where = beta ? `TestFlight (external group **${beta.group}**, after Beta App Review)` : "App Review";
       const when = firstTrain
         ? `This is ${repo}'s first release train, so it waits for you: add \`${labels.ready}\` to this issue to ship it. Later trains go on their own.`
         : `Ships ${train.holdMinutes} minutes after this issue was opened. Add \`${labels.stop}\` or close the issue to hold it.`;
       const issue = await github.createIssue(owner, repo, `Ship ${version}`,
-        `## isobot release train\n\nVersion **${version}** from \`${sha.slice(0, 12)}\` goes to App Review with:\n\n${list}\n\n` +
-        `**What's New**\n\n${quote(notes.whatsNew)}${preview}\n\n${when}`, []);
+        `## isobot release train\n\nVersion **${version}** from \`${sha.slice(0, 12)}\` goes to ${where} with:\n\n${list}\n\n` +
+        `**${beta ? "What to Test" : "What's New"}**\n\n${quote(notes.whatsNew)}${preview}\n\n${when}`, []);
       const next: Pending = { issue: issue.number, sha, version, jobs: jobs.map(job => job.id), announcedAt: now.toISOString(), notes };
       store.setCursor(pendingKey, JSON.stringify(next));
       store.event(null, "train", `${owner}/${repo} ${version} announced in #${issue.number}`);
@@ -232,10 +260,7 @@ export class ReleaseTrain {
       return null;
     }
     const status = await this.deps.appStatus(train.appId, train.platform ?? "IOS");
-    if (isBusy(status)) {
-      await this.busyNote(owner, repo, status);
-      return null;
-    }
+    if (await this.busy(owner, repo, train, status)) return null;
     return () => this.ship(owner, repo, train, pending);
   }
 
@@ -269,18 +294,29 @@ export class ReleaseTrain {
     const now = this.now().getTime();
     if (now - (this.lastLaunchCheck.get(name) ?? -Infinity) < LAUNCH_CHECK_MS) return;
     this.lastLaunchCheck.set(name, now);
-    const status = await this.deps.appStatus(train.appId, train.platform ?? "IOS");
-    if (status.version && compareVersions(status.version, launch.version) > 0) {
-      // A later version took its place (this one was rejected and replaced): its post would be wrong.
-      store.setCursor(key, "");
-      console.log(`[train] ${name}: ${launch.version} never went live (now ${status.version}); no launch post`);
-      return;
+    if (launch.build) {
+      const state = await this.betaState(train, launch.build);
+      if (state && BETA_DEAD_STATES.has(state)) {
+        store.setCursor(key, "");
+        await notifier.discord(`⚠️ **${appName(train)} ${launch.version}** (build ${launch.build}) won't reach testers: TestFlight says ${state}. No launch post.`);
+        return;
+      }
+      if (!state || !BETA_LIVE_STATES.has(state)) return;
+    } else {
+      const status = await this.deps.appStatus(train.appId, train.platform ?? "IOS");
+      if (status.version && compareVersions(status.version, launch.version) > 0) {
+        // A later version took its place (this one was rejected and replaced): its post would be wrong.
+        store.setCursor(key, "");
+        console.log(`[train] ${name}: ${launch.version} never went live (now ${status.version}); no launch post`);
+        return;
+      }
+      if (status.version !== launch.version || status.state !== "READY_FOR_DISTRIBUTION") return;
     }
-    if (status.version !== launch.version || status.state !== "READY_FOR_DISTRIBUTION") return;
     const app = appName(train);
+    const beta = launch.build ? train.testflight ?? {} : undefined;
     try {
       const files = await this.launchMedia(owner, repo, launch);
-      await notifier.post(train.launch.channelId, launchMessage(app, launch.version, launch.notes, storeUrl(train)), files);
+      await notifier.post(train.launch.channelId, launchMessage(app, launch.version, launch.notes, storeUrl(train), beta), files);
     } catch (error) {
       const failures = (launch.failures ?? 0) + 1;
       if (failures < LAUNCH_MAX_FAILURES) {
@@ -293,7 +329,8 @@ export class ReleaseTrain {
     }
     store.setCursor(key, "");
     store.event(null, "train", `${name} ${launch.version} launch posted`);
-    await notifier.discord(`📣 **${app} ${launch.version}** is live on the App Store; the launch post is in <#${train.launch.channelId}>.`);
+    await notifier.discord(`📣 **${app} ${launch.version}** is ${beta ? `on TestFlight for external testers (build ${launch.build})` : "live on the App Store"}; ` +
+      `the launch post is in <#${train.launch.channelId}>.`);
   }
 
   /** One capture per change (a screenshot if it has one), within Discord's limits. A missing capture costs only itself. */
@@ -320,6 +357,25 @@ export class ReleaseTrain {
     return files;
   }
 
+  /** Whether Apple is still busy with the last release: App Review for the App Store, Beta App Review for TestFlight. */
+  private async busy(owner: string, repo: string, train: TrainConfig, status: AppStatus): Promise<boolean> {
+    if (!train.testflight) {
+      if (isBusy(status)) await this.busyNote(owner, repo, status);
+      return isBusy(status);
+    }
+    const last = this.deps.store.cursor(this.key(owner, repo, "beta"));
+    if (!last) return false;
+    const state = await this.betaState(train, last);
+    if (!state || !BETA_BUSY_STATES.has(state)) return false;
+    await this.busyNote(owner, repo, { version: `build ${last}`, state });
+    return true;
+  }
+
+  private async betaState(train: TrainConfig, build: string): Promise<string | null> {
+    if (!this.deps.betaState) return null;
+    return this.deps.betaState(train.appId, train.platform ?? "IOS", build);
+  }
+
   private async busyNote(owner: string, repo: string, status: AppStatus): Promise<void> {
     const name = `${owner}/${repo}`;
     const last = this.lastBusyNote.get(name) ?? 0;
@@ -337,7 +393,10 @@ export class ReleaseTrain {
     const jobs = pending.jobs.map(id => store.get(id)).filter((job): job is Job => Boolean(job));
     // Chosen at ship time, so a retry after an interrupted upload never reuses a build number.
     const buildNumber = timestampBuildNumber(this.now());
-    await github.comment(owner, repo, pending.issue, `🏗 Archiving, uploading and submitting ${pending.version} (build ${buildNumber}).`);
+    const beta = train.testflight;
+    const tag = beta ? `testflight/${pending.version}-${buildNumber}` : `v${pending.version}`;
+    await github.comment(owner, repo, pending.issue,
+      `🏗 Archiving, uploading and submitting ${pending.version} (build ${buildNumber})${beta ? ` to TestFlight (${beta.group})` : ""}.`);
     store.event(null, "train", `${name} ${pending.version} shipping`);
     let result: { ok: boolean; output: string };
     try {
@@ -350,8 +409,10 @@ export class ReleaseTrain {
         result = await this.deps.run(dir, command, 60 * 60_000);
         if (!result.ok) break;
       }
-      if (result.ok) result = await this.deps.run(dir, publishCommand(train, pending.version, buildNumber, metadata), 3 * 60 * 60_000);
-      if (result.ok) await git.pushTag(pending.sha, `v${pending.version}`);
+      const notes = pending.notes?.whatsNew ?? whatsNew(jobs);
+      const command = beta ? testflightCommand(train, pending.version, buildNumber, notes) : publishCommand(train, pending.version, buildNumber, metadata);
+      if (result.ok) result = await this.deps.run(dir, command, 3 * 60 * 60_000);
+      if (result.ok) await git.pushTag(pending.sha, tag);
     } finally {
       await git.removeWorkspace(workspace).catch(() => undefined);
     }
@@ -366,21 +427,25 @@ export class ReleaseTrain {
       return;
     }
     store.setCursor(this.key(owner, repo, "confirmed"), "1");
+    if (beta) store.setCursor(this.key(owner, repo, "beta"), buildNumber);
     if (train.launch) {
       const launch: Launch = {
-        version: pending.version, notes: pending.notes ?? fallbackNotes(jobs),
+        version: pending.version, ...(beta ? { build: buildNumber } : {}), notes: pending.notes ?? fallbackNotes(jobs),
         jobs: jobs.map(job => ({ number: job.number, prNumber: job.prNumber })),
       };
       store.setCursor(this.key(owner, repo, "launch"), JSON.stringify(launch));
     }
     for (const job of jobs) {
       store.update(job.id, { state: "shipped" });
-      await github.comment(owner, repo, job.number, `🚀 Submitted to App Review in ${pending.version} (#${pending.issue}).`).catch(() => undefined);
+      const where = beta ? `TestFlight in ${pending.version} (build ${buildNumber}, external testers after Beta App Review)` : `App Review in ${pending.version}`;
+      await github.comment(owner, repo, job.number, `🚀 Submitted to ${where} (#${pending.issue}).`).catch(() => undefined);
     }
-    await github.comment(owner, repo, pending.issue, `🚀 ${pending.version} (build ${buildNumber}) is uploaded and submitted for App Review, tagged \`v${pending.version}\`.`);
+    const review = beta ? `added to the TestFlight group ${beta.group} and submitted for Beta App Review` : "submitted for App Review";
+    await github.comment(owner, repo, pending.issue, `🚀 ${pending.version} (build ${buildNumber}) is uploaded and ${review}, tagged \`${tag}\`.`);
     await github.closeIssue(owner, repo, pending.issue);
-    store.event(null, "train", `${name} ${pending.version} submitted`);
-    await this.deps.notifier.discord(`🚀 **${name} ${pending.version}** submitted for App Review with ${jobs.length} change${jobs.length === 1 ? "" : "s"}.`);
+    store.event(null, "train", `${name} ${pending.version} submitted${beta ? ` to TestFlight (build ${buildNumber})` : ""}`);
+    await this.deps.notifier.discord(`${beta ? "🧪" : "🚀"} **${name} ${pending.version}** ${beta ? `(build ${buildNumber}) submitted to TestFlight for ${beta.group}` : "submitted for App Review"} ` +
+      `with ${jobs.length} change${jobs.length === 1 ? "" : "s"}.`);
   }
 }
 

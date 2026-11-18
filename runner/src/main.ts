@@ -116,6 +116,14 @@ function runtime(): Runtime {
       const status = JSON.parse(result.stdout) as { appstore?: { version?: string; state?: string } };
       return { version: status.appstore?.version ?? null, state: status.appstore?.state ?? null };
     },
+    betaState: async (appId, platform, buildNumber) => {
+      const result = await run("asc", ["builds", "build-beta-detail", "view", "--app", appId, "--build-number", buildNumber, "--platform", platform, "--output", "json"],
+        { cwd: env.home, env: workerEnv(), timeoutMs: 120_000 });
+      // Right after upload, before processing, the build doesn't exist yet.
+      if (result.code !== 0) return null;
+      const detail = JSON.parse(result.stdout) as { data?: { attributes?: { externalBuildState?: string } } };
+      return detail.data?.attributes?.externalBuildState ?? null;
+    },
   });
   return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, secrets };
 }

@@ -198,6 +198,7 @@
       "ownerAutonomy": "merge",
       "train": {
         "appId": "6758960270",
+        "testflight": { "group": "External" },
         "project": "Sync.md.xcodeproj",
         "scheme": "Sync.md",
         "everyHours": 24,
@@ -237,6 +238,7 @@
       "ownerAutonomy": "merge",
       "train": {
         "appId": "6761960794",
+        "testflight": { "group": "Beta Testers", "joinUrl": "https://testflight.apple.com/join/Tn2hDXRG" },
         "project": "IsoMe.xcodeproj",
         "scheme": "IsoMe",
         "everyHours": 24,
@@ -265,6 +267,7 @@
       "ownerAutonomy": "merge",
       "train": {
         "appId": "6758967337",
+        "testflight": { "group": "Public beta", "joinUrl": "https://testflight.apple.com/join/dQXXSTxv" },
         "project": "Voxboard.xcodeproj",
         "scheme": "Voxboard",
         "everyHours": 24,
