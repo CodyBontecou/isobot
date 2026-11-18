@@ -86,7 +86,7 @@ Per repository in `runner/config/isobot.json`:
   automatically when every gate passes.
 - Gates for an automatic merge: configured runner checks pass; the independent
   reviewer approves with confidence ≥ `minReviewConfidence` and not high risk;
-  the diff is under `maxChangedLines`; no protected paths (auth, sign-in,
+  no protected paths (auth, sign-in,
   credentials, purchases, paywalls, entitlements, Info.plist, CI, migrations…,
   matched as folders and as file names); no net deletion of test lines and no
   new skip/ignore/focus markers (`it.skip`, `XCTSkip`, `-skip-testing`,

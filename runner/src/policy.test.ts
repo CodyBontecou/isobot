@@ -6,7 +6,7 @@ import { evaluateGate, matchesGlob, skipMarkers, type GateInput } from "./policy
 
 const policy: RepoPolicy = {
   autonomy: "merge", checks: ["npm test"], protectedPaths: [".github/**", "**/*auth*/**", "**/Info.plist"],
-  maxChangedLines: 100, minReviewConfidence: 0.85, requireCi: true, release: { onMerge: [], onShip: [] },
+  minReviewConfidence: 0.85, requireCi: true, release: { onMerge: [], onShip: [] },
 };
 
 function input(overrides: Partial<GateInput> = {}): GateInput {
@@ -49,7 +49,6 @@ test("every gate blocks on its own", () => {
     [{ review: { verdict: "request_changes", confidence: 0.9, risk: "low", summary: "", concerns: [] } }, /requested changes/],
     [{ review: { verdict: "approve", confidence: 0.5, risk: "low", summary: "", concerns: [] } }, /confidence 0.50/],
     [{ review: { verdict: "approve", confidence: 0.99, risk: "high", summary: "", concerns: [] } }, /high risk/],
-    [{ diff: { files: [{ path: "a.ts", added: 200, removed: 0, binary: false }], changedLines: 200 } }, /exceed/],
     [{ diff: { files: [{ path: "App/Auth/Token.swift", added: 1, removed: 0, binary: false }], changedLines: 1 } }, /protected paths: App\/Auth\/Token.swift/],
     [{ diff: { files: [{ path: "AppTests/LoginTests.swift", added: 1, removed: 9, binary: false }], changedLines: 10 } }, /removes more test lines/],
     [{ diff: { files: [{ path: "src/x.test.ts", added: 0, removed: 4, binary: false }], changedLines: 4 } }, /removes more test lines/],

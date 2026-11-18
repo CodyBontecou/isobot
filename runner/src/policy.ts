@@ -47,7 +47,6 @@ export function evaluateGate(input: GateInput): GateDecision {
   else if (!checks.passed) reasons.push("runner checks failed");
   reasons.push(...reviewShortfalls(review, policy));
   if (diff.files.length === 0) reasons.push("the change is empty");
-  if (diff.changedLines > policy.maxChangedLines) reasons.push(`${diff.changedLines} changed lines exceed the ${policy.maxChangedLines}-line limit`);
   const protectedHits = diff.files.filter(file => policy.protectedPaths.some(glob => matchesGlob(file.path, glob))).map(file => file.path);
   if (protectedHits.length) reasons.push(`touches protected paths: ${protectedHits.slice(0, 8).join(", ")}`);
   // Deleting test lines is how an agent "fixes" a failing test; additions are fine.

@@ -234,7 +234,6 @@ target repo):
 "codybontecou/time.md": {
   "autonomy": "merge",
   "checks": ["make test"],
-  "maxChangedLines": 300,
   "notes": "SwiftUI app; run make lint before committing.",
   "release": {
     "onMerge": ["fastlane beta"],
@@ -264,8 +263,8 @@ Work counts as yours when the issue has `isobot:auto` **added by your account**.
 The runner adds it to proposals it auto-approves from your Vox.md notes. Add it
 yourself to an issue you write. A collaborator or bot adding it changes nothing,
 and removing it at any point (or adding `isobot:stop`) drops back to `autonomy`.
-Every merge gate still applies: runner checks, the reviewer, GitHub CI, the line
-limit, protected paths and unchanged issue text. `ownerAutonomy: "merge"` needs
+Every merge gate still applies: runner checks, the reviewer, GitHub CI,
+protected paths and unchanged issue text. `ownerAutonomy: "merge"` needs
 checks, like `autonomy: "merge"`. After an automatic merge, `release.onMerge`
 runs, and `release.onShip` still waits for `isobot:ship`.
 
@@ -315,7 +314,7 @@ for you to add `isobot:ready`. Your Vox.md notes follow `vox.autoApprove`, but m
 
 A stranger's GitHub issue that isobot approved this way builds from isobot's own proposal comment,
 never the reporter's text, so it may merge like your own work. Every merge gate still applies:
-checks, the reviewer, protected paths, the line limit, CI, and an unchanged issue.
+checks, the reviewer, protected paths, CI, and an unchanged issue.
 
 ## Release train
 
