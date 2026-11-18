@@ -41,7 +41,7 @@ function setup(content: Partial<ContentConfig> = {}) {
   return { config, store, github, builder, repo, pipeline, checkCalls, leases };
 }
 
-test("a content issue builds with the site's checks and no devices, and merges where the app itself wouldn't", async () => {
+test("a content issue builds with the site's checks on the app's devices, and merges where the app itself wouldn't", async () => {
   const { github, pipeline, store, checkCalls, leases, builder } = setup();
   github.add(OWNER, NAME, 5, "Export Time data to CSV", ["isobot:content", "isobot:ready", "isobot:auto"], "Write the guide.");
   store.setCursor(contentEvidenceKey(OWNER, NAME, 5), "120 impressions at position 9");
@@ -52,7 +52,7 @@ test("a content issue builds with the site's checks and no devices, and merges w
   assert.equal(job.kind, "content");
   assert.equal(job.state, "merged");
   assert.deepEqual(checkCalls[0], ["npm run site:check"]);
-  assert.deepEqual(leases, []);
+  assert.deepEqual(leases, ["codybontecou/time.md#5"]);
   assert.match(builder.reviewTasks[0], /Content standard/);
   assert.match(builder.reviewTasks[0], /Posts go in website\/blog/);
   assert.match(builder.reviewTasks[0], /120 impressions at position 9/);

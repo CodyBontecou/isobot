@@ -403,7 +403,8 @@ content train (`runner/src/content.ts`). Health.md (healthmd.app), GitSync.md (g
    those stay in the runner's store and reach the builder through the task.
 3. **Build and merge.** The usual build, checks, review and gates, under the site's content policy
    (`contentPolicy` in config.ts) instead of the app's:
-   - checks are `content.checks` (the site's build and tests), and no simulators or emulators are booted;
+   - checks are `content.checks` (the site's build and tests); the repo's simulators and emulators are
+     still booted, so walkthroughs are checked and screenshotted in the real app;
    - every changed file must match `content.allowedPaths`, or the merge is left to you;
    - protected paths are CI, deploy and secret configuration, agent instructions and package manifests,
      not the app's list (whose `**/*premium*` and the like match ordinary post slugs);

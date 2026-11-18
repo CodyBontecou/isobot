@@ -56,8 +56,8 @@ export interface RepoPolicy {
 }
 
 /**
- * One marketing site fed by the content train. Content jobs replace the repo's checks, devices, protected
- * paths and release steps with these, never ship through the release train, and merge on `autonomy`.
+ * One marketing site fed by the content train. Content jobs replace the repo's checks, protected paths and
+ * release steps with these (they keep its devices, for verified walkthroughs and screenshots), never ship through the release train, and merge on `autonomy`.
  */
 export interface ContentConfig {
   /** The site's host, e.g. healthmd.app. Published URLs must be on it. */
@@ -392,7 +392,7 @@ export function contentPolicy(policy: RepoPolicy): RepoPolicy {
     requireCi: content.requireCi ?? false,
     release: { onMerge: [], onShip: [] },
     notes: content.notes,
-    devices: undefined,
+    // Walkthroughs are verified, and screenshotted, on the app's own simulator or emulator.
     train: undefined,
   };
 }

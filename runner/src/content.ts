@@ -26,7 +26,8 @@ export const contentEvidenceKey = (owner: string, repo: string, number: number) 
 export const CONTENT_BUILD_RULES = `## Content standard (isobot content train)
 This is website content for search, built from the research brief above. It merges on its own once the site's checks and an independent review pass, so it has to be right the first time. Reviewer: hold it to this standard.
 - Write for a person with the problem in the brief: answer the query early, then give the steps. Be concrete: real menu names, file formats, settings and limits.
-- Every claim about the app must match what the app actually does. Check it in this repository's app source and docs; when you can't verify a capability, leave it out. Never invent features, numbers, quotes, testimonials, prices, rankings or study results.
+- Every claim about the app must match what the app actually does. Check it in this repository's app source and docs; when you can't verify a capability, leave it out.
+- When the brief asks for a verified walkthrough or screenshots and this job has devices, build the app and run through it there, capturing the screens with sample data only. Otherwise trace the steps through the source, and say which you did. Never invent features, numbers, quotes, testimonials, prices, rankings or study results.
 - Claims about other products (their native exports, settings, limits) need a primary source: link it.
 - Don't duplicate an existing page: extend it or link to it. Link to the new page from one to three related existing pages, and from it to them.
 - Follow the site's conventions in the repository notes exactly (location, frontmatter, slug, index, sitemap, translations, call to action), and run the site's build and tests.
