@@ -1,5 +1,4 @@
 import { ChannelType, type AnyThreadChannel, type Client, type ForumChannel } from "discord.js";
-import { handleIssueOpened, type IssueOpenedPayload } from "./issueOpened.js";
 
 const THREAD_ID_RE = /<!--\s*isobot:discord-thread:(\d+)\s*-->/;
 const FROM_DISCORD_MARKER = "<!-- isobot:from-discord -->";
@@ -43,8 +42,9 @@ export async function handleEvent(client: Client, event: string | undefined, pay
 async function routeIssueEvent(client: Client, event: string, payload: IssueLikePayload): Promise<void> {
   const tag = `${payload.repository?.full_name ?? "?"}#${payload.issue?.number ?? "?"} ${event}.${payload.action}`;
 
+  // Issues opened on GitHub don't get a #help thread; only Discord-originated issues are mirrored.
   if (event === "issues" && payload.action === "opened") {
-    await handleIssueOpened(client, payload as unknown as IssueOpenedPayload);
+    console.log(`[webhook] ${tag}: opened on GitHub, no Discord thread`);
     return;
   }
 
