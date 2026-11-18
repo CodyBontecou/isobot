@@ -33,3 +33,24 @@ test("cursors, seen items and events persist", () => {
   assert.deepEqual(store.events(job.id).map(e => e.kind), ["state:building", "queued"]);
   assert.deepEqual(store.inState("building").map(j => j.id), ["o/r#2"]);
 });
+
+test("opening the store waits for another process's lock instead of failing (a restart's old runner or a CLI command)", async () => {
+  const { spawn } = await import("node:child_process");
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const file = path.join(mkdtempSync(path.join(tmpdir(), "isobot-lock-")), "runner.sqlite");
+  // A fresh file (not yet WAL), written to under an exclusive lock held for a second.
+  const holder = spawn(process.execPath, ["-e", `
+    const { DatabaseSync } = require("node:sqlite");
+    const db = new DatabaseSync(${JSON.stringify(file)});
+    db.exec("CREATE TABLE x (a); BEGIN EXCLUSIVE");
+    console.log("holding");
+    setTimeout(() => db.exec("COMMIT"), 1000);
+  `], { stdio: ["ignore", "pipe", "inherit"] });
+  await new Promise<void>(resolve => holder.stdout.once("data", () => resolve()));
+  const store = new Store(file);
+  assert.equal(store.cursor("anything"), null);
+  store.close();
+  await new Promise(resolve => holder.once("close", resolve));
+});

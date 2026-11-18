@@ -165,8 +165,8 @@ const HUNG_CYCLE_MS = 2 * 60 * 60_000;
 
 async function loop(rt: Runtime): Promise<void> {
   acquireLock(rt.env);
-  rt.pipeline.recover();
-  // Nothing is running yet, so any workspace left behind is from a crash.
+  // Nothing is running yet: workspaces left behind are interrupted builds. Keep their work, then clear them.
+  await rt.pipeline.recover();
   rmSync(path.join(rt.env.home, "work"), { recursive: true, force: true });
   removeDerivedData(path.join(rt.env.home, "work"));
   rmSync(path.join(rt.env.home, "mcp"), { recursive: true, force: true });
@@ -181,7 +181,7 @@ async function loop(rt: Runtime): Promise<void> {
   const shutdown = (signal: string) => {
     if (stopping) return;
     stopping = true;
-    console.log(`[runner] ${signal}: stopping; interrupted builds restart from scratch next time`);
+    console.log(`[runner] ${signal}: stopping; interrupted builds pick up where they were on the next start`);
     rt.pipeline.beginShutdown();
     shuttingDown = true;
     killAllChildren();
@@ -387,7 +387,7 @@ async function main(): Promise<void> {
       return loop(rt);
     case "once": {
       acquireLock(rt.env);
-      rt.pipeline.recover();
+      await rt.pipeline.recover();
       const claimed = await rt.pipeline.discover();
       console.log(`[once] claimed ${claimed.length} issue(s)`);
       await Promise.all(rt.pipeline.startQueued());

@@ -117,6 +117,10 @@ export class Repo {
     });
   }
 
+  hasWorkspace(name: string): boolean {
+    return existsSync(path.join(this.workspacePath(name), ".git"));
+  }
+
   async removeWorkspace(name: string): Promise<void> {
     const dir = this.workspacePath(name);
     rmSync(dir, { recursive: true, force: true });

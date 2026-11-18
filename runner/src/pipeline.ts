@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AgentRun, Builder, JobDevices, Review } from "./builder.js";
@@ -20,6 +20,9 @@ export interface RepoOps {
   sync(defaultBranch: string): Promise<string>;
   createWorkspace(branch: string, baseSha: string): Promise<string>;
   removeWorkspace(name: string): Promise<void>;
+  /** Whether a build workspace for this branch is still on disk (a restart left it behind). */
+  hasWorkspace(name: string): boolean;
+  workspacePath(name: string): string;
   commitPending(dir: string, message: string): Promise<void>;
   capture(dir: string, branch: string): Promise<string>;
   ahead(baseSha: string, sha: string): Promise<number>;
@@ -80,6 +83,26 @@ export interface TaskSource {
   fingerprint: string;
 }
 
+/**
+ * Where a running build is, saved as it goes so a restart can pick it up (recover()).
+ * `builder`: a builder session is running; `verify`: the runner is checking, reviewing or merging its work.
+ */
+interface Progress {
+  stage: "builder" | "verify";
+  /** The latest builder summary (what checks are run against) and the first one (the PR's description). */
+  summary: string;
+  main: string;
+  media: string;
+}
+
+/** What recover() kept of an interrupted build: its work as a commit, and where it was. */
+interface Checkpoint extends Progress {
+  sha: string;
+}
+
+const progressKey = (id: string) => `progress:${id}`;
+const checkpointKey = (id: string) => `checkpoint:${id}`;
+
 /** Job states a retry may start over from. */
 const REBUILDABLE = ["merged", "released", "shipped", "closed", "failed", "stopped"];
 
@@ -91,9 +114,16 @@ export class Pipeline {
 
   constructor(private deps: PipelineDeps) {}
 
-  /** Call before killing child processes. Running jobs stay "building", and recover() re-queues them on the next start. */
+  /**
+   * Call before killing child processes. Running jobs stay "building" with their workspaces on disk, and
+   * recover() saves and re-queues them on the next start. A deliberate stop doesn't use up an attempt.
+   */
   beginShutdown(): void {
     this.shuttingDown = true;
+    for (const id of this.running) {
+      const job = this.deps.store.get(id);
+      if (job?.state === "building") this.deps.store.update(id, { attempts: Math.max(0, job.attempts - 1) });
+    }
   }
 
   private get labels() { return this.deps.config.labels; }
@@ -163,9 +193,40 @@ export class Pipeline {
     return [...this.running];
   }
 
-  /** After a restart, interrupted builds start again from a clean workspace. */
-  recover(): void {
-    for (const job of this.deps.store.inState("building")) this.deps.store.update(job.id, { state: "queued" });
+  /**
+   * After a restart (or crash), before workspaces are cleared: each interrupted build's work is committed
+   * and kept, and the job queued to pick up where it was: the builder session resumes, or checks and review
+   * run again on its work. A build with nothing on disk starts over.
+   */
+  async recover(): Promise<void> {
+    const { store } = this.deps;
+    for (const job of store.inState("building")) {
+      let checkpoint: Checkpoint | null = null;
+      try {
+        checkpoint = await this.salvage(job);
+      } catch (error) {
+        console.warn(`[recover] ${job.id}: couldn't keep its work: ${(error as Error).message}`);
+      }
+      store.setCursor(checkpointKey(job.id), checkpoint ? JSON.stringify(checkpoint) : "");
+      store.setCursor(progressKey(job.id), "");
+      store.update(job.id, { state: "queued" });
+      store.event(job.id, "interrupted", checkpoint ? `kept ${checkpoint.sha.slice(0, 12)} (${checkpoint.stage})` : "nothing to keep; starts over");
+    }
+  }
+
+  private async salvage(job: Job): Promise<Checkpoint | null> {
+    const raw = this.deps.store.cursor(progressKey(job.id));
+    if (!raw || !job.branch) return null;
+    const progress = JSON.parse(raw) as Progress;
+    const repo = this.deps.repo(job.owner, job.repo);
+    if (!repo.hasWorkspace(job.branch)) return null;
+    const dir = repo.workspacePath(job.branch);
+    await repo.commitPending(dir, "WIP: interrupted by a runner restart");
+    return { ...progress, sha: await repo.capture(dir, job.branch) };
+  }
+
+  private setProgress(id: string, progress: Progress | null): void {
+    this.deps.store.setCursor(progressKey(id), progress ? JSON.stringify(progress) : "");
   }
 
   /**
@@ -211,12 +272,18 @@ export class Pipeline {
     if (attempts > MAX_ATTEMPTS) return this.fail(job, new Error(`gave up after ${MAX_ATTEMPTS} interrupted attempts`));
     // A revision continues the open PR's branch and builder session instead of starting over.
     const revising = job.revising && job.prNumber !== null && job.branch !== null;
-    const branch = revising ? job.branch! : `isobot/${job.number}-${slug(job.title)}`;
+    // Work a restart interrupted (recover()): it continues from its saved commit on the same branch.
+    const savedCheckpoint = store.cursor(checkpointKey(job.id));
+    const resume = savedCheckpoint ? JSON.parse(savedCheckpoint) as Checkpoint : null;
+    store.setCursor(checkpointKey(job.id), "");
+    this.setProgress(job.id, null);
+    const branch = resume && job.branch ? job.branch : revising ? job.branch! : `isobot/${job.number}-${slug(job.title)}`;
     job = store.update(job.id, { state: "building", attempts, branch });
     let workspace: string | null = null;
     let lease: DeviceLease | null = null;
     // Screenshots and recordings of visible changes ($ISOBOT_MEDIA); both of the builder's sandboxes can write temp.
-    const mediaDir = mkdtempSync(path.join(this.deps.mediaRoot ?? tmpdir(), "isobot-media-"));
+    // An interrupted build keeps the captures it already made.
+    const mediaDir = resume?.media && existsSync(resume.media) ? resume.media : mkdtempSync(path.join(this.deps.mediaRoot ?? tmpdir(), "isobot-media-"));
     try {
       const issue = await github.issue(job.owner, job.repo, job.number);
       if (issue.state === "closed" || hasLabel(issue, this.labels.stop)) return this.stop(job, issue);
@@ -237,7 +304,34 @@ export class Pipeline {
       let baseSha: string;
       let noteRounds = 0;
       const sessionId = () => run?.sessionId ?? store.get(job.id)?.sessionId ?? null;
-      if (revising) {
+      /**
+       * Every builder run. Its session id is chosen and saved before it starts, and the stage after, so a
+       * restart in the middle resumes that session (recover()).
+       */
+      const builderStep = async (call: (ids: { sessionId: string | null; newSessionId: string }) => Promise<AgentRun>, from = sessionId()) => {
+        const newSessionId = randomUUID();
+        store.update(job.id, { sessionId: from ?? newSessionId });
+        this.setProgress(job.id, { stage: "builder", summary: "", main: mainSummary, media: mediaDir });
+        const result = await call({ sessionId: from, newSessionId });
+        store.update(job.id, { sessionId: result.sessionId ?? from ?? newSessionId });
+        mainSummary ||= result.summary;
+        this.setProgress(job.id, { stage: "verify", summary: result.summary, main: mainSummary, media: mediaDir });
+        return result;
+      };
+      if (resume) {
+        baseSha = await repo.mergeBase(mainSha, resume.sha);
+        workspace = await repo.createWorkspace(branch, resume.sha);
+        mainSummary = resume.main;
+        if (resume.stage === "builder") {
+          await this.feed(job, { phase: "implementing" }, "♻️ The runner restarted mid-build. The builder picks up where it left off.");
+          run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback: "", devices, media: mediaDir, resumed: true }));
+        } else {
+          await this.deps.notifier.say(job, "♻️ The runner restarted mid-build. Checks and review run again on the builder's work so far.");
+          run = { ok: true, sessionId: sessionId(), summary: resume.summary };
+          this.setProgress(job.id, { stage: "verify", summary: resume.summary, main: mainSummary, media: mediaDir });
+        }
+        store.event(job.id, "resumed", run.summary);
+      } else if (revising) {
         const head = await repo.fetchBranch(branch);
         baseSha = await repo.mergeBase(mainSha, head);
         workspace = await repo.createWorkspace(branch, head);
@@ -246,21 +340,17 @@ export class Pipeline {
         await github.comment(job.owner, job.repo, job.number, `🔁 isobot is revising PR #${job.prNumber} with your note. Add \`${this.labels.stop}\` to stop.`);
         await this.feed(job, { phase: "revising", notes: this.noteCount(job, notes.fresh.length) }, this.ackNotes(notes.fresh));
         noteRounds++;
-        run = await builder.revise({
-          cwd: workspace, sessionId: job.sessionId, task, devices, media: mediaDir,
+        run = await builderStep(ids => builder.revise({
+          cwd: workspace!, ...ids, task, devices, media: mediaDir,
           feedback: notes.fresh.length ? noteFeedback(notes.fresh) : "Re-read the task and the owner's follow-up notes, and make sure this branch satisfies all of them.",
-        });
-        store.update(job.id, { sessionId: run.sessionId ?? job.sessionId });
+        }), job.sessionId);
         store.event(job.id, "revised", run.summary);
-        mainSummary = run.summary;
       } else {
         baseSha = mainSha;
         workspace = await repo.createWorkspace(branch, baseSha);
         await this.feed(job, { phase: "implementing" });
-        run = await builder.implement({ cwd: workspace, task, devices, media: mediaDir });
-        store.update(job.id, { sessionId: run.sessionId });
+        run = await builderStep(ids => builder.implement({ cwd: workspace!, task, devices, media: mediaDir, sessionId: ids.newSessionId }), null);
         store.event(job.id, "implemented", run.summary);
-        mainSummary = run.summary;
       }
       const commit = async (message: string) => {
         await repo.commitPending(workspace!, message);
@@ -291,7 +381,7 @@ export class Pipeline {
             noteRounds++;
             task = withNotes(source.task, late.all);
             await this.feed(job, { phase: "revising", notes: this.noteCount(job, late.fresh.length) }, this.ackNotes(late.fresh));
-            run = await builder.revise({ cwd: workspace, sessionId: sessionId(), task, feedback: noteFeedback(late.fresh), devices, media: mediaDir });
+            run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback: noteFeedback(late.fresh), devices, media: mediaDir }));
             laterRounds.push({ label: "Owner note", summary: run.summary });
             sha = await commit(`Apply owner feedback for #${issue.number}`);
             checks = await runChecks(run.summary);
@@ -301,7 +391,7 @@ export class Pipeline {
         if (!checks.passed && fixRounds < this.deps.config.builder.maxFixRounds) {
           fixRounds++;
           await this.feed(job, { phase: "fixing", fixRounds });
-          run = await builder.revise({ cwd: workspace, sessionId: sessionId(), task, feedback: failureFeedback(checks), devices, media: mediaDir });
+          run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback: failureFeedback(checks), devices, media: mediaDir }));
           laterRounds.push({ label: `Check fix ${fixRounds}`, summary: run.summary });
           sha = await commit(`Fix checks for #${issue.number}`);
           checks = await runChecks(run.summary);
@@ -323,7 +413,8 @@ export class Pipeline {
         if (retry && reviewRounds < this.deps.config.builder.maxReviewRounds) {
           reviewRounds++;
           await this.feed(job, { phase: "addressing", reviewRounds });
-          run = await builder.revise({ cwd: workspace, sessionId: run.sessionId, task, feedback: reviewFeedback(review, shortfalls), devices, media: mediaDir });
+          const feedback = reviewFeedback(review, shortfalls);
+          run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback, devices, media: mediaDir }));
           laterRounds.push({ label: `Review round ${reviewRounds}`, summary: run.summary });
           sha = await commit(`Address review for #${issue.number}`);
           checks = await runChecks(run.summary);
@@ -409,8 +500,12 @@ export class Pipeline {
       else await this.fail(job, error as Error);
     } finally {
       if (lease) await lease.release().catch(error => console.warn(`[devices] ${job.id}: release failed: ${(error as Error).message}`));
-      rmSync(mediaDir, { recursive: true, force: true });
-      if (workspace) await repo.removeWorkspace(branch).catch(() => undefined);
+      // On shutdown the workspace, captures and progress stay for recover() to pick up.
+      if (!this.shuttingDown) {
+        this.setProgress(job.id, null);
+        rmSync(mediaDir, { recursive: true, force: true });
+        if (workspace) await repo.removeWorkspace(branch).catch(() => undefined);
+      }
     }
   }
 

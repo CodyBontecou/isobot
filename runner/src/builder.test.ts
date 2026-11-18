@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { builderSettings, defaultDenyPaths, parseResult, parseReview, parseTriage } from "./builder.js";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { builderSettings, ClaudeCodeBuilder, defaultDenyPaths, parseResult, parseReview, parseTriage, RESUME_PROMPT, revisePrompt } from "./builder.js";
 
 test("parses the CLI's JSON result, including after stray diagnostics", () => {
   const payload = { type: "result", subtype: "success", is_error: false, session_id: "s1", result: "done", structured_output: { a: 1 } };
@@ -67,4 +70,28 @@ test("triage scope defaults to major unless the model says small", () => {
     digest: "",
   }, new Set(["a", "b", "c"]), new Set(["o/r"]));
   assert.deepEqual(result.decisions.map(d => d.scope), ["small", "major", "major"]);
+});
+
+test("builder sessions are named up front, and resuming keeps the name", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "isobot-claude-"));
+  const bin = path.join(dir, "claude");
+  const log = path.join(dir, "calls");
+  // Records its arguments and stdin, then answers like `claude -p --output-format json`.
+  writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\ncat >> "${log}"\necho '{"type":"result","subtype":"success","session_id":"abc","result":"done"}'\n`);
+  chmodSync(bin, 0o755);
+  const builder = new ClaudeCodeBuilder({ kind: "claude", timeoutMinutes: 1, maxTurns: 5, maxFixRounds: 1, maxReviewRounds: 1, settings: {} }, { secrets: [], noWrite: [] }, bin);
+  await builder.implement({ cwd: dir, task: "do it", sessionId: "11111111-1111-1111-1111-111111111111" });
+  await builder.revise({ cwd: dir, sessionId: "11111111-1111-1111-1111-111111111111", task: "do it", feedback: "", resumed: true });
+  await builder.revise({ cwd: dir, sessionId: null, newSessionId: "22222222-2222-2222-2222-222222222222", task: "do it", feedback: "tests fail" });
+  const calls = readFileSync(log, "utf8");
+  assert.match(calls, /--session-id 11111111-1111-1111-1111-111111111111/);
+  assert.match(calls, /--resume 11111111-1111-1111-1111-111111111111/);
+  assert.ok(calls.includes(RESUME_PROMPT));
+  assert.match(calls, /--session-id 22222222-2222-2222-2222-222222222222/);
+});
+
+test("a resumed revision without its session restarts from the task and the branch's work", () => {
+  assert.equal(revisePrompt({ sessionId: "s", task: "T", feedback: "", resumed: true }), RESUME_PROMPT);
+  assert.match(revisePrompt({ sessionId: null, task: "T", feedback: "", resumed: true }), /^T\n\n## Interrupted\n.*committed on this branch/);
+  assert.match(revisePrompt({ sessionId: "s", task: "T", feedback: "F" }), /^F\n\nFix these problems/);
 });

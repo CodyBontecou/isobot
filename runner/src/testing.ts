@@ -169,7 +169,11 @@ export class FakeRepo implements RepoOps {
   async sync(): Promise<string> { this.calls.push("sync"); return "base"; }
   async createWorkspace(branch: string): Promise<string> { this.calls.push(`workspace ${branch}`); return `/tmp/wt/${branch}`; }
   async removeWorkspace(name: string): Promise<void> { this.calls.push(`remove ${name}`); }
-  async commitPending(): Promise<void> { this.calls.push("commit"); }
+  /** Workspaces a "previous run" left on disk, for recover(). */
+  leftBehind = new Set<string>();
+  hasWorkspace(name: string): boolean { return this.leftBehind.has(name); }
+  workspacePath(name: string): string { return `/tmp/wt/${name}`; }
+  async commitPending(dir: string, message = ""): Promise<void> { this.calls.push(message.startsWith("WIP") ? `wip ${dir}` : "commit"); }
   async capture(): Promise<string> { this.commits++; return `sha${this.commits}`; }
   async ahead(): Promise<number> { return this.changes ? 1 : 0; }
   async diffStat(): Promise<DiffStat> { return this.diff_; }
@@ -206,13 +210,22 @@ export class FakeBuilder implements Builder {
   /** Media paths each review saw. */
   reviewMedia: (string[] | undefined)[] = [];
 
-  async implement(input: { cwd: string; task: string; devices?: JobDevices; media?: string }): Promise<AgentRun> {
+  async implement(input: { cwd: string; task: string; devices?: JobDevices; media?: string; sessionId?: string }): Promise<AgentRun> {
     this.implementCalls++;
+    this.implementSessions.push(input.sessionId);
+    this.during?.();
     this.deviceEnvs.push(input.devices?.env);
     for (const [name, bytes] of Object.entries(this.captures)) writeFileSync(path.join(input.media!, name), bytes);
     return this.implementResult;
   }
-  async revise(input: { feedback: string; sessionId: string | null; devices?: JobDevices }): Promise<AgentRun> {
+  /** Session ids implement was told to use, and the resumed flag of each revise. */
+  implementSessions: (string | undefined)[] = [];
+  reviseResumed: boolean[] = [];
+  /** Runs before implement/revise return, e.g. to simulate a shutdown mid-run. */
+  during?: () => void;
+  async revise(input: { feedback: string; sessionId: string | null; devices?: JobDevices; resumed?: boolean }): Promise<AgentRun> {
+    this.during?.();
+    this.reviseResumed.push(Boolean(input.resumed));
     this.deviceEnvs.push(input.devices?.env);
     this.reviseFeedback.push(input.feedback);
     this.reviseSessions.push(input.sessionId);
