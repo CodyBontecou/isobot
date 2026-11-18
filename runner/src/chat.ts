@@ -248,7 +248,11 @@ export class StaffChat {
       this.state.seen[place.id] = messages.at(-1)?.id ?? place.last_message_id!;
       changed = true;
       if (place.parent_id === this.o.channelId) {
-        await this.joinStaffThread(place.id, this.o.channelId, messages);
+        // Couldn't tell what the thread hangs off (Discord hiccup): read these messages again next time.
+        await this.joinStaffThread(place.id, this.o.channelId, messages).catch(error => {
+          this.state.seen[place.id] = seen;
+          console.warn(`[chat] staff thread ${place.id}: ${(error as Error).message}`);
+        });
         continue;
       }
       for (const m of messages) {
@@ -292,8 +296,12 @@ export class StaffChat {
   private async starter(threadId: string, parentId: string): Promise<{ kind: "card" | "isobot" | "other"; message: DiscordMessage | null }> {
     let known = this.starters.get(threadId);
     if (known) return known;
-    // A thread started from a message has that message's id.
-    const message = await this.o.discord.request<DiscordMessage>("GET", `/channels/${parentId}/messages/${threadId}`).catch(() => null);
+    // A thread started from a message has that message's id. Only a definite answer is remembered:
+    // a passing error would otherwise mark a job card's thread as "other" for good.
+    const message = await this.o.discord.request<DiscordMessage>("GET", `/channels/${parentId}/messages/${threadId}`).catch((error: { status?: number }) => {
+      if (error.status === 404 || error.status === 403) return null;
+      throw error;
+    });
     const kind = message?.author.id !== this.o.botId ? "other"
       : message.embeds?.[0]?.footer?.text.startsWith(CARD_FOOTER) ? "card" : "isobot";
     known = { kind, message };

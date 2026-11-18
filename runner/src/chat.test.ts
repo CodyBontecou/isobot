@@ -52,6 +52,8 @@ class FakeDiscord {
   parents = new Map<string, string>();
   /** Bodies of every POST, for checking what was pinged. */
   bodies: Record<string, unknown>[] = [];
+  /** How many upcoming single-message GETs fail with a 500. */
+  failMessageGets = 0;
   private next = 700000000000000000n;
 
   id(): string { return String(this.next++); }
@@ -98,6 +100,7 @@ class FakeDiscord {
       return m as T;
     }
     if (method === "GET" && (match = /^\/channels\/(\d+)\/messages\/(\d+)$/.exec(route))) {
+      if (this.failMessageGets > 0 && this.failMessageGets--) throw Object.assign(new Error("Internal Server Error"), { status: 500 });
       const found = this.channels.get(match[1])?.find(m => m.id === match![2]);
       if (!found) throw Object.assign(new Error("Unknown Message"), { status: 404 });
       return found as T;
@@ -252,6 +255,28 @@ test("a mention anywhere in the server is answered in a staff thread, never wher
     t.discord.say(thread, ME, "can you dig into the code?");
     await t.step();
     assert.equal(t.calls[1].sessionId, "session-1", "the conversation continues in the staff thread");
+  } finally { t.done(); }
+});
+
+test("a Discord error while checking what a staff thread hangs off is retried, not guessed", async () => {
+  const t = await setup(async () => "Joined.");
+  try {
+    const card = t.discord.say(CHANNEL, BOT, "", { embeds: [{ title: "#12", url: `https://github.com/${FULL}/issues/12`, footer: { text: "Reply in the thread to steer this build" } }] });
+    const onCard = t.discord.openThread(CHANNEL, card);
+    const triage = t.discord.say(CHANNEL, BOT, "📂 **isobot triage**: 1 new item, 0 proposals.");
+    const onTriage = t.discord.openThread(CHANNEL, triage);
+    for (const thread of [onCard, onTriage]) t.discord.say(thread, ME, "before isobot looked");
+    await t.step();
+
+    t.discord.say(onCard, ME, `<@${BOT}> use the system font`);
+    t.discord.say(onTriage, ME, "we already have the entitlement");
+    t.discord.failMessageGets = 2;
+    await t.step();
+    assert.equal(t.calls.length, 0, "nothing is answered while the starters are unknown");
+    await t.step();
+    assert.equal(t.calls.length, 1, "the triage thread's message is read again once Discord answers");
+    assert.match(t.calls[0].prompt, /owner: we already have the entitlement/);
+    assert.deepEqual(t.discord.inChannel(onCard), [], "the job card's thread is still left to the bridge");
   } finally { t.done(); }
 });
 
