@@ -179,7 +179,22 @@
           "avd": "isobot-api35"
         }
       },
-      "notes": "Monorepo: Apple app under apps/apple (HealthMd.xcodeproj, scheme HealthMd), Android under apps/android, Rust core and CLI. PR CI only runs scripts/ci/run.py; the runner's checks build the iOS app and its tests and run scripts/ci/android.sh (instrumented tests and the live Rust pairing test) on the job's emulator. Run that script yourself through the isobot shell before finishing (HEALTHMD_CI_ANDROID_ABI=arm64-v8a bash scripts/ci/android.sh). For Android behaviour changes, especially upgrades and background work, install the previous release and then your build on the job's emulator (adb install -r keeps data) and check it with argent. The full Apple CI runs at release."
+      "notes": "Monorepo: Apple app under apps/apple (HealthMd.xcodeproj, scheme HealthMd), Android under apps/android, Rust core and CLI. PR CI only runs scripts/ci/run.py; the runner's checks build the iOS app and its tests and run scripts/ci/android.sh (instrumented tests and the live Rust pairing test) on the job's emulator. Run that script yourself through the isobot shell before finishing (HEALTHMD_CI_ANDROID_ABI=arm64-v8a bash scripts/ci/android.sh). For Android behaviour changes, especially upgrades and background work, install the previous release and then your build on the job's emulator (adb install -r keeps data) and check it with argent. The full Apple CI runs at release.",
+      "ownerAutonomy": "merge",
+      "train": {
+        "appId": "6757763969",
+        "testflight": { "group": "Liquid Glass Beta", "joinUrl": "https://testflight.apple.com/join/upA2Ux2E" },
+        "project": "apps/apple/HealthMd.xcodeproj",
+        "scheme": "HealthMd",
+        "prepare": ["make -C apps/apple prepare-healthmd-core-rust"],
+        "everyHours": 24,
+        "holdMinutes": 60,
+        "launch": {
+          "channelId": "1498086736465760458",
+          "name": "Health.md",
+          "storeUrl": "https://apps.apple.com/app/id6757763969"
+        }
+      }
     },
     "codybontecou/GitSync.md": {
       "checks": [
@@ -198,6 +213,7 @@
       "ownerAutonomy": "merge",
       "train": {
         "appId": "6758960270",
+        "testflight": { "group": "External" },
         "project": "Sync.md.xcodeproj",
         "scheme": "Sync.md",
         "everyHours": 24,
@@ -237,6 +253,7 @@
       "ownerAutonomy": "merge",
       "train": {
         "appId": "6761960794",
+        "testflight": { "group": "Beta Testers", "joinUrl": "https://testflight.apple.com/join/Tn2hDXRG" },
         "project": "IsoMe.xcodeproj",
         "scheme": "IsoMe",
         "everyHours": 24,
@@ -265,6 +282,7 @@
       "ownerAutonomy": "merge",
       "train": {
         "appId": "6758967337",
+        "testflight": { "group": "Public beta", "joinUrl": "https://testflight.apple.com/join/dQXXSTxv" },
         "project": "Voxboard.xcodeproj",
         "scheme": "Voxboard",
         "everyHours": 24,

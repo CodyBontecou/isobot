@@ -70,9 +70,10 @@ export function cleanNotes(value: unknown): ReleaseNotes {
 export const LAUNCH_MAX_CHARS = 1900;
 
 /** The Discord launch post, kept under LAUNCH_MAX_CHARS by leaving out the last items rather than the link. */
-export function launchMessage(app: string, version: string, notes: ReleaseNotes, storeUrl: string): string {
-  const title = `# 🎉 ${app} ${version} is out`;
-  const link = `📲 Update on the App Store: <${storeUrl}>`;
+export function launchMessage(app: string, version: string, notes: ReleaseNotes, storeUrl: string, beta?: { joinUrl?: string }): string {
+  const title = beta ? `# 🧪 ${app} ${version} beta is on TestFlight` : `# 🎉 ${app} ${version} is out`;
+  const link = !beta ? `📲 Update on the App Store: <${storeUrl}>`
+    : beta.joinUrl ? `🧪 Join the beta on TestFlight: <${beta.joinUrl}>` : "🧪 Testers: update in the TestFlight app.";
   const join = (parts: string[]) => parts.filter(Boolean).join("\n\n");
   const render = (items: ReleaseNotes["items"], more: number) => {
     const sections = (Object.keys(KINDS) as ChangeKind[]).flatMap(kind => {
