@@ -34,7 +34,7 @@ export interface IssueComment {
 
 const LABEL_COLORS: Record<keyof Labels, string> = {
   proposed: "c5def5", ready: "0e8a16", building: "fbca04", review: "1d76db",
-  failed: "b60205", ship: "5319e7", stop: "000000", auto: "0b7285", cleanup: "d4c5f9",
+  failed: "b60205", ship: "5319e7", stop: "000000", auto: "0b7285", cleanup: "d4c5f9", content: "bfdadc",
 };
 
 const LABEL_DESCRIPTIONS: Record<keyof Labels, string> = {
@@ -47,6 +47,7 @@ const LABEL_DESCRIPTIONS: Record<keyof Labels, string> = {
   stop: "Stop isobot from touching this issue",
   auto: "From the owner: isobot may take it end to end (only counts when the owner adds it)",
   cleanup: "Dismiss: isobot removes its local workspaces, strips its labels and closes the issue",
+  content: "Website content from isobot's SEO research: builds and merges under the site's content policy",
 };
 
 /** The subset of GitHub the runner needs; an interface so tests can fake it. */

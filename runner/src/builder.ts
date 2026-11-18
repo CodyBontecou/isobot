@@ -282,6 +282,17 @@ export function builderSettings(extra: Record<string, unknown>, paths: BuilderPa
   };
 }
 
+/**
+ * Builder settings for a run that is meant to use some tools the builder is denied (the content train's
+ * OpenSEO tools, which spend credits): deny rules covering those tools are dropped, every other rule stays.
+ */
+export function agentSettings(extra: Record<string, unknown>, paths: BuilderPaths, allowedTools: string[], home = homedir()): string {
+  const permissions = (extra.permissions ?? {}) as Record<string, string[]>;
+  const covers = (rule: string, tool: string) => tool === rule || tool.startsWith(`${rule}__`) || (rule.endsWith("*") && tool.startsWith(rule.slice(0, -1)));
+  const deny = (permissions.deny ?? []).filter(rule => !allowedTools.some(tool => covers(rule, tool)));
+  return JSON.stringify(builderSettings({ ...extra, permissions: { ...permissions, deny } }, paths, home));
+}
+
 interface CliResult {
   type?: string;
   subtype?: string;
@@ -307,15 +318,15 @@ export class ClaudeCodeBuilder implements Builder {
   private settingsJson: string;
   private ghConfigDir: string;
 
-  constructor(private config: RunnerConfig["builder"], paths: BuilderPaths, private bin = "claude", private shimDir?: string, private shellTool?: ShellToolFactory) {
+  constructor(private config: RunnerConfig["builder"], private paths: BuilderPaths, private bin = "claude", private shimDir?: string, private shellTool?: ShellToolFactory) {
     this.settingsJson = JSON.stringify(builderSettings(config.settings ?? {}, paths));
     // An empty gh config directory: the gh CLI then has no login to lend a builder.
     this.ghConfigDir = mkdtempSync(path.join(tmpdir(), "isobot-gh-"));
   }
 
-  private async call(cwd: string, prompt: string, args: string[], timeoutMs: number, extraEnv: Record<string, string> = {}): Promise<CliResult> {
+  private async call(cwd: string, prompt: string, args: string[], timeoutMs: number, extraEnv: Record<string, string> = {}, settingsJson = this.settingsJson): Promise<CliResult> {
     const fullArgs = [
-      "-p", "--output-format", "json", "--settings", this.settingsJson,
+      "-p", "--output-format", "json", "--settings", settingsJson,
       ...(this.config.model ? ["--model", this.config.model] : []),
       ...(this.config.maxTurns ? ["--max-turns", String(this.config.maxTurns)] : []),
       ...args,
@@ -423,6 +434,22 @@ export class ClaudeCodeBuilder implements Builder {
     return parseTriage(result.structured_output, new Set(input.items.map(item => item.id)), new Set(input.repos.map(r => r.toLowerCase())));
   }
 
+  /**
+   * One structured, non-interactive run with exactly the given tools (content research and publishing).
+   * `tools` are built-in tools ("" for none); `allowedTools` pre-approves them and MCP tools, and anything
+   * else is refused. User settings load, so user-scope plugins (OpenSEO) are there; project settings,
+   * which a builder could have written, never do.
+   */
+  async agentJson(input: AgentJsonInput): Promise<{ output: unknown; summary: string; turns?: number }> {
+    const result = await this.call(input.cwd, input.prompt, [
+      "--tools", input.tools, "--allowedTools", input.allowedTools.join(","), "--permission-mode", "dontAsk",
+      "--no-session-persistence", "--setting-sources", "user",
+      "--append-system-prompt", input.system, "--json-schema", JSON.stringify(input.schema),
+    ], input.timeoutMs, {}, agentSettings(this.config.settings ?? {}, this.paths, input.allowedTools));
+    if (!result.structured_output) throw new Error(`no structured output (${result.subtype ?? "unknown"}): ${(result.result ?? "").slice(0, 300)}`);
+    return { output: result.structured_output, summary: (result.result ?? "").trim(), turns: result.num_turns };
+  }
+
   async releaseNotes(input: ReleaseNotesInput): Promise<ReleaseNotes> {
     const prompt = [
       `App: ${input.app}`, `Version: ${input.version}`,
@@ -436,6 +463,16 @@ export class ClaudeCodeBuilder implements Builder {
     if (!result.structured_output) throw new Error(`release notes: no structured output (${result.subtype ?? "unknown"})`);
     return cleanNotes(result.structured_output);
   }
+}
+
+export interface AgentJsonInput {
+  cwd: string;
+  prompt: string;
+  system: string;
+  schema: Record<string, unknown>;
+  tools: string;
+  allowedTools: string[];
+  timeoutMs: number;
 }
 
 export function parseResult(stdout: string): CliResult | null {

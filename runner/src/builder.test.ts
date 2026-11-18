@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { builderSettings, ClaudeCodeBuilder, defaultDenyPaths, parseResult, parseReview, parseTriage, RESUME_PROMPT, revisePrompt } from "./builder.js";
+import { agentSettings, builderSettings, ClaudeCodeBuilder, defaultDenyPaths, parseResult, parseReview, parseTriage, RESUME_PROMPT, revisePrompt } from "./builder.js";
 
 test("parses the CLI's JSON result, including after stray diagnostics", () => {
   const payload = { type: "result", subtype: "success", is_error: false, session_id: "s1", result: "done", structured_output: { a: 1 } };
@@ -94,4 +94,12 @@ test("a resumed revision without its session restarts from the task and the bran
   assert.equal(revisePrompt({ sessionId: "s", task: "T", feedback: "", resumed: true }), RESUME_PROMPT);
   assert.match(revisePrompt({ sessionId: null, task: "T", feedback: "", resumed: true }), /^T\n\n## Interrupted\n.*committed on this branch/);
   assert.match(revisePrompt({ sessionId: "s", task: "T", feedback: "F" }), /^F\n\nFix these problems/);
+});
+
+test("agent runs may use tools the builder is denied, and nothing else changes", () => {
+  const settings = { permissions: { deny: ["mcp__plugin_openseo_openseo", "Skill(x)"] } };
+  const parsed = JSON.parse(agentSettings(settings, { secrets: ["/s"], noWrite: [] }, ["mcp__plugin_openseo_openseo__whoami"], "/home/u")) as { permissions: { deny: string[] } };
+  assert.ok(!parsed.permissions.deny.includes("mcp__plugin_openseo_openseo"));
+  assert.ok(parsed.permissions.deny.includes("Skill(x)"));
+  assert.ok(parsed.permissions.deny.includes("Read(//s)"));
 });

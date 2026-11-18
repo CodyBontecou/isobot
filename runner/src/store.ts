@@ -2,6 +2,9 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+/** issue: an ordinary approved issue; content: a content-train issue, built under the site's content policy. */
+export type JobKind = "issue" | "content";
+
 export type JobState =
   | "queued" | "building" | "pr_open" | "merged" | "released"
   | "awaiting_ship" | "shipped" | "closed" | "failed" | "stopped";
@@ -25,6 +28,7 @@ export interface Job {
   notBefore: string | null;
   /** Queued to revise its open PR with the owner's notes, rather than build from scratch. */
   revising: boolean;
+  kind: JobKind;
   createdAt: string;
   updatedAt: string;
 }
@@ -32,7 +36,7 @@ export interface Job {
 interface Row {
   id: string; owner: string; repo: string; number: number; title: string; state: JobState;
   branch: string | null; pr_number: number | null; session_id: string | null; attempts: number;
-  last_error: string | null; created_at: string; updated_at: string; not_before: string | null; revising: number | null;
+  last_error: string | null; created_at: string; updated_at: string; not_before: string | null; revising: number | null; kind: string | null;
 }
 
 /** Local durable state. GitHub labels are the visible queue; this records progress and cursors. */
@@ -62,6 +66,7 @@ export class Store {
     const columns = (this.db.prepare("PRAGMA table_info(jobs)").all() as { name: string }[]).map(c => c.name);
     if (!columns.includes("not_before")) this.db.exec("ALTER TABLE jobs ADD COLUMN not_before TEXT");
     if (!columns.includes("revising")) this.db.exec("ALTER TABLE jobs ADD COLUMN revising INTEGER NOT NULL DEFAULT 0");
+    if (!columns.includes("kind")) this.db.exec("ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'issue'");
   }
 
   /** Puts a job back in the queue to retry after `delayMs` (transient failure). */
@@ -100,16 +105,16 @@ export class Store {
   }
 
   /** Inserts a queued job, or re-queues a finished one that was approved again. Returns null if already active. */
-  enqueue(owner: string, repo: string, number: number, title: string): Job | null {
+  enqueue(owner: string, repo: string, number: number, title: string, kind: JobKind = "issue"): Job | null {
     const id = Store.jobId(owner, repo, number);
     const existing = this.get(id);
     const now = new Date().toISOString();
     if (existing && (ACTIVE_STATES.includes(existing.state) || existing.state === "pr_open" || existing.state === "awaiting_ship")) return null;
-    this.db.prepare(`INSERT INTO jobs (id, owner, repo, number, title, state, attempts, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'queued', 0, ?, ?)
+    this.db.prepare(`INSERT INTO jobs (id, owner, repo, number, title, state, attempts, kind, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET state = 'queued', title = excluded.title, attempts = 0, last_error = NULL,
-        session_id = NULL, pr_number = NULL, branch = NULL, not_before = NULL, revising = 0, updated_at = excluded.updated_at`)
-      .run(id, owner, repo, number, title, now, now);
+        session_id = NULL, pr_number = NULL, branch = NULL, not_before = NULL, revising = 0, kind = excluded.kind, updated_at = excluded.updated_at`)
+      .run(id, owner, repo, number, title, kind, now, now);
     // A fresh approval gets a fresh Discord card and thread.
     this.db.prepare("DELETE FROM cursors WHERE key = ?").run(`discord:${id}`);
     this.event(id, "queued", title);
@@ -191,6 +196,6 @@ function toJob(row: Row): Job {
   return {
     id: row.id, owner: row.owner, repo: row.repo, number: row.number, title: row.title, state: row.state,
     branch: row.branch, prNumber: row.pr_number, sessionId: row.session_id, attempts: row.attempts,
-    lastError: row.last_error, notBefore: row.not_before ?? null, revising: Boolean(row.revising), createdAt: row.created_at, updatedAt: row.updated_at,
+    lastError: row.last_error, notBefore: row.not_before ?? null, revising: Boolean(row.revising), kind: row.kind === "content" ? "content" : "issue", createdAt: row.created_at, updatedAt: row.updated_at,
   };
 }

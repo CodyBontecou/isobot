@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { ImapFlow } from "imapflow";
 import { ReleaseTrain } from "./train.js";
+import { ContentTrain } from "./content.js";
 import type { CheckReport } from "./policy.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -10,7 +11,7 @@ import { builderSettings, ClaudeCodeBuilder } from "./builder.js";
 import { chatAllowlist, claudeChatModel, StaffChat } from "./chat.js";
 import { ChatToolServer } from "./chatMcp.js";
 import { DiscordApi } from "./discordApi.js";
-import { configuredRepos, loadConfig, loadEnvironment, policyFor, type Environment, type RunnerConfig } from "./config.js";
+import { configuredRepos, contentRepos, loadConfig, loadEnvironment, policyFor, type Environment, type RunnerConfig } from "./config.js";
 import { Repo } from "./git.js";
 import { GitHub } from "./github.js";
 import { TERMINAL_MARKER } from "./notes.js";
@@ -47,6 +48,7 @@ interface Runtime {
   devices: LocalDevices;
   repoFor: (owner: string, repo: string) => Repo;
   train: ReleaseTrain;
+  content: ContentTrain;
   /** Runner secrets and state, for settings that keep agents out of them. */
   secrets: string[];
 }
@@ -126,7 +128,16 @@ function runtime(): Runtime {
       return detail.data?.attributes?.externalBuildState ?? null;
     },
   });
-  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, secrets };
+  const content = new ContentTrain({
+    config, store, github, notifier, repo: repoFor,
+    agent: input => builder.agentJson(input),
+    pullBody: async (owner, repo, number) => (await github.pullDetails(owner, repo, number)).body,
+    run: async (cwd, command, timeoutMs) => {
+      const result = await sh(command, { cwd, env: workerEnv(), timeoutMs });
+      return { ok: result.code === 0 && !result.timedOut, output: `${result.stdout}\n${result.stderr}` };
+    },
+  });
+  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, content, secrets };
 }
 
 /** `owner/repo#12`, or `repo#12` for a configured repository. */
@@ -160,6 +171,9 @@ function acquireLock(env: Environment): void {
   process.on("exit", () => { try { if (readFileSync(file, "utf8") === String(process.pid)) rmSync(file); } catch { /* gone */ } });
 }
 
+/** How often the content train looks for research, publishing and reports to do. */
+const CONTENT_EVERY_MS = 5 * 60_000;
+
 /** A cycle running longer than this (release steps included) counts as hung for the external heartbeat. */
 const HUNG_CYCLE_MS = 2 * 60 * 60_000;
 
@@ -191,6 +205,8 @@ async function loop(rt: Runtime): Promise<void> {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 
   let lastTriage = 0;
+  let lastContent = 0;
+  let contentRunning = false;
   let cycleStartedAt: number | null = null;
   if (rt.env.heartbeatUrl) {
     const url = rt.env.heartbeatUrl;
@@ -217,6 +233,13 @@ async function loop(rt: Runtime): Promise<void> {
         await rt.pipeline.cleanUp();
         await rt.train.tick();
         lastCycleError = null;
+        if (!contentRunning && Date.now() - lastContent > CONTENT_EVERY_MS && contentRepos(rt.config).length) {
+          lastContent = Date.now();
+          contentRunning = true;
+          // Research takes minutes: like triage it runs beside the cycle, one pass at a time.
+          void rt.content.tick().catch(error => console.warn(`[content] failed: ${(error as Error).message}`))
+            .finally(() => { contentRunning = false; });
+        }
         if (!triageRunning && Date.now() - lastTriage > rt.config.triageMinutes * 60_000) {
           lastTriage = Date.now();
           triageRunning = true;
@@ -376,7 +399,10 @@ const HELP = `isobot runner
   pause | resume      Stop or restart new work (running builds finish)
   checks <repo>       Run a repo's configured checks on its default branch, sandboxed like a build
   say <repo#n> <text> Send isobot a note about a job, like replying in its Discord thread
-  retry <repo#n> [note] Build an issue again (a failed or finished job, or a new one); the note goes to the builder`;
+  retry <repo#n> [note] Build an issue again (a failed or finished job, or a new one); the note goes to the builder
+  content <repo> research [--dry-run] | report
+                      Run a site's content research now (files an issue; --dry-run prints the brief instead)
+                      or its weekly search report`;
 
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "help";
@@ -487,6 +513,18 @@ async function main(): Promise<void> {
       }
       console.log(result.message);
       if (!result.ok) process.exitCode = 1;
+      return;
+    }
+    case "content": {
+      const [target, what, flag] = process.argv.slice(3);
+      const site = contentRepos(rt.config).find(s => target && [s.repo, `${s.owner}/${s.repo}`, s.content.site].some(n => n.toLowerCase() === target.toLowerCase()));
+      if (!site || !["research", "report"].includes(what)) {
+        console.error(`Usage: content <${contentRepos(rt.config).map(s => s.repo).join(" | ") || "repo"}> research [--dry-run] | report`);
+        process.exitCode = 2;
+        return;
+      }
+      if (what === "report") console.log(await rt.content.report(site, true) ?? "(no report)");
+      else console.log(JSON.stringify(await rt.content.maybeResearch(site, true, flag === "--dry-run"), null, 2));
       return;
     }
     default:
