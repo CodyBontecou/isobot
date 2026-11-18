@@ -1,11 +1,27 @@
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 import type { AgentRun, Builder, JobDevices, Review, TriageItem, TriageResult } from "./builder.js";
-import type { Labels } from "./config.js";
+import { loadConfig, type Labels, type RunnerConfig } from "./config.js";
 import type { DiffStat } from "./git.js";
 import type { CiState, GitHubApi, Issue, IssueComment, PullRequest } from "./github.js";
 import { RUNNER_MARKER } from "./notes.js";
 import type { RepoOps } from "./pipeline.js";
+
+/**
+ * The shipped config with every repo at "pr" autonomy (owner-only merge where a train needs it), so tests
+ * opt into merging themselves instead of following whatever the live config allows.
+ */
+export function testConfig(): RunnerConfig {
+  const config = loadConfig();
+  config.defaults.autonomy = "pr";
+  for (const policy of Object.values(config.repos)) {
+    delete policy.autonomy;
+    // A release train needs a repo isobot can merge into.
+    if (policy.train) policy.ownerAutonomy = "merge";
+    else delete policy.ownerAutonomy;
+  }
+  return config;
+}
 
 /** Smallest byte sequences media.ts accepts as a PNG and an MP4. */
 export const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(32)]);

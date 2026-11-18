@@ -2,11 +2,16 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { configuredRepos, loadConfig, loadEnvironment, policyFor, validateConfig, type RunnerConfig } from "./config.js";
 
-test("the shipped config is valid and starts every repo at pr autonomy", () => {
+test("the shipped config is valid and lets every repo merge behind its checks", () => {
   const config = loadConfig();
   const repos = configuredRepos(config);
   assert.ok(repos.length >= 6);
-  for (const { owner, repo } of repos) assert.equal(policyFor(config, `${owner}/${repo}`).autonomy, "pr");
+  for (const { owner, repo } of repos) {
+    const policy = policyFor(config, `${owner}/${repo}`);
+    assert.equal(policy.autonomy, "merge");
+    assert.ok(policy.checks.length > 0);
+    assert.ok(policy.requireCi);
+  }
   assert.equal(config.discordCategories["gitsync.md"], "codybontecou/GitSync.md");
   assert.equal(config.discordCategories["whereday"], "codybontecou/whereday");
 });
@@ -14,7 +19,7 @@ test("the shipped config is valid and starts every repo at pr autonomy", () => {
 test("repos not listed in the config are off", () => {
   const config = loadConfig();
   assert.equal(policyFor(config, "someone/else").autonomy, "off");
-  assert.equal(policyFor(config, "CODYBONTECOU/TIME.MD").autonomy, "pr");
+  assert.equal(policyFor(config, "CODYBONTECOU/TIME.MD").autonomy, "merge");
 });
 
 test("per-repo policy extends protected paths and overrides release", () => {
@@ -74,9 +79,9 @@ test("App Store config is validated", () => {
 
 test("ownerAutonomy merge needs checks, like autonomy merge", () => {
   const config = loadConfig();
-  config.repos["codybontecou/time.md"] = { ownerAutonomy: "merge", checks: [] };
+  config.repos["codybontecou/time.md"] = { autonomy: "pr", ownerAutonomy: "merge", checks: [] };
   assert.throws(() => validateConfig(config), /ownerAutonomy "merge" needs at least one check command/);
-  config.repos["codybontecou/time.md"] = { ownerAutonomy: "merge", checks: ["make test"] };
+  config.repos["codybontecou/time.md"] = { autonomy: "pr", ownerAutonomy: "merge", checks: ["make test"] };
   assert.doesNotThrow(() => validateConfig(config));
 });
 
