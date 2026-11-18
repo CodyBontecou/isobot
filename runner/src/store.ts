@@ -42,9 +42,11 @@ export class Store {
   constructor(file: string) {
     if (file !== ":memory:") mkdirSync(path.dirname(file), { recursive: true });
     this.db = new DatabaseSync(file);
+    // The wait comes first: everything after it, journal_mode included, may meet a lock held by another
+    // process (the previous runner exiting, or a CLI command) and must wait for it rather than fail.
+    this.db.exec("PRAGMA busy_timeout = 15000");
     this.db.exec(`
       PRAGMA journal_mode = WAL;
-      PRAGMA busy_timeout = 5000;
       CREATE TABLE IF NOT EXISTS jobs (
         id TEXT PRIMARY KEY, owner TEXT NOT NULL, repo TEXT NOT NULL, number INTEGER NOT NULL,
         title TEXT NOT NULL, state TEXT NOT NULL, branch TEXT, pr_number INTEGER, session_id TEXT,
