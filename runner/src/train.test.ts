@@ -6,7 +6,7 @@ import { loadConfig, type RunnerConfig } from "./config.js";
 import { Notifier } from "./notify.js";
 import { Store } from "./store.js";
 import { FakeGitHub } from "./testing.js";
-import { compareVersions, isBusy, nextVersion, publishCommand, ReleaseTrain, timestampBuildNumber, whatsNew, type AppStatus } from "./train.js";
+import { compareVersions, isBusy, nextVersion, publishCommand, ReleaseTrain, timestampBuildNumber, trainVersion, whatsNew, type AppStatus } from "./train.js";
 
 const REPO = "codybontecou/vox.md";
 const [OWNER, NAME] = REPO.split("/");
@@ -65,6 +65,10 @@ test("versions, build numbers and release notes", () => {
   assert.equal(compareVersions("3.0.10", "3.0.9"), 1);
   assert.equal(compareVersions("3.0", "3.0.0"), 0);
   assert.equal(compareVersions("2.9.9", "3.0"), -1);
+  const beta = { testflight: { group: "Beta" } };
+  assert.equal(trainVersion(beta, { version: "3.5.0", state: "READY_FOR_DISTRIBUTION", latestBuild: "4.0.0" }), "4.0.0", "an open beta version ahead of the App Store is kept");
+  assert.equal(trainVersion(beta, { version: "3.0.2", state: "WAITING_FOR_REVIEW", latestBuild: "3.0.2" }), "3.0.3");
+  assert.equal(trainVersion({}, { version: "3.5.0", state: "READY_FOR_DISTRIBUTION", latestBuild: "4.0.0" }), "3.5.1", "App Store trains ignore betas");
   const command = publishCommand({ appId: "1", project: "It's.xcodeproj", scheme: "App", everyHours: 24, holdMinutes: 60 }, "1.2.3", "202611160905", "/m");
   assert.match(command, /--project 'It'\\''s\.xcodeproj'/);
   assert.match(command, /--archive-xcodebuild-flag 'MARKETING_VERSION=1\.2\.3' --archive-xcodebuild-flag 'CURRENT_PROJECT_VERSION=202611160905'/);

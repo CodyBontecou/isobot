@@ -110,11 +110,12 @@ function runtime(): Runtime {
       const result = await sh(command, { cwd, env: workerEnv(), timeoutMs });
       return { ok: result.code === 0 && !result.timedOut, output: `${result.stdout}\n${result.stderr}` };
     },
-    appStatus: async appId => {
-      const result = await run("asc", ["status", "--app", appId, "--output", "json"], { cwd: env.home, env: workerEnv(), timeoutMs: 120_000 });
+    appStatus: async (appId, platform) => {
+      // Without --platform, asc reports whichever platform's version is newest (a Mac app's, say).
+      const result = await run("asc", ["status", "--app", appId, "--platform", platform, "--output", "json"], { cwd: env.home, env: workerEnv(), timeoutMs: 120_000 });
       if (result.code !== 0) throw new Error(`asc status failed: ${(result.stderr || result.stdout).trim().slice(-300)}`);
-      const status = JSON.parse(result.stdout) as { appstore?: { version?: string; state?: string } };
-      return { version: status.appstore?.version ?? null, state: status.appstore?.state ?? null };
+      const status = JSON.parse(result.stdout) as { appstore?: { version?: string; state?: string }; builds?: { latest?: { version?: string } } };
+      return { version: status.appstore?.version ?? null, state: status.appstore?.state ?? null, latestBuild: status.builds?.latest?.version ?? null };
     },
     betaState: async (appId, platform, buildNumber) => {
       const result = await run("asc", ["builds", "build-beta-detail", "view", "--app", appId, "--build-number", buildNumber, "--platform", platform, "--output", "json"],

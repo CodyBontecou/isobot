@@ -39,6 +39,8 @@ export interface AppStatus {
   version: string | null;
   /** Its App Store state (READY_FOR_DISTRIBUTION, IN_REVIEW, …). */
   state: string | null;
+  /** The marketing version of the newest uploaded build, which may be a beta ahead of the App Store. */
+  latestBuild?: string | null;
 }
 
 export interface TrainRepo {
@@ -113,6 +115,16 @@ export function nextVersion(current: string | null): string {
 }
 
 /** A build number that only grows and fits CFBundleVersion: YYYYMMDDHHMM in UTC. */
+/**
+ * The version a train ships. The App Store's with the patch bumped; on TestFlight, a beta version
+ * already ahead of the App Store (an open 4.0.0 while 3.5.0 is live) is kept, so testers never get an older version.
+ */
+export function trainVersion(train: Pick<TrainConfig, "testflight">, status: AppStatus): string {
+  const next = nextVersion(status.version);
+  if (!train.testflight || !status.latestBuild) return next;
+  return compareVersions(status.latestBuild, next) > 0 ? status.latestBuild : next;
+}
+
 export function timestampBuildNumber(at: Date): string {
   return at.toISOString().replace(/[-:T]/g, "").slice(0, 12);
 }
@@ -219,7 +231,7 @@ export class ReleaseTrain {
       if (last && now.getTime() - Date.parse(last) < train.everyHours * 3_600_000) return null;
       const status = await this.deps.appStatus(train.appId, train.platform ?? "IOS");
       if (await this.busy(owner, repo, train, status)) return null;
-      const version = nextVersion(status.version);
+      const version = trainVersion(train, status);
       const sha = await this.deps.repo(owner, repo).sync(await github.defaultBranch(owner, repo));
       const firstTrain = !store.cursor(this.key(owner, repo, "confirmed"));
       const list = jobs.map(job => `- #${job.number} ${job.title}${job.prNumber ? ` (PR #${job.prNumber})` : ""}`).join("\n");
