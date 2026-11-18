@@ -71,7 +71,7 @@ function runtime(): Runtime {
   const store = new Store(path.join(env.home, "runner.sqlite"));
   const github = new GitHub(env.githubToken);
   // Builders and checks may read the shared clones (workspaces borrow their objects) but not secrets or state.
-  const secrets = ["runner.env", "runner.sqlite", "runner.sqlite-wal", "runner.sqlite-shm", "logs", "runner.lock", "paused", "heartbeat.json"]
+  const secrets = ["runner.env", "runner.sqlite", "runner.sqlite-wal", "runner.sqlite-shm", "logs", "runner.lock", "paused", "heartbeat.json", "webhooks"]
     .map(entry => path.join(env.home, entry)).concat(path.resolve(process.cwd(), ".env.runner"));
   // Builders and checks also stay out of the staff chat's files (the owner's uploads and checkouts).
   const builderSecrets = [...secrets, path.join(env.home, "chat")];
@@ -268,6 +268,7 @@ async function startChat(rt: Runtime, live: () => LiveStatus): Promise<StaffChat
       repoFor: (owner, repo) => new Repo(rt.env.home, owner, repo, rt.env.githubToken, undefined, path.join(chatDir, "checkouts")),
       setPaused: paused => paused ? writeFileSync(pausedFile(rt.env), new Date().toISOString()) : rmSync(pausedFile(rt.env), { force: true }),
       card: id => rt.notifier.card({ id }),
+      ...(channel.guild_id ? { discord: { api: discord, guildId: channel.guild_id, webhookDir: path.join(rt.env.home, "webhooks") } } : {}),
       asc: async (args, { readOnly }) => {
         const result = await run("asc", args, {
           cwd: chatDir, env: workerEnv(readOnly ? { ASC_READ_ONLY: "1" } : {}), timeoutMs: (readOnly ? 3 : 15) * 60_000, maxBytes: 400_000,

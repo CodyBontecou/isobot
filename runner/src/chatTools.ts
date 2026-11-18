@@ -7,6 +7,7 @@ import { DISCORD_REPLY_MARKER } from "./notes.js";
 import type { Card } from "./notify.js";
 import { Store, type Job } from "./store.js";
 import type { Upload } from "./discordApi.js";
+import { DISCORD_ACTIONS, executeDiscord, layout, prepareDiscord, type DiscordAction, type DiscordAdmin } from "./discordAdmin.js";
 
 /**
  * What isobot's staff chat can see and do. The chat model gets read-only tools plus one way to act:
@@ -58,6 +59,8 @@ export interface ChatToolDeps {
   card(jobId: string): Card | null;
   /** Runs the asc CLI (App Store Connect). readOnly makes asc refuse every mutating request. */
   asc?(args: string[], options: { readOnly: boolean }): Promise<{ ok: boolean; output: string }>;
+  /** The Discord server, for reading its layout and (after 👍) creating channels and webhooks. */
+  discord?: DiscordAdmin;
 }
 
 /** Collected while one model turn runs, posted with the reply. */
@@ -74,6 +77,7 @@ export type ChatAction =
   | { kind: "ship"; repo: string; number: number }
   | { kind: "stop"; repo: string; number: number }
   | { kind: "asc"; args: string[] }
+  | DiscordAction
   | { kind: "pause" }
   | { kind: "resume" };
 
@@ -113,6 +117,7 @@ export const CHAT_TOOLS = [
     "Add --help to any command to see its usage, or use [\"search\", \"what you want to do\"]. Prefer --output json.",
     `Allowed commands: ${[...ASC_READ].join(", ")}.`,
   ].join(" "), { args: { type: "array", items: { type: "string" } } }, ["args"]),
+  tool("list_discord_channels", "The Discord server's categories and channels: ids, names, kinds, categories, topics, and which are private (hidden from @everyone). Check it before proposing channel changes.", {}),
   tool("attach_text", "Attach a text file (logs, long output, a draft) to your reply in Discord.", { filename: { type: "string" }, content: { type: "string" } }, ["filename", "content"]),
   tool("attach_file", "Attach a file from a checkout or an upload (e.g. a screenshot in the repository) to your reply. 10 MB max.", { path: { type: "string" } }, ["path"]),
   tool("propose", [
@@ -121,11 +126,19 @@ export const CHAT_TOOLS = [
     "note {repo, number, text} (instructions to the builder of a running job or a revision of its open PR), merge {repo, number} (a PR),",
     "ship {repo, number} (the job's issue; runs the App Store / Play ship step), stop {repo, number}, pause, resume (the whole runner),",
     `asc {args} (a command that changes App Store Connect, e.g. submit a version for review, release it, reply to a review, update What's New; check its usage with the asc tool's --help first; commands: ${[...ASC_WRITE].join(", ")}).`,
+    "Discord server: create_channel {name, category?, type? (text, announcement, forum), topic?, private?} (in a category it gets the category's permissions; private hides it from @everyone),",
+    "create_category {name, private?}, edit_channel {channel, name?, topic?, category?} (moving it into a category gives it that category's permissions; category \"\" moves it out),",
+    "create_webhook {channel, name} (the URL is saved on the runner's Mac, never shown). Name channels by id, name or category/name. Nothing can be deleted from chat.",
   ].join(" "), {
-    action: { type: "string", enum: ["create_issue", "build", "note", "merge", "ship", "stop", "pause", "resume", "asc"] },
+    action: { type: "string", enum: ["create_issue", "build", "note", "merge", "ship", "stop", "pause", "resume", "asc", ...DISCORD_ACTIONS] },
     repo: REPO(), number: NUM("Issue or PR number"), title: { type: "string" }, body: { type: "string" },
     text: { type: "string" }, build: { type: "boolean", description: "create_issue: also approve it for building" },
     args: { type: "array", items: { type: "string" }, description: "asc: the arguments after `asc`" },
+    name: { type: "string", description: "Discord: the new channel, category or webhook name" },
+    channel: { type: "string", description: "Discord: the channel to edit or add a webhook to (id, name or category/name)" },
+    category: { type: "string", description: "Discord: the category (id or name)" },
+    type: { type: "string", enum: ["text", "announcement", "forum"], description: "create_channel: the channel type (default text)" },
+    topic: { type: "string" }, private: { type: "boolean", description: "Discord: hide it from @everyone" },
   }, ["action"]),
 ];
 
@@ -231,6 +244,10 @@ async function dispatch(name: string, args: Record<string, unknown>, deps: ChatT
       const result = await deps.asc(command, { readOnly: true });
       return `${result.ok ? "" : "asc failed:\n"}${redact(result.output) || "(no output)"}`;
     }
+    case "list_discord_channels": {
+      if (!deps.discord) throw new ToolError("the Discord server isn't available to this chat");
+      return json((await layout(deps.discord)).places);
+    }
     case "attach_text": {
       const name = safeFilename(String(args.filename ?? "notes.txt"));
       const content = String(args.content ?? "");
@@ -325,10 +342,14 @@ export function formatCheckIn(n: NeedsMe, recent: Job[]): string | null {
 }
 
 /** Validates a proposal and fills in what the confirmation needs (a PR's head commit, an issue's title). */
-export async function prepareAction(args: Record<string, unknown>, deps: Pick<ChatToolDeps, "config" | "github" | "store">): Promise<Proposal> {
+export async function prepareAction(args: Record<string, unknown>, deps: Pick<ChatToolDeps, "config" | "github" | "store" | "discord">): Promise<Proposal> {
   const kind = String(args.action ?? "");
   if (kind === "pause") return { action: { kind }, summary: "⏸ **Pause the runner**: no new builds start (running ones finish)." };
   if (kind === "resume") return { action: { kind }, summary: "▶️ **Resume the runner**: builds start again." };
+  if ((DISCORD_ACTIONS as readonly string[]).includes(kind)) {
+    if (!deps.discord) throw new ToolError("the Discord server isn't available to this chat");
+    return prepareDiscord(kind, args, deps.discord, message => new ToolError(message));
+  }
   if (kind === "asc") {
     const command = ascArgs(args_(args.args), "write");
     return { action: { kind, args: command }, summary: `🍎 **Change App Store Connect**\n\`\`\`\nasc ${command.map(shellQuote).join(" ").slice(0, 1500)}\n\`\`\`` };
@@ -387,9 +408,15 @@ export async function prepareAction(args: Record<string, unknown>, deps: Pick<Ch
 }
 
 /** Carries out a confirmed proposal. Deterministic: the model is not involved any more. */
-export async function executeAction(action: ChatAction, deps: Pick<ChatToolDeps, "config" | "github" | "setPaused" | "asc">): Promise<string> {
+export async function executeAction(action: ChatAction, deps: Pick<ChatToolDeps, "config" | "github" | "setPaused" | "asc" | "discord">): Promise<string> {
   const labels = deps.config.labels;
   switch (action.kind) {
+    case "create_channel":
+    case "create_category":
+    case "edit_channel":
+    case "create_webhook":
+      if (!deps.discord) throw new Error("the Discord server isn't available to this chat");
+      return executeDiscord(action, deps.discord);
     case "asc": {
       if (!deps.asc) throw new Error("App Store Connect isn't available on this runner");
       // Checked again: the stored proposal is the only input here.

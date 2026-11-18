@@ -141,6 +141,10 @@ Attach screenshots or logs and it reads them.
   | "ship #12" | ship | adds `isobot:ship` to a job waiting to ship (App Store / Google Play step) |
   | "stop #12" / "pause" / "resume" | stop / pause / resume | the stop label, or pauses / resumes the whole runner |
   | "submit 3.0.1 for review", "reply to that review", "release it" | asc | runs the exact `asc …` command shown in the proposal |
+  | "make a private #vox-inbox channel in staff", "add an overview channel to Whereday" | create_channel | creates it; inside a category it gets the category's permissions, `private` hides it from @everyone |
+  | "add a THUMBLE category" | create_category | creates it, optionally private |
+  | "rename #chat to #feedback", "move #updates into STAFF", "set the topic" | edit_channel | renames, sets the topic, or moves it; a moved channel takes its new category's permissions (the proposal says whether that's private) |
+  | "give #vox-inbox a webhook" | create_webhook | creates it and saves its URL to `webhooks/<channel>-<name>.url` in the runner's home (mode 600), never posting it |
 
 - **App Store Connect:** it reads App Store Connect with the runner's `asc` CLI (review and submission
   state, builds, TestFlight, customer reviews, metadata, sales and analytics) with `ASC_READ_ONLY=1`,
@@ -152,6 +156,15 @@ Attach screenshots or logs and it reads them.
   keys or switch profiles are refused, so text planted in an issue can't copy a local file or secret
   into App Store metadata. Builders and checks can't read `~/.asc` (asc's config); release and ship
   steps, which run unsandboxed, still can.
+
+- **Discord server:** it lists the server's categories and channels (which are private, their
+  topics and ids) and proposes the changes above. Every proposal is checked against the server as it
+  is (duplicate names, missing or ambiguous channels; name one as `category/name` or by id) and
+  checked again on 👍. A private channel can't be moved into a public category, where it would show to
+  everyone. Nothing can be deleted, and roles, members and server settings are out of
+  reach. Webhook URLs are runner secrets: `webhooks/` is off limits to builders, checks and the chat
+  model like `runner.env`. The bot needs Manage Channels (and Manage Webhooks for webhooks); to make
+  a private channel it must be able to see it, so give it Administrator or an allow on the category.
 
 - **Daily check-in:** at `chat.checkInHour` (local time; 9 by default, `null` for none) the
   channel gets a summary of what needs you: PRs to review, jobs ready to ship, failures this week,
