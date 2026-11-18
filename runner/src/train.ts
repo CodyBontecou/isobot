@@ -2,7 +2,9 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { policyFor, configuredRepos, type RunnerConfig, type TrainConfig } from "./config.js";
 import type { GitHubApi } from "./github.js";
-import type { Notifier } from "./notify.js";
+import { cleanNotes, fallbackNotes, launchMessage, mediaRefs, summaryText, type ReleaseNotes, type ReleaseNotesInput } from "./launch.js";
+import { captionFor, DISCORD_MAX_BYTES } from "./media.js";
+import type { Notifier, UploadFile } from "./notify.js";
 import type { Job, Store } from "./store.js";
 
 /**
@@ -12,6 +14,10 @@ import type { Job, Store } from "./store.js";
  *   2. a "ship" issue announces the version and its changes; `holdMinutes` later, unless it has the stop
  *      label or was closed, the runner archives, uploads and submits with `asc publish appstore`
  *   3. the commit gets a `v<version>` tag, the jobs become shipped, and their issues hear about it
+ *   4. with `launch` set, once the App Store has the version on sale, the app's public Discord channel
+ *      gets a launch post: the user-facing notes and a capture from each change (launch.ts)
+ *
+ * The notes (and What's New) are written by the model at step 2, so the owner sees them during the hold.
  *
  * A repo's first train waits for the owner to add the ready label to the ship issue; later ones don't.
  */
@@ -48,6 +54,12 @@ export interface TrainDeps {
   now?: () => Date;
   /** True once the runner is stopping: a ship killed by shutdown stays pending and starts over next time. */
   stopping?: () => boolean;
+  /** Writes user-facing release notes; without it (or when it fails) they come from the job titles. */
+  notes?(input: ReleaseNotesInput): Promise<ReleaseNotes>;
+  /** A merged PR's description: context for the notes, and where its captures are linked. */
+  pullBody?(owner: string, repo: string, number: number): Promise<string>;
+  /** A file at a commit, for the captures on the isobot/media branch. */
+  fileAt?(owner: string, repo: string, ref: string, file: string): Promise<Buffer>;
 }
 
 interface Pending {
@@ -56,7 +68,23 @@ interface Pending {
   version: string;
   jobs: string[];
   announcedAt: string;
+  /** Absent on a train announced before notes existed. */
+  notes?: ReleaseNotes;
 }
+
+/** A submitted version waiting to go live, so its launch post can go out. */
+interface Launch {
+  version: string;
+  notes: ReleaseNotes;
+  jobs: { number: number; prNumber: number | null }[];
+  failures?: number;
+}
+
+/** How often a submitted version's App Store state is checked for its launch post. */
+const LAUNCH_CHECK_MS = 15 * 60_000;
+const LAUNCH_MAX_FAILURES = 5;
+/** Discord's limit for a whole message's attachments (non-boosted). */
+const LAUNCH_MAX_BYTES = 24 * 1024 * 1024;
 
 const SHIPPABLE = ["merged", "released"] as const;
 
@@ -77,8 +105,18 @@ export function isBusy(status: AppStatus): boolean {
 }
 
 export function whatsNew(jobs: Pick<Job, "title">[]): string {
-  const lines = jobs.map(job => `• ${job.title.replace(/\s+/g, " ").trim()}`);
-  return `Fixes and improvements in this update:\n${lines.join("\n")}`.slice(0, 3900);
+  return fallbackNotes(jobs).whatsNew;
+}
+
+/** -1, 0 or 1, comparing dotted version strings numerically. */
+export function compareVersions(a: string, b: string): number {
+  const pa = a.split(".").map(n => Number.parseInt(n, 10) || 0);
+  const pb = b.split(".").map(n => Number.parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d) return Math.sign(d);
+  }
+  return 0;
 }
 
 export function publishCommand(train: TrainConfig, version: string, buildNumber: string, metadataDir: string): string {
@@ -95,6 +133,7 @@ export function publishCommand(train: TrainConfig, version: string, buildNumber:
 export class ReleaseTrain {
   private running = new Set<string>();
   private lastBusyNote = new Map<string, number>();
+  private lastLaunchCheck = new Map<string, number>();
 
   constructor(private deps: TrainDeps) {}
 
@@ -109,6 +148,11 @@ export class ReleaseTrain {
       const name = `${owner}/${repo}`;
       const train = policyFor(this.deps.config, name).train;
       if (!train || this.running.has(name)) continue;
+      try {
+        await this.launchStep(owner, repo, train);
+      } catch (error) {
+        console.warn(`[train] ${name} launch: ${(error as Error).message}`);
+      }
       try {
         const ship = await this.step(owner, repo, train);
         if (ship) {
@@ -154,13 +198,17 @@ export class ReleaseTrain {
       const sha = await this.deps.repo(owner, repo).sync(await github.defaultBranch(owner, repo));
       const firstTrain = !store.cursor(this.key(owner, repo, "confirmed"));
       const list = jobs.map(job => `- #${job.number} ${job.title}${job.prNumber ? ` (PR #${job.prNumber})` : ""}`).join("\n");
+      const notes = await this.notesFor(owner, repo, train, version, jobs);
+      const preview = train.launch
+        ? `\n\n**Discord launch post** (in <#${train.launch.channelId}> once the version is live)\n\n${quote(launchMessage(appName(train), version, notes, storeUrl(train)))}`
+        : "";
       const when = firstTrain
         ? `This is ${repo}'s first release train, so it waits for you: add \`${labels.ready}\` to this issue to ship it. Later trains go on their own.`
         : `Ships ${train.holdMinutes} minutes after this issue was opened. Add \`${labels.stop}\` or close the issue to hold it.`;
       const issue = await github.createIssue(owner, repo, `Ship ${version}`,
         `## isobot release train\n\nVersion **${version}** from \`${sha.slice(0, 12)}\` goes to App Review with:\n\n${list}\n\n` +
-        `**What's New**\n\n${whatsNew(jobs).split("\n").map(line => `> ${line}`).join("\n")}\n\n${when}`, []);
-      const next: Pending = { issue: issue.number, sha, version, jobs: jobs.map(job => job.id), announcedAt: now.toISOString() };
+        `**What's New**\n\n${quote(notes.whatsNew)}${preview}\n\n${when}`, []);
+      const next: Pending = { issue: issue.number, sha, version, jobs: jobs.map(job => job.id), announcedAt: now.toISOString(), notes };
       store.setCursor(pendingKey, JSON.stringify(next));
       store.event(null, "train", `${owner}/${repo} ${version} announced in #${issue.number}`);
       await this.deps.notifier.discord(`🚂 **${owner}/${repo} ${version}** is next: ${jobs.length} change${jobs.length === 1 ? "" : "s"}. ` +
@@ -191,6 +239,87 @@ export class ReleaseTrain {
     return () => this.ship(owner, repo, train, pending);
   }
 
+  /** User-facing notes for a version, falling back to the job titles. */
+  private async notesFor(owner: string, repo: string, train: TrainConfig, version: string, jobs: Job[]): Promise<ReleaseNotes> {
+    if (!this.deps.notes) return fallbackNotes(jobs);
+    try {
+      const changes = await Promise.all(jobs.map(async job => ({
+        number: job.number, title: job.title,
+        summary: job.prNumber && this.deps.pullBody ? summaryText(await this.deps.pullBody(owner, repo, job.prNumber).catch(() => "")) : "",
+      })));
+      return cleanNotes(await this.deps.notes({ app: appName(train), version, changes }));
+    } catch (error) {
+      console.warn(`[train] ${owner}/${repo} ${version}: release notes fell back to job titles: ${(error as Error).message}`);
+      return fallbackNotes(jobs);
+    }
+  }
+
+  /** Posts a submitted version's launch once the App Store has it on sale. */
+  private async launchStep(owner: string, repo: string, train: TrainConfig): Promise<void> {
+    const { store, notifier } = this.deps;
+    const key = this.key(owner, repo, "launch");
+    const raw = store.cursor(key);
+    if (!raw) return;
+    const name = `${owner}/${repo}`;
+    const launch = JSON.parse(raw) as Launch;
+    if (!train.launch || !notifier.canPost) {
+      store.setCursor(key, "");
+      return;
+    }
+    const now = this.now().getTime();
+    if (now - (this.lastLaunchCheck.get(name) ?? -Infinity) < LAUNCH_CHECK_MS) return;
+    this.lastLaunchCheck.set(name, now);
+    const status = await this.deps.appStatus(train.appId, train.platform ?? "IOS");
+    if (status.version && compareVersions(status.version, launch.version) > 0) {
+      // A later version took its place (this one was rejected and replaced): its post would be wrong.
+      store.setCursor(key, "");
+      console.log(`[train] ${name}: ${launch.version} never went live (now ${status.version}); no launch post`);
+      return;
+    }
+    if (status.version !== launch.version || status.state !== "READY_FOR_DISTRIBUTION") return;
+    const app = appName(train);
+    try {
+      const files = await this.launchMedia(owner, repo, launch);
+      await notifier.post(train.launch.channelId, launchMessage(app, launch.version, launch.notes, storeUrl(train)), files);
+    } catch (error) {
+      const failures = (launch.failures ?? 0) + 1;
+      if (failures < LAUNCH_MAX_FAILURES) {
+        store.setCursor(key, JSON.stringify({ ...launch, failures }));
+        throw error;
+      }
+      store.setCursor(key, "");
+      await notifier.discord(`⚠️ Couldn't post the **${app} ${launch.version}** launch in <#${train.launch.channelId}>: ${(error as Error).message.slice(0, 300)}`);
+      return;
+    }
+    store.setCursor(key, "");
+    store.event(null, "train", `${name} ${launch.version} launch posted`);
+    await notifier.discord(`📣 **${app} ${launch.version}** is live on the App Store; the launch post is in <#${train.launch.channelId}>.`);
+  }
+
+  /** One capture per change (a screenshot if it has one), within Discord's limits. A missing capture costs only itself. */
+  private async launchMedia(owner: string, repo: string, launch: Launch): Promise<UploadFile[]> {
+    const { pullBody, fileAt } = this.deps;
+    if (!pullBody || !fileAt) return [];
+    const files: UploadFile[] = [];
+    let total = 0;
+    for (const job of launch.jobs) {
+      if (!job.prNumber || files.length >= 10) continue;
+      try {
+        const refs = mediaRefs(await pullBody(owner, repo, job.prNumber), owner, repo);
+        for (const ref of refs) {
+          const data = await fileAt(owner, repo, ref.ref, ref.path);
+          if (data.length > DISCORD_MAX_BYTES || total + data.length > LAUNCH_MAX_BYTES) continue;
+          files.push({ name: `${job.number}-${ref.name}`, data, description: captionFor(ref.name) });
+          total += data.length;
+          break;
+        }
+      } catch (error) {
+        console.warn(`[train] ${owner}/${repo}#${job.number}: launch capture skipped: ${(error as Error).message}`);
+      }
+    }
+    return files;
+  }
+
   private async busyNote(owner: string, repo: string, status: AppStatus): Promise<void> {
     const name = `${owner}/${repo}`;
     const last = this.lastBusyNote.get(name) ?? 0;
@@ -215,7 +344,7 @@ export class ReleaseTrain {
       const metadata = path.join(dir, ".isobot-release");
       rmSync(metadata, { recursive: true, force: true });
       mkdirSync(path.join(metadata, "version", pending.version), { recursive: true });
-      writeFileSync(path.join(metadata, "version", pending.version, "en-US.json"), JSON.stringify({ whatsNew: whatsNew(jobs) }, null, 2));
+      writeFileSync(path.join(metadata, "version", pending.version, "en-US.json"), JSON.stringify({ whatsNew: pending.notes?.whatsNew ?? whatsNew(jobs) }, null, 2));
       result = { ok: true, output: "" };
       for (const command of train.prepare ?? []) {
         result = await this.deps.run(dir, command, 60 * 60_000);
@@ -237,6 +366,13 @@ export class ReleaseTrain {
       return;
     }
     store.setCursor(this.key(owner, repo, "confirmed"), "1");
+    if (train.launch) {
+      const launch: Launch = {
+        version: pending.version, notes: pending.notes ?? fallbackNotes(jobs),
+        jobs: jobs.map(job => ({ number: job.number, prNumber: job.prNumber })),
+      };
+      store.setCursor(this.key(owner, repo, "launch"), JSON.stringify(launch));
+    }
     for (const job of jobs) {
       store.update(job.id, { state: "shipped" });
       await github.comment(owner, repo, job.number, `🚀 Submitted to App Review in ${pending.version} (#${pending.issue}).`).catch(() => undefined);
@@ -246,4 +382,16 @@ export class ReleaseTrain {
     store.event(null, "train", `${name} ${pending.version} submitted`);
     await this.deps.notifier.discord(`🚀 **${name} ${pending.version}** submitted for App Review with ${jobs.length} change${jobs.length === 1 ? "" : "s"}.`);
   }
+}
+
+function appName(train: TrainConfig): string {
+  return train.launch?.name ?? train.scheme;
+}
+
+function storeUrl(train: TrainConfig): string {
+  return train.launch?.storeUrl ?? `https://apps.apple.com/app/id${train.appId}`;
+}
+
+function quote(text: string): string {
+  return text.split("\n").map(line => `> ${line}`).join("\n");
 }

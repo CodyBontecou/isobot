@@ -63,6 +63,17 @@ export interface TrainConfig {
   holdMinutes: number;
   /** Commands run in the checkout before archiving (e.g. building a Rust core). */
   prepare?: string[];
+  /** Announce each version to users in Discord once it's live on the App Store (launch.ts). */
+  launch?: LaunchConfig;
+}
+
+export interface LaunchConfig {
+  /** The app's public Discord channel for release posts. Needs the bot (not just a webhook). */
+  channelId: string;
+  /** The app's name as users know it; defaults to the scheme. */
+  name?: string;
+  /** App Store link in the post; defaults to apps.apple.com/app/id<appId>. */
+  storeUrl?: string;
 }
 
 export interface RunnerConfig {
@@ -232,6 +243,10 @@ export function validateConfig(config: RunnerConfig): void {
       if (!(t.everyHours >= 1)) fail(`${name}: train.everyHours must be at least 1`);
       if (!(t.holdMinutes >= 0)) fail(`${name}: train.holdMinutes must be 0 or more`);
       if ((policy.ownerAutonomy ?? policy.autonomy) !== "merge" && policy.autonomy !== "merge") fail(`${name}: a train only makes sense where isobot merges`);
+      if (t.launch) {
+        if (!/^\d{17,20}$/.test(t.launch.channelId ?? "")) fail(`${name}: train.launch.channelId must be a Discord channel id`);
+        if (t.launch.storeUrl !== undefined && !/^https:\/\/\S+$/.test(t.launch.storeUrl)) fail(`${name}: train.launch.storeUrl must be an https URL`);
+      }
     }
     if (policy.devices) {
       const d = policy.devices;

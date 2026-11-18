@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { test } from "node:test";
 import { loadConfig, type RunnerConfig } from "./config.js";
 import { Notifier } from "./notify.js";
 import { Store } from "./store.js";
 import { FakeGitHub } from "./testing.js";
-import { isBusy, nextVersion, publishCommand, ReleaseTrain, timestampBuildNumber, whatsNew, type AppStatus } from "./train.js";
+import { compareVersions, isBusy, nextVersion, publishCommand, ReleaseTrain, timestampBuildNumber, whatsNew, type AppStatus } from "./train.js";
 
 const REPO = "codybontecou/vox.md";
 const [OWNER, NAME] = REPO.split("/");
@@ -60,6 +62,9 @@ test("versions, build numbers and release notes", () => {
   assert.equal(isBusy({ version: "3.0", state: "WAITING_FOR_REVIEW" }), true);
   assert.equal(isBusy({ version: "3.0", state: "READY_FOR_DISTRIBUTION" }), false);
   assert.equal(isBusy({ version: null, state: null }), false);
+  assert.equal(compareVersions("3.0.10", "3.0.9"), 1);
+  assert.equal(compareVersions("3.0", "3.0.0"), 0);
+  assert.equal(compareVersions("2.9.9", "3.0"), -1);
   const command = publishCommand({ appId: "1", project: "It's.xcodeproj", scheme: "App", everyHours: 24, holdMinutes: 60 }, "1.2.3", "202611160905", "/m");
   assert.match(command, /--project 'It'\\''s\.xcodeproj'/);
   assert.match(command, /--archive-xcodebuild-flag 'MARKETING_VERSION=1\.2\.3' --archive-xcodebuild-flag 'CURRENT_PROJECT_VERSION=202611160905'/);
@@ -163,4 +168,118 @@ test("train config is validated", async () => {
   assert.throws(() => validateConfig(config), /exactly one of project or workspace/);
   config.repos[REPO] = { train: { appId: "123456", project: "a", scheme: "s", everyHours: 24, holdMinutes: 60 } };
   assert.throws(() => validateConfig(config), /only makes sense where isobot merges/);
+});
+
+const CHANNEL = "123456789012345678";
+const SHA = "0123456789abcdef0123456789abcdef01234567";
+
+/** A train with a Discord bot, model-written notes and a capture on each PR, for the launch post. */
+function launchSetup() {
+  const config: RunnerConfig = loadConfig();
+  config.repos = {
+    [REPO]: { ownerAutonomy: "merge", checks: ["make test"], train: {
+      appId: "6758967337", project: "Voxboard.xcodeproj", scheme: "Voxboard", everyHours: 24, holdMinutes: 60,
+      launch: { channelId: CHANNEL },
+    } },
+  };
+  const store = new Store(":memory:");
+  store.setCursor(`train:${REPO}:confirmed`.toLowerCase(), "1");
+  const github = new FakeGitHub();
+  let now = new Date("2026-11-16T12:00:00Z");
+  const metadata: string[] = [];
+  const staff: string[] = [];
+  const launches: { channel: string; content: string; files: string[] }[] = [];
+  const app = { status: { version: "3.0", state: "READY_FOR_DISTRIBUTION" } as AppStatus };
+  const notifier = new Notifier({ bot: { token: "t", channelId: "999999999999999999" }, fetcher: (async (url: string, init: RequestInit) => {
+    const channel = /channels\/(\d+)\/messages/.exec(url)?.[1] ?? "";
+    if (init.body instanceof FormData) {
+      const payload = JSON.parse(String(init.body.get("payload_json")));
+      launches.push({ channel, content: payload.content, files: payload.attachments.map((a: { filename: string }) => a.filename) });
+    } else if (init.body) {
+      staff.push(JSON.parse(String(init.body)).content);
+    }
+    return Response.json({ id: "1" });
+  }) as typeof fetch });
+  const inputs: unknown[] = [];
+  const train = new ReleaseTrain({
+    config, store, github, notifier,
+    now: () => now,
+    repo: () => ({ sync: async () => "abc123def4567890", checkoutAt: async () => "/tmp/isobot-train-test", removeWorkspace: async () => {}, pushTag: async () => {} }),
+    run: async (cwd, command) => {
+      if (command.startsWith("asc publish")) metadata.push(readFileSync(path.join(cwd, ".isobot-release/version/3.0.1/en-US.json"), "utf8"));
+      return { ok: true, output: "uploaded" };
+    },
+    appStatus: async () => app.status,
+    notes: async input => {
+      inputs.push(input);
+      return { headline: "Recording is one tap away", items: [
+        { kind: "new", text: "Start recording with one tap. Details at https://evil.example" },
+        { kind: "fixed", text: "Lock screen captures no longer stop early" },
+      ], whatsNew: "This update makes recording faster.\n• One-tap recording\n• Lock screen fix" };
+    },
+    pullBody: async (_o, _r, number) =>
+      `Summary of PR ${number}\n\n<img src="https://github.com/${REPO}/blob/${SHA}/${number - 100}/x/01-after.png?raw=true" width="320">`,
+    fileAt: async (_o, _r, ref, file) => { assert.equal(ref, SHA); return Buffer.from(`png:${file}`); },
+  });
+  const merged = (number: number, title: string) => {
+    store.enqueue(OWNER, NAME, number, title);
+    store.update(`${REPO}#${number}`, { state: "merged", prNumber: number + 100 });
+    github.add(OWNER, NAME, number, title, []);
+  };
+  const run = async () => { for (const ship of await train.tick()) await ship; };
+  return { store, github, app, merged, run, metadata, staff, launches, inputs, advance: (minutes: number) => { now = new Date(now.getTime() + minutes * 60_000); } };
+}
+
+test("model-written notes show on the ship issue, become What's New, and post to the app's channel once live", async () => {
+  const t = launchSetup();
+  t.merged(85, "Lock screen capture fix");
+  t.merged(86, "One-tap recording");
+  await t.run();
+  assert.deepEqual((t.inputs[0] as { changes: { summary: string }[] }).changes.map(c => c.summary), ["Summary of PR 185", "Summary of PR 186"],
+    "the model sees each PR's description without its media markup");
+  const ship = [...t.github.issues.values()].find(i => i.title === "Ship 3.0.1")!;
+  assert.match(ship.body, /> This update makes recording faster\./);
+  assert.match(ship.body, new RegExp(`Discord launch post\\*\\* \\(in <#${CHANNEL}>`));
+  assert.doesNotMatch(ship.body, /evil\.example/, "links in the model's notes are dropped");
+
+  t.advance(61);
+  t.app.status = { version: "3.0", state: "READY_FOR_DISTRIBUTION" };
+  await t.run();
+  assert.equal(JSON.parse(t.metadata[0]).whatsNew, "This update makes recording faster.\n• One-tap recording\n• Lock screen fix");
+  assert.equal(t.launches.length, 0, "nothing goes to users at submission");
+
+  t.app.status = { version: "3.0.1", state: "WAITING_FOR_REVIEW" };
+  t.advance(20);
+  await t.run();
+  assert.equal(t.launches.length, 0, "nothing while Apple reviews");
+
+  t.app.status = { version: "3.0.1", state: "READY_FOR_DISTRIBUTION" };
+  t.advance(5);
+  await t.run();
+  assert.equal(t.launches.length, 0, "the App Store is checked at most every 15 minutes");
+  t.advance(15);
+  await t.run();
+  assert.equal(t.launches.length, 1);
+  const post = t.launches[0];
+  assert.equal(post.channel, CHANNEL);
+  assert.match(post.content, /^# 🎉 Voxboard 3\.0\.1 is out\n\nRecording is one tap away/);
+  assert.match(post.content, /✨ \*\*New\*\*\n• Start recording with one tap\. Details at\n\n🐛 \*\*Fixed\*\*\n• Lock screen captures/);
+  assert.match(post.content, /<https:\/\/apps\.apple\.com\/app\/id6758967337>/);
+  assert.deepEqual(post.files, ["85-01-after.png", "86-01-after.png"]);
+  assert.match(t.staff.at(-1)!, /📣 \*\*Voxboard 3\.0\.1\*\* is live/);
+
+  t.advance(60);
+  await t.run();
+  assert.equal(t.launches.length, 1, "posted once");
+});
+
+test("a version replaced before going live gets no launch post", async () => {
+  const t = launchSetup();
+  t.store.setCursor(`train:${REPO}:launch`.toLowerCase(), JSON.stringify({
+    version: "3.0.1", jobs: [], notes: { headline: "", items: [], whatsNew: "Bug fixes and improvements." },
+  }));
+  t.app.status = { version: "3.0.2", state: "READY_FOR_DISTRIBUTION" };
+  await t.run();
+  assert.equal(t.launches.length, 0);
+  assert.equal(t.store.cursor(`train:${REPO}:launch`.toLowerCase()), "");
 });

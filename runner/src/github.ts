@@ -80,7 +80,7 @@ export class GitHub implements GitHubApi {
   private branches = new Map<string, string>();
   private visibility = new Map<string, boolean>();
 
-  constructor(token: string, sleep: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms))) {
+  constructor(private token: string, sleep: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms))) {
     this.octokit = new Octokit({ auth: token, userAgent: "isobot-runner/0.1", request: { timeout: 30_000 } });
     // Retry transient failures. Writes (create issue/PR/comment, merge) may have happened before a 5xx
     // or a dropped connection, so they retry only when GitHub explicitly rate-limited the request.
@@ -199,6 +199,20 @@ export class GitHub implements GitHubApi {
       number: data.number, url: data.html_url, state: data.state as "open" | "closed", merged: data.merged,
       headSha: data.head.sha, mergeCommitSha: data.merged ? data.merge_commit_sha : null,
     };
+  }
+
+  /** A file's bytes at a commit (e.g. a capture on the isobot/media branch), read with the runner's token. */
+  async fileAt(owner: string, repo: string, ref: string, file: string): Promise<Buffer> {
+    const route = `https://api.github.com/repos/${owner}/${repo}/contents/${file.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(ref)}`;
+    const response = await fetch(route, {
+      headers: { Authorization: `Bearer ${this.token}`, Accept: "application/vnd.github.raw", "User-Agent": "isobot-runner/0.1" },
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`GitHub ${owner}/${repo}:${file} returned HTTP ${response.status}`);
+    }
+    return Buffer.from(await response.arrayBuffer());
   }
 
   /** A PR with the detail the staff chat shows (title, body, branches, draft). */
