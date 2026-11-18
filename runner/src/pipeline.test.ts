@@ -380,7 +380,7 @@ test("recover re-queues interrupted builds and gives up after five attempts", as
   github.add(OWNER, NAME, 18, "Flaky", ["isobot:ready"]);
   await pipeline.discover();
   store.update("codybontecou/time.md#18", { state: "building", attempts: 5 });
-  pipeline.recover();
+  await pipeline.recover();
   assert.equal(store.get("codybontecou/time.md#18")!.state, "queued");
   await Promise.all(pipeline.startQueued());
   assert.equal(store.get("codybontecou/time.md#18")!.state, "failed");
@@ -461,7 +461,7 @@ test("a build killed by shutdown stays queued for the next start instead of fail
   const job = store.get(`${REPO}#40`)!;
   assert.equal(job.state, "building");
   assert.ok(!github.get(OWNER, NAME, 40).labels.includes("isobot:failed"));
-  pipeline.recover();
+  await pipeline.recover();
   assert.equal(store.get(`${REPO}#40`)!.state, "queued");
 });
 
@@ -738,4 +738,94 @@ test("the PR summary describes the change, not the last fix round", async () => 
   await cycle(pipeline);
   const body = github.pulls.get(100)!.body;
   assert.match(body, /## Summary\n\nAdded the feature and tests\.\n\n<details><summary>Later rounds \(1\)<\/summary>\n\n\*\*Check fix 1:\*\* Fixed\./);
+});
+
+/** The same store, GitHub, builder and repo with a new Pipeline: what the runner has after a restart. */
+function restarted(t: ReturnType<typeof setup>) {
+  return new Pipeline({
+    config: t.config, env: { home: "/tmp/isobot-test" }, store: t.store, github: t.github, builder: t.builder,
+    notifier: new Notifier(), repo: () => t.repo, sleep: async () => {},
+    checks: async (_cwd, commands) => {
+      t.checkCalls.push(commands);
+      return { configured: commands.length > 0, passed: true, results: commands.map(command => ({ command, ok: true, output: "" })) };
+    },
+  });
+}
+
+test("a restart mid-build keeps the builder's work and resumes its session where it stopped", async () => {
+  const t = setup(config => { config.repos[REPO] = { autonomy: "pr", checks: ["make test"] }; });
+  t.github.add(OWNER, NAME, 50, "Long build", ["isobot:ready"]);
+  let chosen: string | undefined;
+  let media: string | undefined;
+  t.builder.implement = async input => {
+    chosen = input.sessionId;
+    media = input.media;
+    t.pipeline.beginShutdown();
+    throw new Error("Claude Code exited 143 without a result");
+  };
+  await cycle(t.pipeline);
+  const id = `${REPO}#50`;
+  assert.match(chosen ?? "", /^[0-9a-f-]{36}$/, "the session id is chosen before the builder starts");
+  assert.equal(t.store.get(id)!.sessionId, chosen, "and saved before it finishes");
+  assert.equal(t.store.get(id)!.attempts, 0, "a deliberate stop doesn't use up an attempt");
+  assert.ok(!t.repo.calls.includes("remove isobot/50-long-build"), "the workspace stays for the next start");
+
+  const branch = "isobot/50-long-build";
+  t.repo.leftBehind.add(branch);
+  const next = restarted(t);
+  await next.recover();
+  assert.ok(t.repo.calls.includes(`wip /tmp/wt/${branch}`), "uncommitted work is committed");
+  assert.equal(t.store.get(id)!.state, "queued");
+
+  t.repo.calls = [];
+  await Promise.all(next.startQueued());
+  assert.equal(t.builder.implementCalls, 0, "no fresh start");
+  assert.deepEqual(t.builder.reviseSessions, [chosen], "the same session continues");
+  assert.deepEqual(t.builder.reviseResumed, [true]);
+  assert.ok(t.repo.calls.some(c => c.startsWith("merge-base base sha")), "diffs against where the work began");
+  assert.equal(t.store.get(id)!.state, "pr_open");
+  assert.equal(t.store.cursor(`checkpoint:${id}`), "", "the checkpoint is used once");
+  assert.ok(media);
+});
+
+test("a restart during checks runs them again on the builder's work without rerunning the builder", async () => {
+  const t = setup(config => { config.repos[REPO] = { autonomy: "pr", checks: ["make test"] }; });
+  t.github.add(OWNER, NAME, 51, "Add export", ["isobot:ready"]);
+  const id = `${REPO}#51`;
+  const original = t.pipeline;
+  await original.discover();
+  // Stop the runner while its checks are running.
+  const pipeline = new Pipeline({
+    config: t.config, env: { home: "/tmp/isobot-test" }, store: t.store, github: t.github, builder: t.builder,
+    notifier: new Notifier(), repo: () => t.repo, sleep: async () => {},
+    checks: async () => { pipeline.beginShutdown(); throw new Error("killed"); },
+  });
+  await Promise.all(pipeline.startQueued());
+  assert.equal(t.builder.implementCalls, 1);
+  assert.equal(t.store.get(id)!.state, "building");
+
+  t.repo.leftBehind.add("isobot/51-add-export");
+  const next = restarted(t);
+  await next.recover();
+  await Promise.all(next.startQueued());
+  assert.equal(t.builder.implementCalls, 1, "the builder's finished run isn't repeated");
+  assert.deepEqual(t.builder.reviseSessions, []);
+  assert.deepEqual(t.checkCalls, [["make test"]]);
+  assert.equal(t.store.get(id)!.state, "pr_open");
+  assert.match(t.github.pulls.get(100)!.body, /Added the feature and tests\./, "the PR still describes the builder's change");
+});
+
+test("an interrupted build with no workspace left (a reboot cleared it) starts over", async () => {
+  const t = setup();
+  t.github.add(OWNER, NAME, 52, "Thing", ["isobot:ready"]);
+  const implement = t.builder.implement.bind(t.builder);
+  t.builder.implement = async () => { t.pipeline.beginShutdown(); throw new Error("exited 143"); };
+  await cycle(t.pipeline);
+  t.builder.implement = implement;
+  const next = restarted(t);
+  await next.recover();
+  await Promise.all(next.startQueued());
+  assert.equal(t.builder.implementCalls, 1, "built from scratch");
+  assert.deepEqual(t.builder.reviseResumed, []);
+  assert.equal(t.store.get(`${REPO}#52`)!.state, "pr_open");
 });

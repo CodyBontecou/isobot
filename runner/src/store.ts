@@ -6,7 +6,7 @@ export type JobState =
   | "queued" | "building" | "pr_open" | "merged" | "released"
   | "awaiting_ship" | "shipped" | "closed" | "failed" | "stopped";
 
-/** States a crash can interrupt; they are resumed from a clean worktree. */
+/** States a crash can interrupt; Pipeline.recover() picks them up from what the workspace kept. */
 export const ACTIVE_STATES: JobState[] = ["queued", "building"];
 
 export interface Job {

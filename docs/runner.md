@@ -200,8 +200,16 @@ threads every 5 seconds, then only the channels that changed.
 - **Claude usage limit**: all builds pause until the limit resets (or an hour),
   without using up attempts. `status` shows the pause.
 - **Claude Code signed out**: treated as temporary; `doctor` says so.
-- **Crash or reboot**: launchd restarts the runner; interrupted builds start
-  again from a clean workspace.
+- **Restart, crash or reboot**: launchd restarts the runner, and interrupted builds
+  pick up where they were. On startup, before clearing workspaces, the runner commits
+  whatever each interrupted build left uncommitted and queues it to continue from that
+  commit: a builder that was mid-run resumes the same Claude Code session (its id is
+  chosen and saved before the run starts) in the same workspace path, with new devices.
+  A build that was in checks, review or CI runs them again without rerunning the builder.
+  Captures it already made are kept. A deliberate stop (SIGTERM) doesn't use up one of
+  the job's attempts. If the workspace is gone (a reboot cleared it) or the session is,
+  the build starts over from the task and the saved commit, or from scratch. So you can
+  restart the runner to deploy a change without draining the queue first.
 - **The whole Mac goes away** (asleep, offline, powered off): the runner POSTs to
   `ISOBOT_HEARTBEAT_URL` every minute while it is healthy (last cycle succeeded, current
   one under 2 hours). The `watchdog/` Worker (`isobot-watchdog`, deploy with

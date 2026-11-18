@@ -61,14 +61,36 @@ export interface JobDevices {
 /** A coding agent the runner can drive. Claude Code is the implementation; Pi can slot in behind the same contract. */
 export interface Builder {
   /** `media` is the job's $ISOBOT_MEDIA folder for screenshots and recordings of visible changes. */
-  implement(input: { cwd: string; task: string; devices?: JobDevices; media?: string }): Promise<AgentRun>;
-  revise(input: { cwd: string; sessionId: string | null; task: string; feedback: string; devices?: JobDevices; media?: string }): Promise<AgentRun>;
+  /** `sessionId` names the new session up front, so a runner restart can resume it (see Pipeline.recover). */
+  implement(input: { cwd: string; task: string; devices?: JobDevices; media?: string; sessionId?: string }): Promise<AgentRun>;
+  /**
+   * Continues `sessionId`, or starts a session named `newSessionId` when there is none (or it's gone).
+   * `resumed`: the runner restarted mid-run; carry on instead of addressing `feedback`.
+   */
+  revise(input: ReviseInput): Promise<AgentRun>;
   /** `media`: paths of the captures the builder made, for the reviewer to look at. */
   review(input: { cwd: string; task: string; diff: string; checks: string; media?: string[] }): Promise<Review>;
   triage(input: { items: TriageItem[]; repos: string[]; publicRepos?: string[]; maxProposals: number; hints?: string }): Promise<TriageResult>;
   /** User-facing release notes for a version (launch.ts); optional so test fakes can skip it. */
   releaseNotes?(input: ReleaseNotesInput): Promise<ReleaseNotes>;
 }
+
+export interface ReviseInput {
+  cwd: string;
+  sessionId: string | null;
+  newSessionId?: string;
+  task: string;
+  feedback: string;
+  devices?: JobDevices;
+  media?: string;
+  resumed?: boolean;
+}
+
+/** To a builder session the runner's restart cut off. */
+export const RESUME_PROMPT = "The runner restarted while you were working, which stopped your process. The workspace is as you left it, " +
+  "with anything uncommitted saved in a WIP commit. Background processes are gone, and the job's simulators and emulators were " +
+  "recreated, so use the device ids in your instructions now. Carry on with the task from where you stopped, commit, and finish " +
+  "with a summary of the whole change, not just what you did since the restart.";
 
 const BUILDER_RULES = `You are isobot's builder: an autonomous engineer implementing one approved GitHub issue in this git worktree.
 Rules:
@@ -270,6 +292,17 @@ interface CliResult {
   structured_output?: unknown;
 }
 
+export function revisePrompt(input: Pick<ReviseInput, "sessionId" | "task" | "feedback" | "resumed">): string {
+  if (input.resumed) {
+    return input.sessionId ? RESUME_PROMPT
+      : `${input.task}\n\n## Interrupted\nA previous attempt was cut off by a runner restart; its work so far is committed on this branch. ` +
+        "Check it, finish the task, commit, and summarise the whole change.";
+  }
+  return input.sessionId
+    ? `${input.feedback}\n\nFix these problems, commit, and summarise what you changed.`
+    : `${input.task}\n\n## Previous attempt feedback\n${input.feedback}\n\nThe branch already contains a previous attempt. Fix these problems, commit, and summarise.`;
+}
+
 export class ClaudeCodeBuilder implements Builder {
   private settingsJson: string;
   private ghConfigDir: string;
@@ -335,20 +368,22 @@ export class ClaudeCodeBuilder implements Builder {
     return ["--permission-mode", "bypassPermissions", "--append-system-prompt", `${BUILDER_RULES}\n${toolRules(devices, media)}`, "--mcp-config", mcpConfig];
   }
 
-  async implement(input: { cwd: string; task: string; devices?: JobDevices; media?: string }): Promise<AgentRun> {
-    const result = await this.call(input.cwd, input.task, this.builderArgs(input.cwd, input.devices, input.media), this.config.timeoutMinutes * 60_000, mediaEnv(input.media));
+  async implement(input: { cwd: string; task: string; devices?: JobDevices; media?: string; sessionId?: string }): Promise<AgentRun> {
+    const result = await this.call(input.cwd, input.task, [
+      ...this.builderArgs(input.cwd, input.devices, input.media),
+      ...(input.sessionId ? ["--session-id", input.sessionId] : []),
+    ], this.config.timeoutMinutes * 60_000, mediaEnv(input.media));
     return this.agentRun(result);
   }
 
-  async revise(input: { cwd: string; sessionId: string | null; task: string; feedback: string; devices?: JobDevices; media?: string }): Promise<AgentRun> {
-    const prompt = input.sessionId
-      ? `${input.feedback}\n\nFix these problems, commit, and summarise what you changed.`
-      : `${input.task}\n\n## Previous attempt feedback\n${input.feedback}\n\nThe branch already contains a previous attempt. Fix these problems, commit, and summarise.`;
+  async revise(input: ReviseInput): Promise<AgentRun> {
+    const prompt = revisePrompt(input);
     let result: CliResult;
     try {
       result = await this.call(input.cwd, prompt, [
         ...this.builderArgs(input.cwd, input.devices, input.media),
-        ...(input.sessionId ? ["--resume", input.sessionId] : []),
+        // Resuming keeps the session's id, so the one saved before the run stays right.
+        ...(input.sessionId ? ["--resume", input.sessionId] : input.newSessionId ? ["--session-id", input.newSessionId] : []),
       ], this.config.timeoutMinutes * 60_000, mediaEnv(input.media));
     } catch (error) {
       // A revision of an older PR can outlive its session (cleaned up, or a different machine): start fresh.
