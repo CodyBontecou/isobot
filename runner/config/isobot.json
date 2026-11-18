@@ -208,8 +208,8 @@
         ],
         "checks": [
           "cd apps/website && npm ci --no-audit --no-fund && npm --prefix docs-src ci --no-audit --no-fund",
-          "cd apps/website && node --test $(ls test/*.test.mjs | grep -v -e public-privacy -e reference-ownership -e visualization-catalog)",
-          "cd apps/website && npm run three:bundle && npm run docs:build && node scripts/build-site.mjs && npm run visualizations:seo && node scripts/check-site-links.mjs && node scripts/check-built-locales.mjs && node scripts/check-agent-surfaces.mjs"
+          "cd apps/website && node --test $(ls test/*.test.mjs | grep -v -e visualization-catalog)",
+          "cd apps/website && npm run build:ci"
         ],
         "requireCi": true,
         "indexNow": "cd apps/website && npm ci --no-audit --no-fund >/dev/null && node scripts/submit-indexnow.mjs --submit",
