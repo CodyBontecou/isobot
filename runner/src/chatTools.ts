@@ -234,7 +234,7 @@ async function dispatch(name: string, args: Record<string, unknown>, deps: ChatT
       const p = policyFor(deps.config, `${owner}/${repo}`);
       return json({
         autonomy: p.autonomy, ownerAutonomy: p.ownerAutonomy ?? p.autonomy, checks: p.checks, requireCi: p.requireCi,
-        maxChangedLines: p.maxChangedLines, minReviewConfidence: p.minReviewConfidence, protectedPaths: p.protectedPaths,
+        minReviewConfidence: p.minReviewConfidence, protectedPaths: p.protectedPaths,
         release: p.release, train: p.train ?? null, devices: p.devices ?? null, notes: p.notes ?? null,
       });
     }

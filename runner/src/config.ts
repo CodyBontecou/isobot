@@ -22,7 +22,6 @@ export interface RepoPolicy {
   checks: string[];
   /** Changes to these globs always need a human. */
   protectedPaths: string[];
-  maxChangedLines: number;
   minReviewConfidence: number;
   /** Wait for GitHub CI on the PR before an automatic merge. */
   requireCi: boolean;

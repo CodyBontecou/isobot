@@ -152,7 +152,6 @@
       "**/.githooks/**",
       "**/.husky/**"
     ],
-    "maxChangedLines": 400,
     "minReviewConfidence": 0.85,
     "requireCi": true,
     "release": {
