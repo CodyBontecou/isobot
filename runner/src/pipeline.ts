@@ -12,7 +12,7 @@ import type { DiffStat } from "./git.js";
 import type { CiState, GitHubApi, Issue, IssueComment, PullRequest } from "./github.js";
 import { asksToRetry, maxCommentId, noteFeedback, ownerNotes, quoteNote, withNotes, type OwnerNote } from "./notes.js";
 import type { CardUpdate, Notifier } from "./notify.js";
-import { evaluateGate, matchesGlob, type CheckReport, type GateDecision } from "./policy.js";
+import { evaluateGate, matchesGlob, reviewShortfalls, type CheckReport, type GateDecision } from "./policy.js";
 import type { Job, Store } from "./store.js";
 
 /** The git operations the pipeline needs; `Repo` implements it, tests fake it. */
@@ -315,10 +315,15 @@ export class Pipeline {
         });
         store.event(job.id, "review", `${review.verdict} ${review.confidence} ${review.risk}: ${review.summary}`);
         await this.deps.notifier.say(job, reviewLine(review));
-        if (review.verdict === "request_changes" && reviewRounds < this.deps.config.builder.maxReviewRounds) {
+        // A change request always goes back. An approval that misses the merge bar (confidence or risk)
+        // goes back too when the repo could merge, so the builder works the doubts down instead of stopping short.
+        const shortfalls = reviewShortfalls(review, policy);
+        const mayMerge = policy.autonomy === "merge" || policy.ownerAutonomy === "merge";
+        const retry = review.verdict === "request_changes" || (mayMerge && shortfalls.length > 0);
+        if (retry && reviewRounds < this.deps.config.builder.maxReviewRounds) {
           reviewRounds++;
           await this.feed(job, { phase: "addressing", reviewRounds });
-          run = await builder.revise({ cwd: workspace, sessionId: run.sessionId, task, feedback: reviewFeedback(review), devices, media: mediaDir });
+          run = await builder.revise({ cwd: workspace, sessionId: run.sessionId, task, feedback: reviewFeedback(review, shortfalls), devices, media: mediaDir });
           laterRounds.push({ label: `Review round ${reviewRounds}`, summary: run.summary });
           sha = await commit(`Address review for #${issue.number}`);
           checks = await runChecks(run.summary);
@@ -768,8 +773,17 @@ function prBody(input: { issue: Issue; run: string; rounds?: { label: string; su
   ].join("\n\n");
 }
 
-function reviewFeedback(review: Review): string {
-  return `An independent reviewer requested changes (confidence ${review.confidence.toFixed(2)}, risk ${review.risk}):\n\n${review.summary}\n\n${review.concerns.map(c => `- ${c}`).join("\n")}`;
+function reviewFeedback(review: Review, shortfalls: string[]): string {
+  const concerns = review.concerns.map(c => `- ${c}`).join("\n");
+  if (review.verdict === "request_changes") {
+    return `An independent reviewer requested changes (confidence ${review.confidence.toFixed(2)}, risk ${review.risk}):\n\n${review.summary}\n\n${concerns}`;
+  }
+  return [
+    `An independent reviewer approved, but the change can't merge yet: ${shortfalls.join("; ")}.`,
+    `Reviewer's summary:\n\n${review.summary}`,
+    concerns ? `What kept their confidence down:\n\n${concerns}` : "They listed no specific concerns; re-check correctness and edge cases, and add tests that prove the behaviour.",
+    "Resolve these doubts with real fixes or tests. Stay within the task: don't add unrelated changes, and never weaken or skip tests.",
+  ].join("\n\n");
 }
 
 function hasLabel(issue: Issue, label: string): boolean {

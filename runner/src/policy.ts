@@ -25,6 +25,15 @@ export interface GateDecision {
 
 const TEST_FILE = /(^|\/)(tests?|__tests__|spec|[^/]*Tests?)(\/|$)|\.(test|spec)\.[cm]?[jt]sx?$|Tests?\.swift$|Test\.kt$/;
 
+/** Why the review alone keeps a change out of main. The builder gets another round for each of these. */
+export function reviewShortfalls(review: Review, policy: Pick<RepoPolicy, "minReviewConfidence">): string[] {
+  const reasons: string[] = [];
+  if (review.verdict !== "approve") reasons.push("the reviewer requested changes");
+  if (review.confidence < policy.minReviewConfidence) reasons.push(`reviewer confidence ${review.confidence.toFixed(2)} is below ${policy.minReviewConfidence}`);
+  if (review.risk === "high") reasons.push("the reviewer rated the change high risk");
+  return reasons;
+}
+
 /**
  * Deterministic merge gate. The model's opinion is one input; everything else is
  * checked here so a confident but wrong agent can't talk its way into main.
@@ -36,9 +45,7 @@ export function evaluateGate(input: GateInput): GateDecision {
   if (input.issueLabels.some(label => label.toLowerCase() === input.stopLabel.toLowerCase())) reasons.push("the issue has the stop label");
   if (!checks.configured) reasons.push("no runner checks are configured for this repository");
   else if (!checks.passed) reasons.push("runner checks failed");
-  if (review.verdict !== "approve") reasons.push("the reviewer requested changes");
-  if (review.confidence < policy.minReviewConfidence) reasons.push(`reviewer confidence ${review.confidence.toFixed(2)} is below ${policy.minReviewConfidence}`);
-  if (review.risk === "high") reasons.push("the reviewer rated the change high risk");
+  reasons.push(...reviewShortfalls(review, policy));
   if (diff.files.length === 0) reasons.push("the change is empty");
   if (diff.changedLines > policy.maxChangedLines) reasons.push(`${diff.changedLines} changed lines exceed the ${policy.maxChangedLines}-line limit`);
   const protectedHits = diff.files.filter(file => policy.protectedPaths.some(glob => matchesGlob(file.path, glob))).map(file => file.path);
