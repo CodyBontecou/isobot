@@ -138,6 +138,15 @@ const leaseKey = (id: string) => `lease:${id}`;
 const progressKey = (id: string) => `progress:${id}`;
 const checkpointKey = (id: string) => `checkpoint:${id}`;
 
+/**
+ * Effect-ledger keys (Store.startEffect). A merge is recorded with its merge commit once it happened, by
+ * isobot or by you. A release step is recorded before it runs and after it finishes, per merge commit, so a
+ * restart in the middle is noticed and never silently repeated or forgotten.
+ */
+const mergeKey = (id: string, pr: number) => `merge:${id}:${pr}`;
+const releaseKey = (id: string, step: "merge" | "ship", sha: string) => `release:${id}:${step}:${sha}`;
+interface ReleaseResult { passed: boolean }
+
 /** Job states a retry may start over from. */
 const REBUILDABLE = ["merged", "released", "shipped", "closed", "failed", "stopped"];
 
@@ -438,7 +447,14 @@ export class Pipeline {
     const mediaDir = resume?.media && existsSync(resume.media) ? resume.media : mkdtempSync(path.join(this.deps.mediaRoot ?? tmpdir(), "isobot-media-"));
     try {
       const issue = await github.issue(job.owner, job.repo, job.number);
-      if (issue.state === "closed" || hasLabel(issue, this.labels.stop)) return this.stop(job, issue);
+      if (hasLabel(issue, this.labels.stop)) return this.stop(job, issue);
+      // The PR may have merged already: isobot merged it just before a restart, or you merged it while a
+      // revision waited. Building again would open a second PR; carry on from the merge instead.
+      if (job.prNumber !== null) {
+        const pr = await github.pull(job.owner, job.repo, job.prNumber);
+        if (pr.merged && pr.mergeCommitSha) return this.adoptMerge(job, pr, policy);
+      }
+      if (issue.state === "closed") return this.stop(job, issue);
       const source = await this.taskFor(issue);
       const base = await github.defaultBranch(job.owner, job.repo);
       const mainSha = await repo.sync(base);
@@ -669,11 +685,19 @@ export class Pipeline {
       return;
     }
 
+    // A restart between GitHub merging and the runner recording it leaves the job waiting to merge
+    // again (e.g. after CI); carry on from that merge rather than have GitHub refuse a second one.
+    const current = await github.pull(job.owner, job.repo, prNumber);
+    if (current.merged && current.mergeCommitSha) return this.adoptMerge(job, current, policy);
+
     let mergeSha: string;
     try {
       // `sha` pins the merge to the reviewed commit; GitHub refuses if the branch moved.
       mergeSha = await github.merge(job.owner, job.repo, prNumber, context.sha, `${title} (#${prNumber})`);
+      store.finishEffect(mergeKey(job.id, prNumber), job.id, mergeSha);
     } catch (error) {
+      // Stopping: whether GitHub merged is unknown; the next start checks the PR (build() and here).
+      if (this.shuttingDown) throw error;
       // Usually a conflict with a newer main: the PR is still good, so hand it to the owner.
       await github.addLabels(job.owner, job.repo, job.number, [this.labels.review]);
       store.update(job.id, { state: "pr_open", lastError: (error as Error).message });
@@ -869,6 +893,7 @@ export class Pipeline {
     const { github, store } = this.deps;
     await this.runFollowUps();
     await this.renewLeases();
+    await this.resumeReleases();
     for (const job of store.inState("pr_open")) {
       try {
         if (!job.prNumber) continue;
@@ -880,6 +905,7 @@ export class Pipeline {
             store.update(job.id, { state: "stopped" });
             continue;
           }
+          store.finishEffect(mergeKey(job.id, pr.number), job.id, pr.mergeCommitSha);
           store.update(job.id, { state: "merged" });
           await this.feed(job, { phase: "merged" }, `✅ ${pr.url} was merged.`);
           await this.afterMerge(store.get(job.id)!, pr.mergeCommitSha, this.policyOf(job.owner, job.repo, job.kind));
@@ -910,7 +936,13 @@ export class Pipeline {
         const pr = await github.pull(job.owner, job.repo, job.prNumber!);
         const policy = this.policyOf(job.owner, job.repo, job.kind);
         await this.feed(job, { phase: "shipping" });
+        // Your ship label is the go-ahead, also to run a ship step a restart interrupted again.
+        const key = releaseKey(job.id, "ship", pr.mergeCommitSha!);
+        store.startEffect(key, job.id);
         const report = await this.release(job, pr.mergeCommitSha!, policy.release.onShip, "ship");
+        // Killed by a restart: leave it `started` for resumeReleases() to report.
+        if (this.shuttingDown) continue;
+        store.finishEffect(key, job.id, { passed: report.passed } satisfies ReleaseResult);
         store.update(job.id, { state: report.passed ? "shipped" : "awaiting_ship", lastError: report.passed ? null : "ship step failed" });
         await github.comment(job.owner, job.repo, job.number, report.passed
           ? `🚀 Ship step finished:\n${formatChecks(report)}`
@@ -918,6 +950,7 @@ export class Pipeline {
         await this.feed(job, { phase: report.passed ? "shipped" : "shipFailed" }, `${report.passed ? "🚀 Ship step finished" : "❌ Ship step failed"}:\n${checksSummary(report)}`,
           `${report.passed ? "🚀" : "❌"} **${job.id}** ship step ${report.passed ? "finished" : "failed"}`);
       } catch (error) {
+        if (this.shuttingDown) continue;
         await github.comment(job.owner, job.repo, job.number,
           `❌ The ship step couldn't start (${(error as Error).message}). Add \`${this.labels.ship}\` again to retry.`).catch(() => undefined);
         await this.feed(job, { phase: "shipFailed", detail: (error as Error).message.slice(0, 300) });
@@ -1013,21 +1046,88 @@ export class Pipeline {
     }
   }
 
+  /** A PR that merged before the build got to it (see build()): record the merge and release as usual. */
+  private async adoptMerge(job: Job, pr: PullRequest, policy: RepoPolicy): Promise<void> {
+    const { github, store } = this.deps;
+    store.finishEffect(mergeKey(job.id, pr.number), job.id, pr.mergeCommitSha);
+    await github.removeLabel(job.owner, job.repo, job.number, this.labels.building);
+    await github.removeLabel(job.owner, job.repo, job.number, this.labels.review);
+    store.update(job.id, { state: "merged" });
+    store.event(job.id, "adopted_merge", pr.mergeCommitSha);
+    await this.feed(job, { phase: "merged" }, `✅ ${pr.url} is already merged; carrying on from the merge.`);
+    await this.afterMerge(store.get(job.id)!, pr.mergeCommitSha!, policy);
+  }
+
+  /**
+   * Release steps a restart left behind, from the effect ledger. One that never started runs now. One
+   * that was running when the runner stopped may have partly happened: it runs again only when the repo
+   * marks its onMerge commands `replaySafe`, or when you ask (`runner release`, or the ship label for a
+   * ship step); otherwise you're told once. Jobs merged before the ledger existed are left alone.
+   */
+  private async resumeReleases(): Promise<void> {
+    const { store } = this.deps;
+    for (const job of store.inState("merged", "awaiting_ship")) {
+      if (this.running.has(job.id) || job.prNumber === null) continue;
+      const merge = store.effect(mergeKey(job.id, job.prNumber));
+      if (merge?.status !== "done" || !merge.result) continue;
+      const mergeSha = JSON.parse(merge.result) as string;
+      try {
+        if (job.state === "awaiting_ship") {
+          const ship = store.effect(releaseKey(job.id, "ship", mergeSha));
+          if (ship?.status === "started") await this.reportInterrupted(job, ship.key, "ship", mergeSha);
+          continue;
+        }
+        const policy = this.policyOf(job.owner, job.repo, job.kind);
+        if (job.state !== "merged" || !policy.release.onMerge.length) continue;
+        const release = store.effect(releaseKey(job.id, "merge", mergeSha));
+        if (!release || release.status === "started" || release.status === "requested") await this.afterMerge(job, mergeSha, policy);
+      } catch (error) {
+        console.warn(`[release] ${job.id}: couldn't resume: ${(error as Error).message}`);
+      }
+    }
+  }
+
+  /** You asked to run a merged job's release again (`runner release`); the running runner picks it up. */
+  async requestRelease(owner: string, repo: string, number: number): Promise<{ ok: boolean; message: string }> {
+    const { store } = this.deps;
+    const job = store.get(storeId(owner, repo, number));
+    const policy = this.policyOf(owner, repo, job?.kind ?? "issue");
+    const merge = job?.prNumber != null ? store.effect(mergeKey(job.id, job.prNumber)) : null;
+    if (!job || merge?.status !== "done" || !merge.result) return { ok: false, message: `isobot has no merge on record for ${owner}/${repo}#${number}.` };
+    if (!policy.release.onMerge.length) return { ok: false, message: `${owner}/${repo} has no release.onMerge commands.` };
+    if (job.state !== "merged") return { ok: false, message: `${job.id} is ${job.state.replace("_", " ")}, so there's no release to run again.` };
+    store.requestEffect(releaseKey(job.id, "merge", JSON.parse(merge.result) as string), job.id);
+    return { ok: true, message: `📦 Release of ${job.id} requested; the runner runs it on its next pass.` };
+  }
+
+  private async reportInterrupted(job: Job, key: string, step: "merge" | "ship", sha: string): Promise<void> {
+    const { github, store } = this.deps;
+    store.setEffectStatus(key, "interrupted");
+    store.update(job.id, { lastError: `${step === "ship" ? "ship step" : "release"} interrupted by a runner restart` });
+    const ref = `${job.owner}/${job.repo}#${job.number}`;
+    const message = step === "ship"
+      ? `⚠️ The ship step for ${sha.slice(0, 12)} was interrupted by a runner restart and may have partly run. isobot never reruns a ship step by itself. Check what it did, then add \`${this.labels.ship}\` again to run it again.`
+      : `⚠️ The release of ${sha.slice(0, 12)} was interrupted by a runner restart and may have partly run. isobot doesn't rerun it by itself, because this repository's release commands aren't marked safe to repeat (\`release.replaySafe\`). Check what it did, then run \`npm run runner -- release ${ref}\` to run it again.`;
+    await github.comment(job.owner, job.repo, job.number, message);
+    await this.feed(job, { phase: step === "ship" ? "shipFailed" : "releaseFailed", detail: "Interrupted by a runner restart" }, message,
+      `⚠️ **${job.id}** ${step === "ship" ? "ship step" : "release"} interrupted by a restart`);
+  }
+
   private async afterMerge(job: Job, mergeSha: string, policy: RepoPolicy): Promise<void> {
     const { github, store } = this.deps;
     if (policy.release.onMerge.length) {
-      let report: CheckReport;
-      await this.feed(job, { phase: "releasing" });
-      try {
-        report = await this.release(job, mergeSha, policy.release.onMerge, "merge");
-      } catch (error) {
-        report = { configured: true, passed: false, results: [{ command: "prepare release checkout", ok: false, output: (error as Error).message }] };
+      const key = releaseKey(job.id, "merge", mergeSha);
+      const prior = store.effect(key);
+      if (prior?.status === "done") {
+        // Released already (a restart came after it): only a passing release goes on to the ship step.
+        if (!prior.result || !(JSON.parse(prior.result) as ReleaseResult).passed) return;
+      } else if (prior?.status === "interrupted" || (prior?.status === "started" && !policy.release.replaySafe)) {
+        if (prior.status === "started") await this.reportInterrupted(job, key, "merge", mergeSha);
+        return;
+      } else {
+        await this.runRelease(job, key, mergeSha, policy);
+        if (store.get(job.id)?.state !== "released") return;
       }
-      store.update(job.id, { state: report.passed ? "released" : "merged", lastError: report.passed ? null : "release failed" });
-      await github.comment(job.owner, job.repo, job.number, `${report.passed ? "📦 Released" : "❌ Release failed"}:\n${formatChecks(report)}`);
-      await this.feed(job, { phase: report.passed ? "released" : "releaseFailed" }, `${report.passed ? "📦 Released" : "❌ Release failed"}:\n${checksSummary(report)}`,
-        `${report.passed ? "📦" : "❌"} **${job.id}** release ${report.passed ? "finished" : "failed"}`);
-      if (!report.passed) return;
     }
     if (policy.release.onShip.length) {
       store.update(job.id, { state: "awaiting_ship" });
@@ -1035,6 +1135,26 @@ export class Pipeline {
         `🛳 Ready to ship. Add the \`${this.labels.ship}\` label to run: ${policy.release.onShip.map(c => `\`${c}\``).join(", ")}`);
       await this.feed(job, { phase: "ship" }, `🛳 Ready to ship. Add \`${this.labels.ship}\` to the issue to run: ${policy.release.onShip.map(c => `\`${c}\``).join(", ")}`);
     }
+  }
+
+  /** Runs onMerge once, recorded in the ledger before and after. Leaves state `released` when it passed. */
+  private async runRelease(job: Job, key: string, mergeSha: string, policy: RepoPolicy): Promise<void> {
+    const { github, store } = this.deps;
+    let report: CheckReport;
+    await this.feed(job, { phase: "releasing" });
+    store.startEffect(key, job.id);
+    try {
+      report = await this.release(job, mergeSha, policy.release.onMerge, "merge");
+    } catch (error) {
+      report = { configured: true, passed: false, results: [{ command: "prepare release checkout", ok: false, output: (error as Error).message }] };
+    }
+    // Killed by a restart: it stays `started`, and resumeReleases() decides on the next start.
+    if (this.shuttingDown) return;
+    store.finishEffect(key, job.id, { passed: report.passed } satisfies ReleaseResult);
+    store.update(job.id, { state: report.passed ? "released" : "merged", lastError: report.passed ? null : "release failed" });
+    await github.comment(job.owner, job.repo, job.number, `${report.passed ? "📦 Released" : "❌ Release failed"}:\n${formatChecks(report)}`);
+    await this.feed(job, { phase: report.passed ? "released" : "releaseFailed" }, `${report.passed ? "📦 Released" : "❌ Release failed"}:\n${checksSummary(report)}`,
+      `${report.passed ? "📦" : "❌"} **${job.id}** release ${report.passed ? "finished" : "failed"}`);
   }
 
   private async release(job: Job, sha: string, commands: string[], label: string): Promise<CheckReport> {

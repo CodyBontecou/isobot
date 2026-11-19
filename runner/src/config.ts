@@ -31,6 +31,12 @@ export interface RepoPolicy {
     onMerge: string[];
     /** Run only after the owner adds the ship label (e.g. App Store submission). */
     onShip: string[];
+    /**
+     * onMerge is safe to run twice on the same merge commit (a Worker or site deploy). Then a release a
+     * restart interrupted runs again by itself; otherwise the runner tells you and waits for
+     * `runner release <repo#n>`. Ship steps never rerun by themselves.
+     */
+    replaySafe?: boolean;
   };
   /** Extra guidance appended to the builder prompt for this repo. */
   notes?: string;
@@ -397,7 +403,11 @@ export function policyFor(config: RunnerConfig, repo: string): RepoPolicy {
     ...own,
     autonomy: own?.autonomy ?? (key ? base.autonomy : "off"),
     protectedPaths: [...base.protectedPaths, ...(own?.protectedPaths ?? [])],
-    release: { onMerge: own?.release?.onMerge ?? base.release.onMerge, onShip: own?.release?.onShip ?? base.release.onShip },
+    release: {
+      onMerge: own?.release?.onMerge ?? base.release.onMerge,
+      onShip: own?.release?.onShip ?? base.release.onShip,
+      replaySafe: own?.release?.replaySafe ?? base.release.replaySafe ?? false,
+    },
   };
 }
 

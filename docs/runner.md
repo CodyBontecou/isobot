@@ -62,6 +62,7 @@ doesn't propose your whole backlog.
 | `retry <repo#n> [note]` | Build an issue again (failed, merged, closed or stopped job, or one never built), optionally with a note for the builder |
 | `inspect [repo#n] [--follow] [--json]` | Timeline of what isobot did, across jobs or for one, and what it will check next. `--follow` keeps printing new events |
 | `grants [repo]` | Who may approve, stop, merge, chat and hand off, and each repo's merge rules, gathered from config and `runner.env` |
+| `release <repo#n>` | Run a merged job's `release.onMerge` again, e.g. one a restart interrupted. The running runner does it on its next pass |
 
 Logs: `~/Library/Application Support/isobot/logs/runner.log` (rotated at
 10 MB, three kept). State: `runner.sqlite` and `heartbeat.json` beside it.
@@ -293,6 +294,19 @@ long job.
   the job's attempts. If the workspace is gone (a reboot cleared it) or the session is,
   the build starts over from the task and the saved commit, or from scratch. So you can
   restart the runner to deploy a change without draining the queue first.
+- **Restarts and side effects**: merges and release steps go in an effect ledger
+  (`effects` in `runner.sqlite`), recorded before a step runs and after it finishes.
+  - A build whose PR is already merged (isobot merged it just before a restart, or you
+    merged it while a revision waited) isn't built again. It carries on from the merge,
+    so there's never a second PR.
+  - A release that never started after a merge runs on the next pass.
+  - A release that was running when the runner stopped may have partly happened. It
+    runs again by itself only if the repo sets `release.replaySafe`. Otherwise you get
+    one comment, and it waits for `npm run runner -- release <repo#n>`.
+  - A ship step a restart interrupted is never rerun by itself. You're told once, and
+    adding `isobot:ship` again runs it.
+  - A restart isn't reported as a failed release or ship step, or as GitHub refusing a
+    merge.
 - **The whole Mac goes away** (asleep, offline, powered off): the runner POSTs to
   `ISOBOT_HEARTBEAT_URL` every minute while it is healthy (last cycle succeeded, current
   one under 2 hours). The `watchdog/` Worker (`isobot-watchdog`, deploy with
@@ -328,6 +342,12 @@ target repo):
 Release commands run on a clean checkout of the merge commit with the runner's
 scrubbed environment, so tools that need credentials (App Store Connect API
 keys, Wrangler) must find them in their own config on the machine.
+
+Add `"replaySafe": true` under `release` when running `onMerge` twice on the
+same commit is harmless, as with a Worker or site deploy. Then a release a
+restart interrupted runs again by itself. Leave it off for anything that bumps
+a build number or uploads a binary (TestFlight): a second upload of the same
+build fails or duplicates.
 
 Every configured repository currently runs at `"autonomy": "merge"` (set in
 `defaults`): isobot merges any trusted issue once every gate passes. Issues

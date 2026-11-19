@@ -27,6 +27,23 @@ export interface FollowUp {
   payload: string;
 }
 
+/**
+ * A side effect in the effect ledger (Store.startEffect): `started` before it runs, `done` once its result is
+ * saved. A `started` effect after a restart is one that may or may not have happened; whoever owns it decides
+ * whether it's safe to run again. `interrupted` means the owner was told and it waits for them;
+ * `requested` means they asked for it to run again.
+ */
+export type EffectStatus = "started" | "done" | "interrupted" | "requested";
+
+export interface Effect {
+  key: string;
+  jobId: string | null;
+  status: EffectStatus;
+  /** What the effect returned (JSON), once done. */
+  result: string | null;
+  updatedAt: string;
+}
+
 export interface Job {
   id: string;
   owner: string;
@@ -80,6 +97,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS followups (
         job_id TEXT NOT NULL, kind TEXT NOT NULL, due_at TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL,
         PRIMARY KEY (job_id, kind)
+      );
+      CREATE TABLE IF NOT EXISTS effects (
+        key TEXT PRIMARY KEY, job_id TEXT, status TEXT NOT NULL, result TEXT, updated_at TEXT NOT NULL
       );
     `);
     const eventColumns = (this.db.prepare("PRAGMA table_info(events)").all() as { name: string }[]).map(c => c.name);
@@ -246,6 +266,38 @@ export class Store {
 
   setCursor(key: string, value: string): void {
     this.db.prepare("INSERT INTO cursors (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
+  }
+
+  /** One side effect's ledger entry (see EffectStatus), or null if it never started. */
+  effect(key: string): Effect | null {
+    const row = this.db.prepare("SELECT key, job_id, status, result, updated_at FROM effects WHERE key = ?").get(key) as
+      { key: string; job_id: string | null; status: EffectStatus; result: string | null; updated_at: string } | undefined;
+    return row ? { key: row.key, jobId: row.job_id, status: row.status, result: row.result, updatedAt: row.updated_at } : null;
+  }
+
+  /** Records that a side effect is about to run. Call it before the effect, so a crash mid-way leaves it `started`. */
+  startEffect(key: string, jobId: string | null): void {
+    this.setEffect(key, jobId, "started", null);
+  }
+
+  /** Records a side effect's result. Call it right after the effect returns. */
+  finishEffect(key: string, jobId: string | null, result: unknown = null): void {
+    this.setEffect(key, jobId, "done", result === null ? null : JSON.stringify(result));
+  }
+
+  /** Asks for an effect to run (again): the owner said so, e.g. `runner release`. */
+  requestEffect(key: string, jobId: string | null): void {
+    this.setEffect(key, jobId, "requested", null);
+  }
+
+  setEffectStatus(key: string, status: EffectStatus): void {
+    this.db.prepare("UPDATE effects SET status = ?, updated_at = ? WHERE key = ?").run(status, new Date().toISOString(), key);
+  }
+
+  private setEffect(key: string, jobId: string | null, status: EffectStatus, result: string | null): void {
+    this.db.prepare(`INSERT INTO effects (key, job_id, status, result, updated_at) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET job_id = excluded.job_id, status = excluded.status, result = excluded.result, updated_at = excluded.updated_at`)
+      .run(key, jobId, status, result, new Date().toISOString());
   }
 
   /** Records that a triage item was handled; returns false if it was already seen. */
