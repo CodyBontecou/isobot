@@ -24,6 +24,7 @@ released change. This page is the target design; keep new work consistent with i
 | Discord bridge (`src/`, `bridge/`) | Cloudflare Container → Mac mini | Discord Gateway, GitHub webhook sync, Discord history API |
 | Pi agent (`cloudflare/`) | Cloudflare Worker → Mac mini | Chat, console, iOS app, Vox captures, Discord ticket creation |
 | Runner (`runner/`) | This Mac → Mac mini | Triage, build, review, merge, release ([runbook](runner.md)) |
+| Build sandbox (`sandbox/`) | Cloudflare Containers | Builds for repos and sites with `executor: "cloudflare"` ([cloud builds](cloud-builds.md)) |
 
 The runner is plain Node with local SQLite (`node:sqlite`), a launchd agent and
 the `claude` CLI. It already runs on any Mac, including the mini, unchanged.

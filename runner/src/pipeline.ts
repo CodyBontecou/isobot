@@ -21,8 +21,10 @@ export interface RepoOps {
   sync(defaultBranch: string): Promise<string>;
   createWorkspace(branch: string, baseSha: string): Promise<string>;
   removeWorkspace(name: string): Promise<void>;
-  /** Whether a build workspace for this branch is still on disk (a restart left it behind). */
-  hasWorkspace(name: string): boolean;
+  /** Whether a build workspace for this branch is still there (a restart left it behind). */
+  hasWorkspace(name: string): boolean | Promise<boolean>;
+  /** Stops commands still running in a workspace a restart left behind (cloud builds keep running). */
+  interrupt?(name: string): Promise<void>;
   workspacePath(name: string): string;
   commitPending(dir: string, message: string): Promise<void>;
   capture(dir: string, branch: string): Promise<string>;
@@ -60,6 +62,23 @@ export interface PipelineDeps {
   now?: () => Date;
   /** This runner's name in claim leases, so two runners (e.g. a laptop and the mini) never build one issue twice. */
   runnerId?: string;
+  /** Cloud builds (cloud.ts), for repos and content sites with `executor: "cloudflare"`. */
+  cloud?: CloudExecutor;
+}
+
+/** Where one job's workspace, builder and checks live. */
+export interface CloudExecutor {
+  repo(owner: string, repo: string): RepoOps;
+  builder: Builder;
+  checks(cwd: string, commands: string[], options: { timeoutMs?: number; env?: Record<string, string> }): Promise<CheckReport>;
+}
+
+interface Executor {
+  /** A cloud build: no simulators, emulators or captures. */
+  remote: boolean;
+  repo: RepoOps;
+  builder: Builder;
+  checks: CloudExecutor["checks"];
 }
 
 /**
@@ -369,12 +388,27 @@ export class Pipeline {
     }
   }
 
+  /** This Mac (deps.repo, builder, sandboxed checks), or a Cloudflare build sandbox when the policy says so. */
+  private executor(job: Job, policy = this.policyOf(job.owner, job.repo, job.kind)): Executor {
+    if (policy.executor === "cloudflare") {
+      const cloud = this.deps.cloud;
+      if (!cloud) throw new Error("this repository builds on Cloudflare (`executor: \"cloudflare\"`), but the runner has no build sandbox: set ISOBOT_SANDBOX_URL and ISOBOT_SANDBOX_TOKEN");
+      return { remote: true, repo: cloud.repo(job.owner, job.repo), builder: cloud.builder, checks: cloud.checks };
+    }
+    return {
+      remote: false, repo: this.deps.repo(job.owner, job.repo), builder: this.deps.builder,
+      // Checks run builder-written code, so always sandboxed.
+      checks: (cwd, commands, options) => this.deps.checks(cwd, commands, { ...options, sandbox: true }),
+    };
+  }
+
   private async salvage(job: Job): Promise<Checkpoint | null> {
     const raw = this.deps.store.cursor(progressKey(job.id));
     if (!raw || !job.branch) return null;
     const progress = JSON.parse(raw) as Progress;
-    const repo = this.deps.repo(job.owner, job.repo);
-    if (!repo.hasWorkspace(job.branch)) return null;
+    const repo = this.executor(job).repo;
+    if (!(await repo.hasWorkspace(job.branch))) return null;
+    await repo.interrupt?.(job.branch);
     const dir = repo.workspacePath(job.branch);
     await repo.commitPending(dir, "WIP: interrupted by a runner restart");
     return { ...progress, sha: await repo.capture(dir, job.branch) };
@@ -426,9 +460,15 @@ export class Pipeline {
   }
 
   async build(job: Job): Promise<void> {
-    const { github, store, builder } = this.deps;
+    const { github, store } = this.deps;
     const policy = this.policyOf(job.owner, job.repo, job.kind);
-    const repo = this.deps.repo(job.owner, job.repo);
+    let ex: Executor;
+    try {
+      ex = this.executor(job, policy);
+    } catch (error) {
+      return this.fail(job, error as Error);
+    }
+    const { repo, builder } = ex;
     const attempts = job.attempts + 1;
     if (attempts > MAX_ATTEMPTS) return this.fail(job, new Error(`gave up after ${MAX_ATTEMPTS} interrupted attempts`));
     // A revision continues the open PR's branch and builder session instead of starting over.
@@ -445,6 +485,8 @@ export class Pipeline {
     // Screenshots and recordings of visible changes ($ISOBOT_MEDIA); both of the builder's sandboxes can write temp.
     // An interrupted build keeps the captures it already made.
     const mediaDir = resume?.media && existsSync(resume.media) ? resume.media : mkdtempSync(path.join(this.deps.mediaRoot ?? tmpdir(), "isobot-media-"));
+    // A cloud builder can't write to this Mac, so it captures nothing.
+    const builderMedia = ex.remote ? undefined : mediaDir;
     try {
       const issue = await github.issue(job.owner, job.repo, job.number);
       if (hasLabel(issue, this.labels.stop)) return this.stop(job, issue);
@@ -458,7 +500,8 @@ export class Pipeline {
       const source = await this.taskFor(issue);
       const base = await github.defaultBranch(job.owner, job.repo);
       const mainSha = await repo.sync(base);
-      if (hasDevices(policy.devices) && this.deps.devices) {
+      // Cloud builds run on Linux: no simulators or emulators (content falls back to tracing the source).
+      if (hasDevices(policy.devices) && this.deps.devices && !ex.remote) {
         await this.feed(job, { phase: "devices" });
         lease = await this.deps.devices.lease(job.id, policy.devices);
         store.event(job.id, "devices", lease.describe());
@@ -492,7 +535,7 @@ export class Pipeline {
         mainSummary = resume.main;
         if (resume.stage === "builder") {
           await this.feed(job, { phase: "implementing" }, "♻️ The runner restarted mid-build. The builder picks up where it left off.");
-          run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback: "", devices, media: mediaDir, resumed: true }));
+          run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback: "", devices, media: builderMedia, resumed: true }));
         } else {
           await this.deps.notifier.say(job, "♻️ The runner restarted mid-build. Checks and review run again on the builder's work so far.");
           run = { ok: true, sessionId: sessionId(), summary: resume.summary };
@@ -509,7 +552,7 @@ export class Pipeline {
         await this.feed(job, { phase: "revising", notes: this.noteCount(job, notes.fresh.length) }, this.ackNotes(notes.fresh));
         noteRounds++;
         run = await builderStep(ids => builder.revise({
-          cwd: workspace!, ...ids, task, devices, media: mediaDir,
+          cwd: workspace!, ...ids, task, devices, media: builderMedia,
           feedback: notes.fresh.length ? noteFeedback(notes.fresh) : "Re-read the task and the owner's follow-up notes, and make sure this branch satisfies all of them.",
         }), job.sessionId);
         store.event(job.id, "revised", run.summary, { type: "builder", v: 1, round: "revise PR", ok: run.ok });
@@ -517,7 +560,7 @@ export class Pipeline {
         baseSha = mainSha;
         workspace = await repo.createWorkspace(branch, baseSha);
         await this.feed(job, { phase: "implementing" });
-        run = await builderStep(ids => builder.implement({ cwd: workspace!, task, devices, media: mediaDir, sessionId: ids.newSessionId }), null);
+        run = await builderStep(ids => builder.implement({ cwd: workspace!, task, devices, media: builderMedia, sessionId: ids.newSessionId }), null);
         store.event(job.id, "implemented", run.summary, { type: "builder", v: 1, round: "implement", ok: run.ok });
       }
       const commit = async (message: string) => {
@@ -530,7 +573,7 @@ export class Pipeline {
       }
       const runChecks = async (summary: string) => {
         await this.feed(job, { phase: "checking" }, `🔨 Builder:\n${quote(summary || "(no summary)", 15)}`);
-        const report = await this.checks(workspace!, policy.checks, lease?.env);
+        const report = await ex.checks(workspace!, policy.checks, { env: lease?.env });
         store.event(job.id, "checks", report.passed ? "passed" : "failed",
           { type: "checks", v: 1, passed: report.passed, failed: report.results.filter(r => !r.ok).map(r => r.command) });
         await this.deps.notifier.say(job, checksLine(report));
@@ -551,7 +594,7 @@ export class Pipeline {
             noteRounds++;
             task = withNotes(source.task, late.all);
             await this.feed(job, { phase: "revising", notes: this.noteCount(job, late.fresh.length) }, this.ackNotes(late.fresh));
-            run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback: noteFeedback(late.fresh), devices, media: mediaDir }));
+            run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback: noteFeedback(late.fresh), devices, media: builderMedia }));
             laterRounds.push({ label: "Owner note", summary: run.summary });
             this.builderEvent(job, laterRounds.at(-1)!.label, run);
             sha = await commit(`Apply owner feedback for #${issue.number}`);
@@ -562,7 +605,7 @@ export class Pipeline {
         if (!checks.passed && fixRounds < this.deps.config.builder.maxFixRounds) {
           fixRounds++;
           await this.feed(job, { phase: "fixing", fixRounds });
-          run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback: failureFeedback(checks), devices, media: mediaDir }));
+          run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback: failureFeedback(checks), devices, media: builderMedia }));
           laterRounds.push({ label: `Check fix ${fixRounds}`, summary: run.summary });
             this.builderEvent(job, laterRounds.at(-1)!.label, run);
           sha = await commit(`Fix checks for #${issue.number}`);
@@ -587,7 +630,7 @@ export class Pipeline {
           reviewRounds++;
           await this.feed(job, { phase: "addressing", reviewRounds });
           const feedback = reviewFeedback(review, shortfalls);
-          run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback, devices, media: mediaDir }));
+          run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback, devices, media: builderMedia }));
           laterRounds.push({ label: `Review round ${reviewRounds}`, summary: run.summary });
             this.builderEvent(job, laterRounds.at(-1)!.label, run);
           sha = await commit(`Address review for #${issue.number}`);
@@ -1184,11 +1227,6 @@ export class Pipeline {
       console.warn(`[media] ${job.id}: publishing failed: ${(error as Error).message}`);
       return { files, markdown: "", notes: [...skipped, `couldn't publish to GitHub: ${(error as Error).message.slice(0, 200)}`] };
     }
-  }
-
-  /** Checks run builder-written code, so always sandboxed. */
-  private checks(cwd: string, commands: string[], env?: Record<string, string>): Promise<CheckReport> {
-    return this.deps.checks(cwd, commands, { sandbox: true, env });
   }
 
   private async stop(job: Job, issue: Issue): Promise<void> {
