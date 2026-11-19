@@ -5,7 +5,8 @@ import { callTool, executeAction, formatCheckIn, needsMe, redact, type ChatActio
 import { ChatToolServer } from "./chatMcp.js";
 import type { DiscordApi, DiscordMessage, Upload } from "./discordApi.js";
 import { classifyModelFailure } from "./errors.js";
-import { CARD_FOOTER } from "./notify.js";
+import type { HandoffWatch } from "./handoff.js";
+import { CARD_FOOTER, HANDOFF } from "./notify.js";
 import { run, tail, workerEnv } from "./proc.js";
 import type { Store } from "./store.js";
 
@@ -89,6 +90,8 @@ export interface StaffChatOptions {
   model: ChatModel;
   config: ChatConfig;
   server: ChatToolServer;
+  /** Records answers that carry 💻, when Herdr handoff is on. */
+  handoff?: Pick<HandoffWatch, "add">;
   now?: () => Date;
 }
 
@@ -422,16 +425,25 @@ export class StaffChat {
 
   private async reply(threadId: string, text: string, files: Upload[]): Promise<void> {
     const chunks = split(text);
+    let last: string | null = null;
     if (files.length) {
-      await this.o.discord.upload(threadId, { content: chunks.shift() ?? "", allowed_mentions: { parse: [] } }, files);
+      last = (await this.o.discord.upload(threadId, { content: chunks.shift() ?? "", allowed_mentions: { parse: [] } }, files)).id;
     }
-    for (const chunk of chunks) await this.say(threadId, chunk);
+    for (const chunk of chunks) last = await this.say(threadId, chunk) ?? last;
+    // 💻 under the answer moves this conversation into a local Herdr tab (handoff.ts).
+    if (last && this.o.handoff) {
+      this.o.handoff.add(threadId, last, { kind: "chat", threadId });
+      await this.o.discord.react(threadId, last, HANDOFF).catch(() => undefined);
+    }
   }
 
-  private async say(channelId: string, content: string): Promise<void> {
-    await this.o.discord.request("POST", `/channels/${channelId}/messages`, { content: clip(content), allowed_mentions: { parse: [] } }).catch(error => {
+  private async say(channelId: string, content: string): Promise<string | null> {
+    try {
+      return (await this.o.discord.request<{ id: string }>("POST", `/channels/${channelId}/messages`, { content: clip(content), allowed_mentions: { parse: [] } })).id;
+    } catch (error) {
       console.warn(`[chat] posting failed: ${(error as Error).message}`);
-    });
+      return null;
+    }
   }
 
   private async pollPending(): Promise<void> {
@@ -480,7 +492,11 @@ export class StaffChat {
     this.state.checkInDate = today;
     this.save();
     const text = formatCheckIn(await needsMe(this.o.tools), this.o.tools.store.all(50));
-    if (text) await this.say(this.o.channelId, text);
+    const posted = text ? await this.say(this.o.channelId, text) : null;
+    if (posted && this.o.handoff) {
+      this.o.handoff.add(this.o.channelId, posted, { kind: "message" });
+      await this.o.discord.react(this.o.channelId, posted, HANDOFF).catch(() => undefined);
+    }
   }
 
   private prune(): void {
@@ -489,6 +505,11 @@ export class StaffChat {
       if (i >= MAX_THREADS || Date.now() - conv.updatedAt > IDLE_THREAD_MS) delete this.state.threads[conv.threadId];
     }
   }
+}
+
+/** The Claude Code session behind a staff-chat thread, or null before its first answer. */
+export function chatSessionId(store: Pick<Store, "cursor">, threadId: string): string | null {
+  return loadState(store.cursor(STATE_KEY)).threads[threadId]?.sessionId ?? null;
 }
 
 function loadState(raw: string | null): ChatState {

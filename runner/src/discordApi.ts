@@ -15,7 +15,10 @@ export interface DiscordMessage {
   referenced_message?: DiscordMessage | null;
   message_reference?: { message_id?: string };
   thread?: { id: string };
-  embeds?: { title?: string; description?: string; url?: string; footer?: { text: string } }[];
+  embeds?: { title?: string; description?: string; url?: string; author?: { name?: string }; footer?: { text: string } }[];
+  /** Reaction totals; `me` is the bot's own. */
+  reactions?: { count: number; me: boolean; emoji: { id?: string | null; name: string | null } }[];
+  guild_id?: string;
   /** Set by the staff chat (not Discord) on a message from another channel: where it was asked. */
   origin?: string;
   type?: number;
