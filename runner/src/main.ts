@@ -4,15 +4,17 @@ import { ReleaseTrain } from "./train.js";
 import { ContentTrain } from "./content.js";
 import type { CheckReport } from "./policy.js";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { builderSettings, ClaudeCodeBuilder } from "./builder.js";
 import { chatAllowlist, claudeChatModel, StaffChat } from "./chat.js";
 import { ChatToolServer } from "./chatMcp.js";
 import { DiscordApi } from "./discordApi.js";
-import { configuredRepos, contentRepos, loadConfig, loadEnvironment, policyFor, type Environment, type RunnerConfig } from "./config.js";
+import { CloudRepo, HttpSandboxApi, remoteChecks, remoteExec } from "./cloud.js";
+import { cloudRepos, configuredRepos, contentRepos, loadConfig, loadEnvironment, policyFor, type Environment, type RunnerConfig } from "./config.js";
 import { Repo } from "./git.js";
 import { GitHub } from "./github.js";
 import { TERMINAL_MARKER } from "./notes.js";
@@ -70,6 +72,25 @@ function globalGit(key: string): string {
   try { return execFileSync("git", ["config", "--global", key], { encoding: "utf8" }).trim(); } catch { return ""; }
 }
 
+/**
+ * Cloud builds (docs/cloud-builds.md): the same Claude Code builder and checks, run in an isobot-sandbox
+ * Container. The Container is the sandbox, so Claude Code's own (macOS) sandbox settings don't apply;
+ * the builder's tool denials still do.
+ */
+function cloudExecutor(config: RunnerConfig, env: Environment, repoFor: (owner: string, repo: string) => Repo) {
+  if (!env.sandbox) return undefined;
+  const api = new HttpSandboxApi(env.sandbox.url, env.sandbox.token);
+  const deny = ((config.builder.settings?.permissions as { deny?: string[] } | undefined)?.deny) ?? [];
+  const builder = new ClaudeCodeBuilder(config.builder, { secrets: [], noWrite: [] }, "claude", undefined, undefined, {
+    exec: remoteExec(api), settings: { permissions: { deny } },
+  });
+  return {
+    repo: (owner: string, repo: string) => new CloudRepo(repoFor(owner, repo), api),
+    builder,
+    checks: (cwd: string, commands: string[], options: { timeoutMs?: number; env?: Record<string, string> }) => remoteChecks(api, cwd, commands, options),
+  };
+}
+
 function runtime(): Runtime {
   loadEnvFiles();
   const config = loadConfig();
@@ -103,7 +124,7 @@ function runtime(): Runtime {
     shimDir,
   });
   const repoFor = (owner: string, repo: string) => new Repo(env.home, owner, repo, env.githubToken);
-  const pipeline = new Pipeline({ config, env, store, github, builder, notifier, repo: repoFor, checks, devices, runnerId: env.runnerId });
+  const pipeline = new Pipeline({ config, env, store, github, builder, notifier, repo: repoFor, checks, devices, runnerId: env.runnerId, cloud: cloudExecutor(config, env, repoFor) });
   const labels = Object.values(config.labels);
   const sources: Source[] = [new GitHubSource(github, configuredRepos(config), labels)];
   if (env.piUrl && env.piToken) sources.push(new DiscordSource(env.piUrl, env.piToken, lowerKeys(config.discordCategories)));
@@ -363,6 +384,47 @@ async function startChat(rt: Runtime, live: () => LiveStatus): Promise<StaffChat
   return chat;
 }
 
+/** `cloud-smoke`: every cloud-build step for real, against a throwaway clone and branch. Nothing is pushed. */
+async function cloudSmoke(rt: Runtime, owner: string, name: string, withChecks: boolean): Promise<boolean> {
+  const home = mkdtempSync(path.join(tmpdir(), "isobot-cloud-smoke-"));
+  const cloud = cloudExecutor(rt.config, rt.env, (o, r) => new Repo(home, o, r, rt.env.githubToken))!;
+  const repo = cloud.repo(owner, name);
+  const branch = `isobot/smoke-${Date.now()}`;
+  const step = (label: string) => console.log(`[cloud-smoke] ${new Date().toISOString().slice(11, 19)} ${label}`);
+  try {
+    step(`syncing ${owner}/${name}`);
+    const main = await repo.sync(await rt.github.defaultBranch(owner, name));
+    step(`creating the sandbox workspace for ${branch}`);
+    const dir = await repo.createWorkspace(branch, main);
+    step("running Claude Code in the sandbox");
+    const run = await cloud.builder.implement({
+      cwd: dir, sessionId: randomUUID(),
+      task: "This is a smoke test of isobot's cloud builds. Create a file named ISOBOT_SMOKE.md at the repository root containing exactly the line `cloud build smoke test`, commit it, and reply with a one-sentence summary. Change nothing else.",
+    });
+    step(`builder ${run.ok ? "finished" : "failed"}: ${(run.summary || run.error || "").slice(0, 300)}`);
+    // Like a build: the commit is taken before checks run, so their output never lands in it.
+    await repo.commitPending(dir, "WIP: smoke test");
+    const sha = await repo.capture(dir, branch);
+    if (withChecks) {
+      const policy = policyFor(rt.config, `${owner}/${name}`);
+      const commands = policy.content?.checks ?? policy.checks;
+      step(`running ${commands.length} check(s) in the sandbox`);
+      const report = await cloud.checks(dir, commands, {});
+      for (const result of report.results) step(`${result.ok ? "✅" : "❌"} ${result.command}${result.ok ? "" : `\n${result.output.slice(-1500)}`}`);
+      if (!report.passed) return false;
+    }
+    const diff = await repo.diffStat(main, sha);
+    step(`captured ${sha.slice(0, 12)}: ${await repo.ahead(main, sha)} commit(s), files ${diff.files.map(f => f.path).join(", ") || "(none)"}`);
+    return run.ok && diff.files.some(f => f.path === "ISOBOT_SMOKE.md");
+  } catch (error) {
+    step(`failed: ${(error as Error).message}`);
+    return false;
+  } finally {
+    await repo.removeWorkspace(branch).catch(error => step(`couldn't remove the sandbox: ${(error as Error).message}`));
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
 async function doctor(rt: Runtime): Promise<boolean> {
   let ok = true;
   const report = (good: boolean, label: string, detail = "") => {
@@ -372,6 +434,16 @@ async function doctor(rt: Runtime): Promise<boolean> {
   const auth = await run(rt.env.claudeBin, ["auth", "status"], { cwd: rt.env.home, timeoutMs: 30_000 }).catch(error => ({ code: 1, stdout: String(error), stderr: "", timedOut: false }));
   const method = /"authMethod":\s*"([^"]+)"/.exec(auth.stdout)?.[1];
   report(auth.code === 0 && /"loggedIn":\s*true/.test(auth.stdout), "Claude Code signed in", method ? `auth method ${method}` : auth.stdout.slice(0, 200));
+  const cloud = cloudRepos(rt.config);
+  if (cloud.length && !rt.env.sandbox) report(false, `Cloud builds for ${cloud.join(", ")}`, "set ISOBOT_SANDBOX_URL and ISOBOT_SANDBOX_TOKEN");
+  else if (rt.env.sandbox) {
+    const health = await fetch(`${rt.env.sandbox.url}/health`, { signal: AbortSignal.timeout(20_000) }).catch(() => null);
+    const authed = await new HttpSandboxApi(rt.env.sandbox.url, rt.env.sandbox.token).status("doctor").then(() => true, (error: Error) => error);
+    report(Boolean(health?.ok) && authed === true, "Cloud build sandbox", authed === true
+      ? `${rt.env.sandbox.url}; builds there: ${cloud.join(", ") || "none yet (set executor: \"cloudflare\")"}`
+      : health?.ok ? (authed as Error).message : `${rt.env.sandbox.url} unreachable`);
+    await health?.body?.cancel();
+  }
   if (process.env.ANTHROPIC_API_KEY) console.log("ℹ️  ANTHROPIC_API_KEY is set in the runner's environment; builders never receive it, so they use the subscription login.");
   for (const { owner, repo } of configuredRepos(rt.config)) {
     try {
@@ -458,6 +530,9 @@ const HELP = `isobot runner
                       Timeline of what isobot did, across jobs or for one, and what it will check next
   grants [repo]       Who may approve, stop, merge, chat and hand off, and each repo's merge rules
   release <repo#n>    Run a merged job's release.onMerge again (one a restart interrupted, or that failed)
+  cloud-smoke <repo> [--checks]
+                      One real build in a Cloudflare build sandbox: clone, Claude Code, optionally the
+                      site's content checks, and the commit back into a throwaway clone. Never pushes
   content <repo> research [--dry-run] | report
                       Run a site's content research now (files an issue; --dry-run prints the brief instead)
                       or its weekly search report`;
@@ -614,6 +689,17 @@ async function main(): Promise<void> {
       const result = await rt.pipeline.requestRelease(ref.owner, ref.repo, ref.number);
       console.log(result.message);
       if (!result.ok) process.exitCode = 1;
+      return;
+    }
+    case "cloud-smoke": {
+      const [target, flag] = process.argv.slice(3);
+      const ref = target && resolveIssue(rt.config, `${target}#1`);
+      if (!ref || !rt.env.sandbox) {
+        console.error(ref ? "Set ISOBOT_SANDBOX_URL and ISOBOT_SANDBOX_TOKEN first" : "Usage: cloud-smoke <owner/repo | repo> [--checks]");
+        process.exitCode = 2;
+        return;
+      }
+      process.exitCode = await cloudSmoke(rt, ref.owner, ref.repo, flag === "--checks") ? 0 : 1;
       return;
     }
     case "content": {

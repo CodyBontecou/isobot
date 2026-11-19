@@ -1,0 +1,18 @@
+{
+  "name": "isobot-sandbox",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cloudflare/sandbox": "1.0.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261031.1",
+    "@types/node": "^22.20.5",
+    "typescript": "5.9.3",
+    "wrangler": "4.155.0"
+  }
+}

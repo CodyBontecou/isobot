@@ -5,7 +5,20 @@ import { fileURLToPath } from "node:url";
 import type { RunnerConfig } from "./config.js";
 import { classifyModelFailure, TransientError } from "./errors.js";
 import { cleanNotes, type ReleaseNotes, type ReleaseNotesInput } from "./launch.js";
-import { run, tail, workerEnv } from "./proc.js";
+import { run, tail, workerEnv, type RunOptions, type RunResult } from "./proc.js";
+
+/** Runs one Claude Code process: locally (proc.run), or in a cloud build sandbox (cloud.ts). */
+export type ExecFn = (command: string, args: string[], options: RunOptions) => Promise<RunResult>;
+
+export interface BuilderOptions {
+  /**
+   * Where Claude Code runs. A remote one must not pass `env` through: it holds the runner's own
+   * environment, Claude token included.
+   */
+  exec?: ExecFn;
+  /** Claude Code settings in place of builderSettings(), e.g. for a Container, which is the sandbox itself. */
+  settings?: Record<string, unknown>;
+}
 
 export interface AgentRun {
   ok: boolean;
@@ -318,8 +331,8 @@ export class ClaudeCodeBuilder implements Builder {
   private settingsJson: string;
   private ghConfigDir: string;
 
-  constructor(private config: RunnerConfig["builder"], private paths: BuilderPaths, private bin = "claude", private shimDir?: string, private shellTool?: ShellToolFactory) {
-    this.settingsJson = JSON.stringify(builderSettings(config.settings ?? {}, paths));
+  constructor(private config: RunnerConfig["builder"], private paths: BuilderPaths, private bin = "claude", private shimDir?: string, private shellTool?: ShellToolFactory, private options: BuilderOptions = {}) {
+    this.settingsJson = JSON.stringify(options.settings ?? builderSettings(config.settings ?? {}, paths));
     // An empty gh config directory: the gh CLI then has no login to lend a builder.
     this.ghConfigDir = mkdtempSync(path.join(tmpdir(), "isobot-gh-"));
   }
@@ -331,7 +344,7 @@ export class ClaudeCodeBuilder implements Builder {
       ...(this.config.maxTurns ? ["--max-turns", String(this.config.maxTurns)] : []),
       ...args,
     ];
-    const result = await run(this.bin, fullArgs, {
+    const result = await (this.options.exec ?? run)(this.bin, fullArgs, {
       cwd, input: prompt, timeoutMs,
       env: workerEnv({
         CLAUDE_CODE_OAUTH_TOKEN: process.env.CLAUDE_CODE_OAUTH_TOKEN, GH_CONFIG_DIR: this.ghConfigDir,

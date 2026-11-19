@@ -62,6 +62,7 @@ doesn't propose your whole backlog.
 | `retry <repo#n> [note]` | Build an issue again (failed, merged, closed or stopped job, or one never built), optionally with a note for the builder |
 | `inspect [repo#n] [--follow] [--json]` | Timeline of what isobot did, across jobs or for one, and what it will check next. `--follow` keeps printing new events |
 | `grants [repo]` | Who may approve, stop, merge, chat and hand off, and each repo's merge rules, gathered from config and `runner.env` |
+| `cloud-smoke <repo> [--checks]` | One real build in a Cloudflare build sandbox, never pushed ([cloud builds](cloud-builds.md)) |
 | `release <repo#n>` | Run a merged job's `release.onMerge` again, e.g. one a restart interrupted. The running runner does it on its next pass |
 
 Logs: `~/Library/Application Support/isobot/logs/runner.log` (rotated at

@@ -4,7 +4,7 @@ import { validateConfig, type ContentConfig, type RunnerConfig } from "./config.
 import { ContentTrain, contentEvidenceKey, CONTENT_BUILD_RULES, parseResearch, publishedUrls, researchDue, type ContentDeps } from "./content.js";
 import type { AgentJsonInput } from "./builder.js";
 import { Notifier } from "./notify.js";
-import { Pipeline } from "./pipeline.js";
+import { Pipeline, type PipelineDeps } from "./pipeline.js";
 import type { CheckReport } from "./policy.js";
 import { Store } from "./store.js";
 import { FakeBuilder, FakeGitHub, FakeRepo, testConfig } from "./testing.js";
@@ -29,15 +29,16 @@ function setup(content: Partial<ContentConfig> = {}) {
   repo.diff_ = { files: [{ path: "website/blog/export-csv.md", added: 120, removed: 0, binary: false }], changedLines: 120 };
   const checkCalls: string[][] = [];
   const leases: string[] = [];
-  const pipeline = new Pipeline({
+  const deps: PipelineDeps = {
     config, env: { home: "/tmp/isobot-test" }, store, github, builder, notifier: new Notifier(), repo: () => repo,
     checks: async (_cwd, commands): Promise<CheckReport> => {
       checkCalls.push(commands);
       return { configured: commands.length > 0, passed: true, results: commands.map(command => ({ command, ok: true, output: "" })) };
     },
     devices: { lease: async (id: string) => { leases.push(id); return { env: {}, describe: () => "", release: async () => {} }; } } as never,
-  });
-  return { config, store, github, builder, repo, pipeline, checkCalls, leases };
+  };
+  const pipeline = new Pipeline(deps);
+  return { config, store, github, builder, repo, pipeline, checkCalls, leases, deps };
 }
 
 test("a content issue builds with the site's checks on the app's devices, and merges where the app itself wouldn't", async () => {
@@ -246,4 +247,49 @@ test("content configuration is validated", () => {
   config.repos[REPO] = { content: SITE };
   config.content = { hours: [22, 6] };
   assert.throws(() => validateConfig(config), /content\.hours/);
+});
+
+test("content with executor cloudflare builds and checks in the cloud sandbox, without the app's devices", async () => {
+  const cloudBuilder = new FakeBuilder();
+  const cloudRepo = new FakeRepo();
+  cloudRepo.diff_ = { files: [{ path: "website/blog/export-csv.md", added: 120, removed: 0, binary: false }], changedLines: 120 };
+  const cloudChecks: string[][] = [];
+  const t = setup({ executor: "cloudflare" });
+  const pipeline = new Pipeline({
+    ...t.deps,
+    cloud: {
+      repo: () => cloudRepo, builder: cloudBuilder,
+      checks: async (_cwd, commands) => { cloudChecks.push(commands); return { configured: true, passed: true, results: commands.map(command => ({ command, ok: true, output: "" })) }; },
+    },
+  });
+  t.github.add(OWNER, NAME, 20, "A cloud post", ["isobot:content", "isobot:ready", "isobot:auto"], "Write the guide.");
+  await pipeline.discover();
+  await Promise.all(pipeline.startQueued());
+  assert.equal(t.store.get(`${REPO}#20`)!.state, "merged");
+  assert.deepEqual(cloudChecks, [["npm run site:check"]]);
+  assert.deepEqual(t.checkCalls, [], "nothing ran on this Mac");
+  assert.deepEqual(t.leases, [], "no simulator or emulator for a cloud build");
+  assert.equal(cloudBuilder.implementCalls, 1);
+  assert.equal(t.builder.implementCalls, 0);
+  assert.ok(cloudRepo.calls.includes("push sha1 isobot/20-a-cloud-post"), "the runner pushes the commit that came back");
+  // App issues in the same repo still build here.
+  t.github.add(OWNER, NAME, 21, "Fix export", ["isobot:ready"]);
+  await pipeline.discover();
+  await Promise.all(pipeline.startQueued());
+  assert.deepEqual(t.checkCalls, [["make test"]]);
+});
+
+test("a cloud content job without a configured sandbox fails with what to set", async () => {
+  const t = setup({ executor: "cloudflare" });
+  t.github.add(OWNER, NAME, 22, "A cloud post", ["isobot:content", "isobot:ready", "isobot:auto"]);
+  await t.pipeline.discover();
+  await Promise.all(t.pipeline.startQueued());
+  assert.equal(t.store.get(`${REPO}#22`)!.state, "failed");
+  assert.match(t.github.commentsFor(OWNER, NAME, 22).at(-1)!, /ISOBOT_SANDBOX_URL and ISOBOT_SANDBOX_TOKEN/);
+});
+
+test("executor must be local or cloudflare", () => {
+  const config = testConfig();
+  config.repos[REPO] = { ...config.repos[REPO], content: { ...SITE, executor: "aws" as never } };
+  assert.throws(() => validateConfig(config), /content: executor must be "local" or "cloudflare"/);
 });

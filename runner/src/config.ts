@@ -60,7 +60,15 @@ export interface RepoPolicy {
    * own jobs (the site's directory); unset means anywhere.
    */
   allowedPaths?: string[];
+  /**
+   * Where builds run: "local" (this Mac, the default) or "cloudflare" (a build sandbox on Cloudflare,
+   * see docs/cloud-builds.md). Cloud builds have no simulators or emulators: `devices` are skipped, and
+   * checks must run on Linux.
+   */
+  executor?: Executor;
 }
+
+export type Executor = "local" | "cloudflare";
 
 /**
  * One marketing site fed by the content train. Content jobs replace the repo's checks, protected paths and
@@ -94,6 +102,8 @@ export interface ContentConfig {
   notes: string;
   /** off: research nothing; pr: build and leave the merge to you; merge: merge when every gate passes. Default merge. */
   autonomy?: Autonomy;
+  /** Where content jobs build (RepoPolicy.executor); defaults to "local". */
+  executor?: Executor;
 }
 
 /** Runner-wide limits for the content train. */
@@ -264,6 +274,8 @@ export interface Environment {
   heartbeatUrl?: string;
   /** This runner's name in claim leases (ISOBOT_RUNNER_ID, else the host name), so two runners never build one issue. */
   runnerId: string;
+  /** The isobot-sandbox Worker for cloud builds (`executor: "cloudflare"`), from ISOBOT_SANDBOX_URL and ISOBOT_SANDBOX_TOKEN. */
+  sandbox?: { url: string; token: string };
 }
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -369,6 +381,9 @@ export function validateConfig(config: RunnerConfig): void {
         }
       }
     }
+    for (const [where, executor] of [[name, policy.executor], [`${name}: content`, policy.content?.executor]] as const) {
+      if (executor !== undefined && executor !== "local" && executor !== "cloudflare") fail(`${where}: executor must be "local" or "cloudflare"`);
+    }
     if (policy.devices) {
       const d = policy.devices;
       if (d.ios && !d.ios.deviceType?.trim()) fail(`${name}: devices.ios.deviceType is required (e.g. "iPhone 17")`);
@@ -437,6 +452,7 @@ export function contentPolicy(policy: RepoPolicy): RepoPolicy {
     requireCi: content.requireCi ?? false,
     release: { onMerge: [], onShip: [] },
     notes: content.notes,
+    executor: content.executor ?? "local",
     // Walkthroughs are verified, and screenshotted, on the app's own simulator or emulator.
     train: undefined,
   };
@@ -499,6 +515,23 @@ function discordBot(env: NodeJS.ProcessEnv): Environment["discordBot"] {
   return { token, channelId };
 }
 
+function sandboxEnv(env: NodeJS.ProcessEnv): Environment["sandbox"] {
+  const url = env.ISOBOT_SANDBOX_URL?.trim();
+  const token = env.ISOBOT_SANDBOX_TOKEN?.trim();
+  if (!url && !token) return undefined;
+  if (!url || !token) throw new Error("set both ISOBOT_SANDBOX_URL and ISOBOT_SANDBOX_TOKEN, or neither");
+  if (!/^https:\/\//.test(url)) throw new Error("ISOBOT_SANDBOX_URL must use HTTPS");
+  return { url: url.replace(/\/$/, ""), token };
+}
+
+/** Repos with app or content builds on Cloudflare (`executor: "cloudflare"`). */
+export function cloudRepos(config: RunnerConfig): string[] {
+  return Object.keys(config.repos).filter(repo => {
+    const policy = policyFor(config, repo);
+    return policy.executor === "cloudflare" || policy.content?.executor === "cloudflare";
+  });
+}
+
 export function loadEnvironment(env: NodeJS.ProcessEnv = process.env): Environment {
   const githubToken = env.ISOBOT_GITHUB_TOKEN ?? env.GITHUB_TOKEN;
   if (!githubToken) throw new Error("ISOBOT_GITHUB_TOKEN (or GITHUB_TOKEN) is required");
@@ -522,5 +555,6 @@ export function loadEnvironment(env: NodeJS.ProcessEnv = process.env): Environme
     claudeBin: env.ISOBOT_CLAUDE_BIN ?? "claude",
     heartbeatUrl,
     runnerId: (env.ISOBOT_RUNNER_ID?.trim() || hostname().split(".")[0] || "runner").replace(/[^\w.-]+/g, "-"),
+    sandbox: sandboxEnv(env),
   };
 }

@@ -1,4 +1,6 @@
-import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { removeDerivedData } from "./cleanup.js";
 import { skipMarkers } from "./policy.js";
@@ -169,6 +171,38 @@ export class Repo {
       const ref = `refs/isobot/${branch}`;
       await this.git(["fetch", "--quiet", "--no-tags", "--force", dir, `+HEAD:${ref}`], this.barePath);
       return (await this.git(["rev-parse", `${ref}^{commit}`], this.barePath)).stdout.trim();
+    });
+  }
+
+  /**
+   * A git bundle of `sha` for a cloud build sandbox, holding what isn't on `defaultBranch` here (the sandbox
+   * cloned GitHub, so it has that). The commit arrives as `ref`. Null when there's nothing to send.
+   */
+  bundle(sha: string, ref: string, defaultBranch: string): Promise<Buffer | null> {
+    return this.exclusive(async () => {
+      const file = path.join(tmpdir(), `isobot-${randomUUID()}.bundle`);
+      await this.git(["update-ref", ref, sha], this.barePath);
+      try {
+        const result = await run("git", [...SAFE, "bundle", "create", "--quiet", file, ref, "--not", `refs/heads/${defaultBranch}`], { cwd: this.barePath, env: workerEnv() });
+        if (result.code !== 0) {
+          if (/empty bundle/i.test(result.stderr)) return null;
+          throw new Error(`git bundle failed: ${result.stderr.trim().slice(-1000)}`);
+        }
+        return readFileSync(file);
+      } finally {
+        rmSync(file, { force: true });
+        await this.git(["update-ref", "-d", ref], this.barePath).catch(() => undefined);
+      }
+    });
+  }
+
+  /** Copies `ref` from a bundle a cloud build sandbox made into the runner's bare clone (like capture()). */
+  fetchBundle(file: string, ref: string, branch: string): Promise<string> {
+    return this.exclusive(async () => {
+      const target = `refs/isobot/${branch}`;
+      await this.git(["bundle", "verify", "--quiet", file], this.barePath);
+      await this.git(["fetch", "--quiet", "--no-tags", "--force", file, `+${ref}:${target}`], this.barePath);
+      return (await this.git(["rev-parse", `${target}^{commit}`], this.barePath)).stdout.trim();
     });
   }
 
