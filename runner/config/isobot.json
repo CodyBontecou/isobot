@@ -321,6 +321,8 @@
           "marketing/content/**",
           "marketing/scripts/build_seo_pages.py",
           "marketing/scripts/build_site.py",
+          "marketing/scripts/*.test.mjs",
+          "marketing/scripts/test_*.py",
           "marketing/public/blog/**",
           "marketing/public/compare/**",
           "marketing/public/tools/**",
