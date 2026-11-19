@@ -755,6 +755,7 @@ function restarted(t: ReturnType<typeof setup>) {
       t.checkCalls.push(commands);
       return { configured: commands.length > 0, passed: true, results: commands.map(command => ({ command, ok: true, output: "" })) };
     },
+    now: () => new Date(t.clock.t),
   });
 }
 
@@ -1020,4 +1021,179 @@ test("a build records typed events for checks, review, PR, CI and the gate", asy
   assert.deepEqual(review, { type: "review", v: 1, round: 1, verdict: "approve", confidence: 0.95, risk: "low" });
   assert.deepEqual(data.find(d => d.type === "gate"), { type: "gate", v: 1, merge: true, reasons: [] });
   assert.ok(data.some(d => d.type === "state" && d.from === "awaiting_ci" && d.to === "merged"));
+});
+
+/** A pipeline on t's store, GitHub, builder and repo whose commands go through `run` (checks and releases). */
+function withCommands(t: ReturnType<typeof setup>, run: (commands: string[], self: () => Pipeline) => Promise<CheckReport> | CheckReport) {
+  const pipeline: Pipeline = new Pipeline({
+    config: t.config, env: { home: "/tmp/isobot-test" }, store: t.store, github: t.github, builder: t.builder,
+    notifier: new Notifier(), repo: () => t.repo, now: () => new Date(t.clock.t),
+    checks: async (_cwd, commands) => { t.checkCalls.push(commands); return run(commands, () => pipeline); },
+  });
+  return pipeline;
+}
+const passed = (commands: string[]): CheckReport => ({ configured: commands.length > 0, passed: true, results: commands.map(command => ({ command, ok: true, output: "" })) });
+const releases = (t: ReturnType<typeof setup>, number: number, step = "merge") => t.repo.calls.filter(c => c === `checkout merge-100 release__${number}-${step}`).length;
+
+test("a restart right after isobot merged releases from the merge instead of building a second PR", async () => {
+  const t = setup(config => { config.repos[REPO] = { autonomy: "merge", checks: ["make test"], requireCi: false, release: { onMerge: ["deploy"], onShip: [] } }; });
+  t.github.add(OWNER, NAME, 60, "Fix crash", ["isobot:ready"]);
+  // GitHub merges, then the runner dies before it records anything (and GitHub closes the issue: "Closes #60").
+  const merge = t.github.merge.bind(t.github);
+  t.github.merge = async (...args) => {
+    const sha = await merge(...args);
+    await t.github.closeIssue(OWNER, NAME, 60);
+    t.pipeline.beginShutdown();
+    throw new Error("socket hang up");
+  };
+  await cycle(t.pipeline);
+  const id = `${REPO}#60`;
+  assert.equal(t.store.get(id)!.state, "building");
+  assert.equal(releases(t, 60), 0);
+
+  const next = restarted(t);
+  await next.recover();
+  await Promise.all(next.startQueued());
+  assert.equal(t.github.pulls.size, 1, "no second PR");
+  assert.equal(t.builder.implementCalls, 1, "the builder isn't run again");
+  assert.equal(releases(t, 60), 1, "the release runs on the merge commit");
+  assert.equal(t.store.get(id)!.state, "released");
+  assert.ok(!t.github.get(OWNER, NAME, 60).labels.includes("isobot:building"));
+  assert.equal(t.store.effect(`merge:${id}:100`)!.result, JSON.stringify("merge-100"));
+});
+
+test("a restart while merging after CI carries on from the merge instead of asking GitHub to merge again", async () => {
+  const t = setup(config => { config.repos[REPO] = { autonomy: "merge", checks: ["make test"], release: { onMerge: ["deploy"], onShip: [] } }; });
+  t.github.ci = "pending";
+  t.github.add(OWNER, NAME, 66, "Fix crash", ["isobot:ready"]);
+  await t.pipeline.discover();
+  await Promise.all(t.pipeline.startQueued());
+  const id = `${REPO}#66`;
+  assert.equal(t.store.get(id)!.state, "awaiting_ci");
+  // CI passes; GitHub merges, then the runner dies before it records anything.
+  t.github.ci = "success";
+  const merge = t.github.merge.bind(t.github);
+  let merges = 0;
+  t.github.merge = async (...args) => {
+    merges++;
+    await merge(...args);
+    t.pipeline.beginShutdown();
+    throw new Error("socket hang up");
+  };
+  t.clock.t += 31_000;
+  await t.pipeline.followUp();
+  await t.pipeline.settled();
+  assert.equal(merges, 1);
+  assert.equal(t.store.get(id)!.state, "awaiting_ci", "the follow-up is kept for the next start");
+
+  const next = restarted(t);
+  await next.recover();
+  t.clock.t += 31_000;
+  await next.followUp();
+  await next.settled();
+  assert.equal(merges, 1, "no second merge");
+  assert.equal(releases(t, 66), 1);
+  assert.equal(t.store.get(id)!.state, "released");
+  assert.deepEqual(t.store.followUps(id), []);
+  assert.ok(!t.github.commentsFor(OWNER, NAME, 66).some(c => /refused the merge/.test(c)));
+});
+
+test("a release a restart interrupted is reported once and runs again only when you ask", async () => {
+  const t = setup(config => { config.repos[REPO] = { autonomy: "merge", checks: ["make test"], requireCi: false, release: { onMerge: ["deploy"], onShip: [] } }; });
+  t.github.add(OWNER, NAME, 61, "Fix crash", ["isobot:ready"]);
+  const dying = withCommands(t, (commands, self) => {
+    if (commands[0] === "deploy") { self().beginShutdown(); throw new Error("killed"); }
+    return passed(commands);
+  });
+  await dying.discover();
+  await Promise.all(dying.startQueued());
+  const id = `${REPO}#61`;
+  assert.equal(t.store.get(id)!.state, "merged");
+  assert.equal(t.store.effect(`release:${id}:merge:merge-100`)!.status, "started");
+  assert.ok(!t.github.commentsFor(OWNER, NAME, 61).some(c => /Release failed/.test(c)), "a restart isn't reported as a failed release");
+
+  const next = restarted(t);
+  await next.recover();
+  await next.followUp();
+  await next.followUp();
+  assert.equal(releases(t, 61), 1, "not rerun by itself");
+  const warnings = t.github.commentsFor(OWNER, NAME, 61).filter(c => /release of merge-100 was interrupted by a runner restart/.test(c));
+  assert.equal(warnings.length, 1, "told once");
+  assert.match(warnings[0], /npm run runner -- release codybontecou\/time\.md#61/);
+  assert.equal(t.store.get(id)!.state, "merged");
+
+  assert.deepEqual(await next.requestRelease(OWNER, NAME, 61), { ok: true, message: `📦 Release of ${id} requested; the runner runs it on its next pass.` });
+  await next.followUp();
+  assert.equal(releases(t, 61), 2);
+  assert.equal(t.store.get(id)!.state, "released");
+  await next.followUp();
+  assert.equal(releases(t, 61), 2, "done means done");
+  assert.equal((await next.requestRelease(OWNER, NAME, 61)).ok, false, "a finished release isn't requested again");
+});
+
+test("a replaySafe release a restart interrupted runs again by itself", async () => {
+  const t = setup(config => { config.repos[REPO] = { autonomy: "merge", checks: ["make test"], requireCi: false, release: { onMerge: ["wrangler deploy"], onShip: [], replaySafe: true } }; });
+  t.github.add(OWNER, NAME, 62, "Fix crash", ["isobot:ready"]);
+  const dying = withCommands(t, (commands, self) => {
+    if (commands[0] === "wrangler deploy") { self().beginShutdown(); throw new Error("killed"); }
+    return passed(commands);
+  });
+  await dying.discover();
+  await Promise.all(dying.startQueued());
+  const next = restarted(t);
+  await next.recover();
+  await next.followUp();
+  assert.equal(releases(t, 62), 2);
+  assert.equal(t.store.get(`${REPO}#62`)!.state, "released");
+  assert.ok(!t.github.commentsFor(OWNER, NAME, 62).some(c => /interrupted/.test(c)));
+});
+
+test("a ship step a restart interrupted waits for your ship label again", async () => {
+  const t = setup(config => { config.repos[REPO] = { autonomy: "merge", checks: ["make test"], release: { onMerge: [], onShip: ["submit"] } }; });
+  t.github.add(OWNER, NAME, 63, "Fix crash", ["isobot:ready"]);
+  await cycle(t.pipeline);
+  const id = `${REPO}#63`;
+  assert.equal(t.store.get(id)!.state, "awaiting_ship");
+  await t.github.addLabels(OWNER, NAME, 63, ["isobot:ship"]);
+  const dying = withCommands(t, (commands, self) => {
+    if (commands[0] === "submit") { self().beginShutdown(); throw new Error("killed"); }
+    return passed(commands);
+  });
+  await dying.followUp();
+  assert.ok(!t.github.commentsFor(OWNER, NAME, 63).some(c => /Ship step failed/.test(c)));
+
+  const next = restarted(t);
+  await next.followUp();
+  await next.followUp();
+  assert.equal(releases(t, 63, "ship"), 1, "never rerun by itself");
+  assert.equal(t.github.commentsFor(OWNER, NAME, 63).filter(c => /ship step for merge-100 was interrupted/.test(c)).length, 1);
+  await t.github.addLabels(OWNER, NAME, 63, ["isobot:ship"]);
+  await next.followUp();
+  assert.equal(releases(t, 63, "ship"), 2);
+  assert.equal(t.store.get(id)!.state, "shipped");
+});
+
+test("a PR you merged while its revision waited is released, not revised", async () => {
+  const t = setup(config => { config.repos[REPO] = { release: { onMerge: ["deploy"], onShip: [] } }; });
+  t.github.add(OWNER, NAME, 64, "Add CSV export", ["isobot:ready"]);
+  await cycle(t.pipeline);
+  t.github.addComment(OWNER, NAME, 64, "Also export the date column");
+  await t.pipeline.followUp();
+  assert.equal(t.store.get(`${REPO}#64`)!.state, "queued");
+  await t.github.merge(OWNER, NAME, 100);
+  await Promise.all(t.pipeline.startQueued());
+  assert.deepEqual(t.builder.reviseFeedback, [], "no revision of a merged PR");
+  assert.equal(releases(t, 64), 1);
+  assert.equal(t.store.get(`${REPO}#64`)!.state, "released");
+  assert.ok(!t.github.get(OWNER, NAME, 64).labels.includes("isobot:review"));
+});
+
+test("jobs merged before the effect ledger existed are never released again", async () => {
+  const t = setup(config => { config.repos[REPO] = { release: { onMerge: ["deploy"], onShip: [] } }; });
+  t.github.add(OWNER, NAME, 65, "Old", ["isobot:ready"]);
+  await cycle(t.pipeline);
+  await t.github.merge(OWNER, NAME, 100);
+  t.store.update(`${REPO}#65`, { state: "merged" });
+  await t.pipeline.followUp();
+  assert.equal(releases(t, 65), 0);
 });

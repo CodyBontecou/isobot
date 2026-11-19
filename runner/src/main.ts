@@ -457,6 +457,7 @@ const HELP = `isobot runner
   inspect [repo#n] [--follow] [--json]
                       Timeline of what isobot did, across jobs or for one, and what it will check next
   grants [repo]       Who may approve, stop, merge, chat and hand off, and each repo's merge rules
+  release <repo#n>    Run a merged job's release.onMerge again (one a restart interrupted, or that failed)
   content <repo> research [--dry-run] | report
                       Run a site's content research now (files an issue; --dry-run prints the brief instead)
                       or its weekly search report`;
@@ -600,6 +601,19 @@ async function main(): Promise<void> {
         chatUsers: { ids, source: chatEnv ?? "The Discord bot's owner (ISOBOT_CHAT_USERS and ISOBOT_ALLOWED_USERS are unset)" },
         repo: ref ? `${ref.owner}/${ref.repo}` : target,
       }));
+      return;
+    }
+    case "release": {
+      const ref = process.argv[3] && resolveIssue(rt.config, process.argv[3]);
+      if (!ref) {
+        console.error("Usage: release <owner/repo#n | repo#n>");
+        process.exitCode = 2;
+        return;
+      }
+      // Only recorded here: the running runner does the release, so it never runs twice at once.
+      const result = await rt.pipeline.requestRelease(ref.owner, ref.repo, ref.number);
+      console.log(result.message);
+      if (!result.ok) process.exitCode = 1;
       return;
     }
     case "content": {

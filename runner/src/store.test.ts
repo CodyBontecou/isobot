@@ -54,3 +54,16 @@ test("opening the store waits for another process's lock instead of failing (a r
   store.close();
   await new Promise(resolve => holder.once("close", resolve));
 });
+
+test("the effect ledger records started, done and requested effects", () => {
+  const store = new Store(":memory:");
+  assert.equal(store.effect("release:a/b#1:merge:abc"), null);
+  store.startEffect("release:a/b#1:merge:abc", "a/b#1");
+  assert.equal(store.effect("release:a/b#1:merge:abc")!.status, "started");
+  store.finishEffect("release:a/b#1:merge:abc", "a/b#1", { passed: true });
+  assert.deepEqual(JSON.parse(store.effect("release:a/b#1:merge:abc")!.result!), { passed: true });
+  store.requestEffect("release:a/b#1:merge:abc", "a/b#1");
+  assert.equal(store.effect("release:a/b#1:merge:abc")!.status, "requested");
+  store.setEffectStatus("release:a/b#1:merge:abc", "interrupted");
+  assert.equal(store.effect("release:a/b#1:merge:abc")!.status, "interrupted");
+});
