@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ChatConfig } from "./chat.js";
@@ -256,6 +256,8 @@ export interface Environment {
   claudeBin: string;
   /** Dead-man's-switch URL pinged after each healthy cycle, so an outside service notices a dead runner. */
   heartbeatUrl?: string;
+  /** This runner's name in claim leases (ISOBOT_RUNNER_ID, else the host name), so two runners never build one issue. */
+  runnerId: string;
 }
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -509,5 +511,6 @@ export function loadEnvironment(env: NodeJS.ProcessEnv = process.env): Environme
     imap,
     claudeBin: env.ISOBOT_CLAUDE_BIN ?? "claude",
     heartbeatUrl,
+    runnerId: (env.ISOBOT_RUNNER_ID?.trim() || hostname().split(".")[0] || "runner").replace(/[^\w.-]+/g, "-"),
   };
 }

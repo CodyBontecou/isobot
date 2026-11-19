@@ -283,6 +283,8 @@ export function status(deps: Pick<ChatToolDeps, "store" | "live">) {
   return {
     building: live.activeJobs,
     queued: deps.store.inState("queued").map(j => j.id),
+    waitingForCi: deps.store.inState("awaiting_ci").map(j => j.id),
+    blocked: deps.store.followUps().filter(f => f.kind === "blocked").map(f => ({ id: f.jobId, on: (JSON.parse(f.payload) as { on?: string[] }).on ?? [] })),
     paused: live.manuallyPaused,
     usageLimitPauseUntil: deps.store.pausedUntil(),
     lastCycleError: live.lastCycleError,

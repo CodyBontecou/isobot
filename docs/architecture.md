@@ -34,7 +34,7 @@ the `claude` CLI. It already runs on any Mac, including the mini, unchanged.
 | --- | --- | --- |
 | `isobot:proposed` | Triage thinks this is worth doing | Runner triage, community forum posts |
 | `isobot:ready` | Approved: build it | **You** (label, or ✅ on a triage digest, the issue's Discord help thread or job card), or your own `@isobot` ticket in Discord |
-| `isobot:building` | Claimed by the runner | Runner |
+| `isobot:building` | Claimed by the runner (its claim comment holds the runner's lease) | Runner |
 | `isobot:review` | PR open, waiting for your merge decision | Runner |
 | `isobot:failed` | Couldn't finish; comment explains | Runner |
 | `isobot:ship` | Approve the ship step (App Store) | **You** |
@@ -140,6 +140,10 @@ Pi keeps its Workers AI / ChatGPT models for chat. The `Builder` interface in
    Objects for SQLite files, Workers AI for an API or local model, Cloudflare
    cron for launchd, and Wrangler secrets for the runner's env file. Serve
    `pi.isolated.tech` through the same tunnel.
-5. Sizing (32 GB / 2 TB): keep `maxConcurrentJobs` at 2 while builds use Xcode;
+5. Give each runner its own `ISOBOT_RUNNER_ID` (say `laptop` and `mini`). Claim leases
+   keep them from building the same issue while both run during the move
+   ([runner.md](runner.md#two-runners)). Each runner's `runner.sqlite` holds only its own
+   jobs, so let the old runner finish its jobs before you switch it off.
+6. Sizing (32 GB / 2 TB): keep `maxConcurrentJobs` at 2 while builds use Xcode;
    worktrees and DerivedData live on the internal SSD. Local models up to
    ~30B parameters are fine for triage and summaries, not for unattended code.
