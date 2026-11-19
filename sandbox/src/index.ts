@@ -44,8 +44,12 @@ const CHECK_MS = 60_000;
 /** stdout/stderr returned per poll by default; the files keep everything. */
 const DEFAULT_TAIL = 2 * 1024 * 1024;
 
-/** `"$@"` runs in its own process group (setsid), so killing the task kills its children too. */
+/**
+ * `"$@"` runs in its own session and process group (setsid), so killing the group kills its children too.
+ * setsid forks when its caller already leads a group, so the script records its own pid, which is the group id.
+ */
 const TASK_SCRIPT = `dir="$1"; shift
+printf '%s\\n' "$$" >"$dir/pid.tmp" && mv "$dir/pid.tmp" "$dir/pid"
 "$@" <"$dir/stdin" >"$dir/stdout" 2>"$dir/stderr"
 printf '%s\\n' "$?" >"$dir/exit.tmp" && mv "$dir/exit.tmp" "$dir/exit"`;
 
@@ -131,13 +135,12 @@ export class BuildSandbox extends DurableObject<Env> {
     const dir = `${TASKS}/${id}`;
     await this.files.mkdir(dir, { recursive: true });
     await this.files.writeFile(`${dir}/stdin`, input.stdin ?? "");
-    const task = await this.container.exec(["setsid", "/bin/sh", "-c", TASK_SCRIPT, "task", dir, ...input.argv], {
+    await this.container.exec(["setsid", "/bin/sh", "-c", TASK_SCRIPT, "task", dir, ...input.argv], {
       cwd: input.cwd ?? "/workspace",
       env: { ...BASE_ENV, ...(input.env ?? {}) },
       stdout: "ignore",
       stderr: "ignore",
     });
-    await this.files.writeFile(`${dir}/pid`, String(task.pid));
     this.setTasks([...this.tasks(), id]);
     await this.ctx.storage.setAlarm(Date.now() + CHECK_MS);
     return { id };
@@ -154,7 +157,8 @@ export class BuildSandbox extends DurableObject<Env> {
       return { state: "exited", exitCode: Number.parseInt(exit, 10), ...await output() };
     }
     const pid = await this.text(`${dir}/pid`);
-    if (pid === undefined) return { state: "lost", stdout: "", stderr: "no such task" };
+    // Not written yet: the script has only just started.
+    if (pid === undefined) return this.tasks().includes(id) ? { state: "running" } : { state: "lost", stdout: "", stderr: "no such task" };
     if (await this.alive(pid)) return { state: "running" };
     // It can finish between the two reads: the wrapper writes the exit code before it exits.
     const late = await this.text(`${dir}/exit`);
