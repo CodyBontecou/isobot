@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ChatConfig } from "./chat.js";
 import type { DeviceSpec } from "./devices.js";
+import type { DeploySignal } from "./github.js";
 
 /**
  * Autonomy ladder for one repository. Policy lives in the isobot repo, never in
@@ -76,6 +77,13 @@ export interface ContentConfig {
   protectedPaths?: string[];
   /** Command run in a checkout of main after the site is live, with the new URLs as arguments (IndexNow). */
   indexNow?: string;
+  /**
+   * How production deploys show up on GitHub, so publishing waits until a deploy contains the merge:
+   * `{ "workflow": "website-publish.yml" }` (its successful push runs on the default branch) or
+   * `{ "environment": "Production" }` (GitHub deployments, as Vercel makes). Without it, a page answering
+   * 200 counts as live, which a refreshed page always does.
+   */
+  deploy?: DeploySignal;
   /** House rules for writing on this site: where posts go, frontmatter, CTAs, translations. */
   notes: string;
   /** off: research nothing; pr: build and leave the merge to you; merge: merge when every gate passes. Default merge. */
@@ -347,6 +355,11 @@ export function validateConfig(config: RunnerConfig): void {
       if (c.autonomy !== undefined && !["off", "pr", "merge"].includes(c.autonomy)) fail(`${name}: unknown content.autonomy "${c.autonomy}"`);
       if ((c.autonomy ?? "merge") === "merge" && !(c.checks?.length)) fail(`${name}: content.checks must build the site before content merges automatically`);
       if (!c.notes?.trim()) fail(`${name}: content.notes must tell the builder how this site's content works`);
+      if (c.deploy !== undefined) {
+        const d = c.deploy as { workflow?: unknown; environment?: unknown };
+        const named = (v: unknown) => typeof v === "string" && /^[\w./ -]{1,100}$/.test(v);
+        if (named(d.workflow) === named(d.environment) || Object.keys(d).length !== 1) fail(`${name}: content.deploy must be { "workflow": "<file>.yml" } or { "environment": "<name>" }`);
+      }
     }
     if (!(policy.minReviewConfidence > 0 && policy.minReviewConfidence <= 1)) fail(`${name}: minReviewConfidence must be in (0, 1]`);
     void partial;

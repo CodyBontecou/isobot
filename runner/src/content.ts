@@ -311,6 +311,14 @@ export class ContentTrain {
       .filter(job => job.kind === "content" && job.owner === site.owner && job.repo === site.repo && job.prNumber && !store.cursor(`content:published:${job.id}`))
       .filter(job => now - Date.parse(job.updatedAt) < 3 * 24 * 3_600_000);
     for (const job of merged) {
+      const deployed = await this.deployed(site, job);
+      if (deployed !== true) {
+        if (now - Date.parse(job.updatedAt) < PUBLISH_WAIT_MS) continue;
+        store.setCursor(`content:published:${job.id}`, "not deployed");
+        await this.deps.notifier.say(job, `⚠️ Merged ${Math.round(PUBLISH_WAIT_MS / 3_600_000)}h ago, but ${deployed}. Check the site's deploy; nothing went to IndexNow.`);
+        await this.deps.notifier.discord(`⚠️ **${site.content.site}**: #${job.number} merged but ${deployed}`);
+        continue;
+      }
       const body = await this.deps.pullBody(job.owner, job.repo, job.prNumber!);
       const urls = publishedUrls(body, site.content.site);
       if (urls.length === 0) {
@@ -357,6 +365,20 @@ export class ContentTrain {
     store.setCursor(`content:published:${job.id}`, this.now().toISOString());
     const index = script || `IndexNow: ${result.indexNow ?? "unknown"}`;
     await this.deps.notifier.say(job, `🌐 Live: ${urls.join(" ")}\n${index}; research log ${result.logged ? "updated" : "not updated"}${result.note ? ` (${String(result.note).slice(0, 300)})` : ""}`);
+  }
+
+  /** True once the site's newest production deploy contains the job's merge; otherwise why not, for the owner. */
+  private async deployed(site: Site, job: Job): Promise<true | string> {
+    const deploy = site.content.deploy;
+    if (!deploy) return true;
+    const { github } = this.deps;
+    const merge = (await github.pull(job.owner, job.repo, job.prNumber!)).mergeCommitSha;
+    if (!merge) return "GitHub reports no merge commit";
+    const shipped = await github.latestDeploy(site.owner, site.repo, deploy);
+    const where = deploy.workflow ? `${deploy.workflow} on the default branch` : `the ${deploy.environment} environment`;
+    if (!shipped) return `no successful production deploy was found (${where})`;
+    return await github.contains(site.owner, site.repo, merge, shipped)
+      ? true : `the newest production deploy (${shipped.slice(0, 8)}, ${where}) doesn't include ${merge.slice(0, 8)} yet`;
   }
 
   private async status(url: string): Promise<number> {

@@ -123,6 +123,13 @@ export class FakeGitHub implements GitHubApi {
     return `merge-${number}`;
   }
   async ensureLabels(_owner: string, _repo: string, _labels: Labels): Promise<void> {}
+  /** Newest successful deploy per repo, and which commit each deployed commit contains (by default only itself). */
+  deploys = new Map<string, string>();
+  descendants = new Map<string, string[]>();
+  async latestDeploy(owner: string, repo: string): Promise<string | null> { return this.deploys.get(`${owner}/${repo}`) ?? null; }
+  async contains(_owner: string, _repo: string, base: string, head: string): Promise<boolean> {
+    return base === head || (this.descendants.get(base) ?? []).includes(head);
+  }
 }
 
 /** Records Discord REST calls the Notifier makes; messages get ids 1000, 1001… */

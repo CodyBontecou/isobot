@@ -201,6 +201,39 @@ test("merged content is recorded once its pages are live, with the site's IndexN
   assert.equal(t.agentCalls.length, 1);
 });
 
+test("publishing waits until a production deploy contains the merge, then reports one that never does", async () => {
+  const { config, store, github } = setup({ deploy: { workflow: "website-publish.yml" } });
+  const site = { owner: OWNER, repo: NAME, content: config.repos[REPO].content! };
+  github.add(OWNER, NAME, 9, "CSV guide refresh", ["isobot:content"], "Brief\n\n---\n**Kind:** refresh");
+  await github.createPull(OWNER, NAME, { head: "isobot/9-csv", base: "main", title: "x", body: "" });
+  await github.merge(OWNER, NAME, 100);
+  store.enqueue(OWNER, NAME, 9, "CSV guide refresh", "content");
+  store.update("codybontecou/time.md#9", { state: "merged", prNumber: 100 });
+  let clock = new Date();
+  // The refreshed page answers 200 all along: only the deploy says whether the new text is out.
+  const t = train(config, store, github, { now: () => clock });
+  t.outputs.push({ indexNow: "submitted", logged: true, note: "" });
+  github.deploys.set(`${OWNER}/${NAME}`, "older");
+  await t.content.publish(site);
+  assert.equal(t.agentCalls.length, 0);
+  github.deploys.set(`${OWNER}/${NAME}`, "later");
+  github.descendants.set("merge-100", ["later"]);
+  await t.content.publish(site);
+  assert.equal(t.agentCalls.length, 1, "a later deploy that contains the merge counts");
+
+  const other = setup({ deploy: { environment: "Production" } });
+  other.github.add(OWNER, NAME, 9, "Post", ["isobot:content"]);
+  await other.github.createPull(OWNER, NAME, { head: "b", base: "main", title: "x", body: "" });
+  await other.github.merge(OWNER, NAME, 100);
+  other.store.enqueue(OWNER, NAME, 9, "Post", "content");
+  other.store.update("codybontecou/time.md#9", { state: "merged", prNumber: 100 });
+  clock = new Date(Date.now() + 4 * 3_600_000);
+  const u = train(other.config, other.store, other.github, { now: () => clock });
+  await u.content.publish({ owner: OWNER, repo: NAME, content: other.config.repos[REPO].content! });
+  assert.equal(u.agentCalls.length, 0);
+  assert.match(u.said.at(-1)!, /no successful production deploy was found \(the Production environment\)/);
+});
+
 test("content configuration is validated", () => {
   const config = testConfig();
   config.repos[REPO] = { content: { ...SITE, checks: [] } };
@@ -209,6 +242,8 @@ test("content configuration is validated", () => {
   assert.throws(() => validateConfig(config), /content\.perDay must be 1-12/);
   config.repos[REPO] = { content: { ...SITE, allowedPaths: [] } };
   assert.throws(() => validateConfig(config), /content\.allowedPaths/);
+  config.repos[REPO] = { content: { ...SITE, deploy: { workflow: "a.yml", environment: "Production" } as never } };
+  assert.throws(() => validateConfig(config), /content\.deploy must be/);
   config.repos[REPO] = { content: SITE };
   config.content = { hours: [22, 6] };
   assert.throws(() => validateConfig(config), /content\.hours/);

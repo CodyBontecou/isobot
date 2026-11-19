@@ -196,6 +196,7 @@
       "notes": "Monorepo: Apple app under apps/apple (HealthMd.xcodeproj, scheme HealthMd), Android under apps/android, Rust core and CLI. PR CI only runs scripts/ci/run.py; the runner's checks build the iOS app and its tests and run scripts/ci/android.sh (instrumented tests and the live Rust pairing test) on the job's emulator. Run that script yourself through the isobot shell before finishing (HEALTHMD_CI_ANDROID_ABI=arm64-v8a bash scripts/ci/android.sh). For Android behaviour changes, especially upgrades and background work, install the previous release and then your build on the job's emulator (adb install -r keeps data) and check it with argent. The full Apple CI runs at release.",
       "content": {
         "site": "healthmd.app",
+        "deploy": { "environment": "Production" },
         "openseoProjectId": "a62f2923-f6c2-4e4e-9d81-96e77e85532b",
         "perDay": 3,
         "allowedPaths": [
@@ -247,6 +248,7 @@
       "notes": "iOS git client (Sync.md.xcodeproj, scheme Sync.md) plus an Android app under android/. CURRENT_PROJECT_VERSION must stay a 12-digit YYYYMMDDHHMM value. The runner's checks run the SyncMDTests unit suite on the job's simulator, like PR CI (xctest.yml). For Android changes, run the relevant Gradle tests (connected ones through the isobot shell on the job's emulator) and check the app there with argent.",
       "content": {
         "site": "gitsync.md",
+        "deploy": { "workflow": "website-publish.yml" },
         "openseoProjectId": "3663814f-99f6-40c7-b9c9-99cc78d4db40",
         "perDay": 3,
         "allowedPaths": [
@@ -312,6 +314,7 @@
       "notes": "iOS app (Xcode project IsoMe.xcodeproj, scheme IsoMe) plus Android under android/. The runner's checks run the IsoMe XCTest suite on the job's simulator (scripts/test-ios.sh), like PR CI, except one StoreKit restore test that waits forever on an Apple Account prompt on a simulator without App Store sign-in. Android's emulator suite takes hours and runs nightly in CI (android-heavy-tests.yml), so for Android changes run just the relevant connected tests through the isobot shell, e.g. `cd android && ./gradlew :app:connectedMapQaAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=<the test classes you touched>`, plus the unit tests in android-tests.yml.",
       "content": {
         "site": "whereday.com",
+        "deploy": { "workflow": "website-publish.yml" },
         "openseoProjectId": "0e1fd2af-8434-4364-a635-ef57be220fa4",
         "perDay": 3,
         "allowedPaths": [
@@ -372,6 +375,7 @@
       "notes": "SwiftUI iOS/Mac/Watch app plus an Android app under apps/android. The runner's checks run the app-hosted VoxboardTests on the job's simulator, as Apple CI does; GitHub Apple CI also runs the full suite on every PR. For Android changes, run the relevant tests through the isobot shell (./apps/android/gradlew -p apps/android …, connected tests on the job's emulator) and check the app there with argent.",
       "content": {
         "site": "vox.isolated.tech",
+        "deploy": { "workflow": "website-publish.yml" },
         "openseoProjectId": "b399ac99-f23c-40ca-8817-00d4316e8934",
         "perDay": 3,
         "allowedPaths": [
