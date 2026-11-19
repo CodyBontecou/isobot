@@ -88,6 +88,29 @@ A digest with one proposal awaiting approval gets ✅ 🧹 on itself; with sever
 message of its own (the bridge only acts on messages about exactly one issue). A running build
 notices 🛑 (or the 🛑 that 🧹 adds) at its merge gate, as with the label; the cleanup waits for it.
 
+**💻 Continue on the Mac.** Job cards, posts in job threads, triage digests and proposals, other
+channel notices and staff-chat answers also get a 💻. Tap it and the runner opens a new, focused tab in
+your local Herdr, with Claude Code already in the conversation:
+
+| Tapped on | Opens |
+| --- | --- |
+| a job card or a post in its thread | the builder's Claude session, resumed as a fork (`claude --resume <id> --fork-session`). It runs in the job's workspace when that's still on disk and nothing is building there; otherwise in the repo's local checkout, so it never edits files under a running builder |
+| a staff-chat answer | that chat thread's session, resumed as a fork |
+| anything else (a digest, a notice) | a new Claude Code session that gets the message as context, framed as data because digests quote other people, and waits for you |
+
+The tab goes in the repo's Herdr workspace (matched by its checkout or its label, e.g. `health-md`), in
+its checkout (or `~/dev/<repo>`); everything else goes to the `isobot` workspace in `~/dev`. A fork leaves
+the original session alone, so the chat or build carries on in Discord as before. The runner does this, not
+the bridge, because only the runner is on the Mac with Herdr: it polls the channels it put a 💻 in (one
+request per channel every 8 seconds, every 30 or so once a channel has had no new 💻 for half an hour; messages that have scrolled past a channel's latest 100 are
+checked a few at a time) and only acts on allowlisted users (`ISOBOT_CHAT_USERS`, as for the staff chat).
+After opening the tab it takes your 💻 back off so the button is ready again; that needs **Manage
+Messages** for the bot in those channels. Without it, un-react and react again to open another tab. If
+Herdr isn't running, isobot reacts ⚠️ and logs why. It's on whenever the bot is configured and `herdr` is on the runner's PATH;
+configure it under `handoff` in the runner config: `enabled: false`, `herdrBin`, `workspace` (default
+`isobot`), `cwd` (default `~/dev`). `runner doctor` checks that Herdr answers. Cards posted before this
+existed get their 💻 on their next update.
+
 **Talking back.** Reply in a job's thread. The bridge relays replies from allowlisted users
 (`ISOBOT_ALLOWED_USERS`, or the bot's owner) to the job's GitHub issue and reacts 📨. The runner
 treats your comments on the issue as **notes**, wherever they came from: the thread, the issue

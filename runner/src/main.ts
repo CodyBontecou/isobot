@@ -5,6 +5,7 @@ import { ContentTrain } from "./content.js";
 import type { CheckReport } from "./policy.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { builderSettings, ClaudeCodeBuilder } from "./builder.js";
@@ -15,7 +16,9 @@ import { configuredRepos, contentRepos, loadConfig, loadEnvironment, policyFor, 
 import { Repo } from "./git.js";
 import { GitHub } from "./github.js";
 import { TERMINAL_MARKER } from "./notes.js";
-import { Notifier } from "./notify.js";
+import { Handoff, HandoffWatch } from "./handoff.js";
+import { Herdr } from "./herdr.js";
+import { HANDOFF, Notifier } from "./notify.js";
 import { Pipeline } from "./pipeline.js";
 import { runChecks } from "./checks.js";
 import { Awake, heartbeatAge, pingHeartbeat, readHeartbeat, rotateLog, writeHeartbeat } from "./ops.js";
@@ -51,6 +54,8 @@ interface Runtime {
   content: ContentTrain;
   /** Runner secrets and state, for settings that keep agents out of them. */
   secrets: string[];
+  /** Messages carrying a 💻 (Herdr handoff), when it's on. */
+  handoff?: HandoffWatch;
 }
 
 /** Set once the runner starts stopping; a release train interrupted by it resumes next start. */
@@ -87,7 +92,8 @@ function runtime(): Runtime {
   };
   const builder = new ClaudeCodeBuilder(config.builder, { secrets: builderSecrets, noWrite: [path.join(env.home, "repos"), shimDir, mcpDir, ISOBOT_ROOT] }, env.claudeBin, shimDir, shellTool);
   const devices = new LocalDevices(path.join(env.home, "logs", "devices"));
-  const notifier = new Notifier({ webhookUrl: env.discordWebhookUrl, bot: env.discordBot, store, jobUrl: env.jobUrl });
+  const handoff = handoffEnabled(config, env) ? new HandoffWatch(store) : undefined;
+  const notifier = new Notifier({ webhookUrl: env.discordWebhookUrl, bot: env.discordBot, store, jobUrl: env.jobUrl, handoff });
   // Checks execute builder-written code, so they get the same confinement as the builder's shell.
   const checks = (cwd: string, commands: string[], options: { timeoutMs?: number; sandbox: boolean; env?: Record<string, string> }) => runChecks(cwd, commands, {
     timeoutMs: options.timeoutMs, env: options.env,
@@ -137,7 +143,7 @@ function runtime(): Runtime {
       return { ok: result.code === 0 && !result.timedOut, output: `${result.stdout}\n${result.stderr}` };
     },
   });
-  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, content, secrets };
+  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, content, secrets, handoff };
 }
 
 /** `owner/repo#12`, or `repo#12` for a configured repository. */
@@ -220,8 +226,10 @@ async function loop(rt: Runtime): Promise<void> {
   const chat = await startChat(rt, () => ({ activeJobs: rt.pipeline.activeJobs, lastCycleError, lastTriageAt, manuallyPaused: existsSync(pausedFile(rt.env)) }))
     .catch(error => { console.warn(`[chat] not started: ${(error as Error).message}`); return null; });
   process.once("exit", () => chat?.stop());
+  const handoff = await startHandoff(rt).catch(error => { console.warn(`[handoff] not started: ${(error as Error).message}`); return null; });
+  process.once("exit", () => handoff?.stop());
   console.log(`[runner] started: ${configuredRepos(rt.config).map(r => `${r.owner}/${r.repo}`).join(", ")}; sources: ${rt.sources.map(s => s.name).join(", ")}`);
-  await rt.notifier.discord("🟢 isobot runner started");
+  await rt.notifier.discord("🟢 isobot runner started", [], { handoff: false });
   while (!stopping) {
     const manuallyPaused = existsSync(pausedFile(rt.env));
     if (!manuallyPaused) {
@@ -276,6 +284,45 @@ async function loop(rt: Runtime): Promise<void> {
   }
 }
 
+/** Herdr handoff: needs the bot (to add and read 💻) and the Herdr CLI; config can switch it off. */
+function handoffEnabled(config: RunnerConfig, env: Environment): boolean {
+  if (!env.discordBot || config.handoff?.enabled === false) return false;
+  return Boolean(onPath(config.handoff?.herdrBin ?? "herdr"));
+}
+
+function onPath(bin: string): string | null {
+  if (bin.includes("/")) return existsSync(bin) ? bin : null;
+  for (const dir of (process.env.PATH ?? "").split(":")) if (dir && existsSync(path.join(dir, bin))) return path.join(dir, bin);
+  return null;
+}
+
+/** Polls for 💻 on isobot's messages and opens the conversation in the owner's Herdr. */
+async function startHandoff(rt: Runtime): Promise<Handoff | null> {
+  if (!rt.handoff || !rt.env.discordBot) return null;
+  const discord = new DiscordApi(rt.env.discordBot.token);
+  const [me, allowed, channel] = await Promise.all([
+    discord.request<{ id: string }>("GET", "/users/@me"), chatAllowlist(discord),
+    discord.request<{ guild_id?: string }>("GET", `/channels/${rt.env.discordBot.channelId}`),
+  ]);
+  if (allowed.size === 0) throw new Error("nobody is allowed (set ISOBOT_CHAT_USERS)");
+  const h = rt.config.handoff ?? {};
+  const cwd = (h.cwd ?? "~/dev").replace(/^~(?=$|\/)/, homedir());
+  const handoff = new Handoff({
+    discord, watch: rt.handoff, botId: me.id, allowed, store: rt.store, guildId: channel.guild_id,
+    herdr: new Herdr({ bin: h.herdrBin, workspace: h.workspace, exists: existsSync }),
+    repos: configuredRepos(rt.config).map(r => `${r.owner}/${r.repo}`),
+    workspaceFor: job => {
+      if (!job.branch) return null;
+      const dir = rt.repoFor(job.owner, job.repo).workspacePath(job.branch);
+      return existsSync(path.join(dir, ".git")) ? dir : null;
+    },
+    fallbackCwd: existsSync(cwd) ? cwd : homedir(),
+  });
+  void handoff.run();
+  console.log(`[handoff] ${HANDOFF} opens conversations in Herdr for ${allowed.size} user(s)`);
+  return handoff;
+}
+
 /** Starts the staff chat when the bot is configured and chat isn't switched off. */
 async function startChat(rt: Runtime, live: () => LiveStatus): Promise<StaffChat | null> {
   if (!rt.env.discordBot || rt.config.chat?.enabled === false) return null;
@@ -292,7 +339,7 @@ async function startChat(rt: Runtime, live: () => LiveStatus): Promise<StaffChat
   await server.start();
   const config = rt.config.chat ?? {};
   const chat = new StaffChat({
-    discord, channelId, guildId: channel.guild_id, botId: me.id, allowed, store: rt.store, server, config,
+    discord, channelId, guildId: channel.guild_id, botId: me.id, allowed, store: rt.store, server, config, handoff: rt.handoff,
     model: claudeChatModel({ bin: rt.env.claudeBin, config, chatDir, settingsJson: JSON.stringify(builderSettings({}, { secrets: rt.secrets, noWrite: [] })) }),
     tools: {
       config: rt.config, store: rt.store, github: rt.github, home: rt.env.home, chatDir, live,
@@ -369,6 +416,11 @@ async function doctor(rt: Runtime): Promise<boolean> {
     report(allowed instanceof Set && allowed.size > 0, "Staff chat",
       allowed instanceof Set ? `${allowed.size} user(s) may talk to isobot in channel ${rt.env.chatChannelId} (the bridge needs ISOBOT_CHAT_CHANNEL_ID set to it)` : allowed.message);
   } else console.log("➖ Staff chat off (needs ISOBOT_DISCORD_BOT_TOKEN and ISOBOT_DISCORD_CHANNEL_ID; chat.enabled false switches it off)");
+  if (rt.handoff) {
+    const herdr = await new Herdr({ bin: rt.config.handoff?.herdrBin }).workspaces().catch((error: Error) => error);
+    report(Array.isArray(herdr), `Herdr handoff (${HANDOFF} on isobot's messages)`,
+      Array.isArray(herdr) ? `${herdr.length} workspace(s); give the bot Manage Messages so a tap resets itself` : `${herdr.message} (is Herdr running?)`);
+  } else console.log(`➖ Herdr handoff off (needs the Discord bot and the herdr CLI; handoff.enabled false switches it off)`);
   report(existsSync("/usr/bin/sandbox-exec"), "Check sandbox (sandbox-exec) available");
   if (rt.env.heartbeatUrl) {
     const pinged = await pingHeartbeat(rt.env.heartbeatUrl);

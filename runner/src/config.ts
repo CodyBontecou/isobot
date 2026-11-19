@@ -177,8 +177,21 @@ export interface RunnerConfig {
   chat?: ChatConfig;
   /** Limits for the content train (content.ts); per-site settings live in each repo's `content`. */
   content?: ContentLimits;
+  /** 💻 on isobot's Discord messages opens the conversation in the owner's local Herdr (handoff.ts). */
+  handoff?: HandoffConfig;
   defaults: RepoPolicy;
   repos: Record<string, Partial<RepoPolicy>>;
+}
+
+export interface HandoffConfig {
+  /** Default: on when the Discord bot is configured and the Herdr CLI is installed. */
+  enabled?: boolean;
+  /** The Herdr CLI. Default "herdr" on PATH. */
+  herdrBin?: string;
+  /** Herdr workspace (by label) for tabs that belong to no repo. Default "isobot". */
+  workspace?: string;
+  /** Working directory for those tabs, and for a repo with no local checkout. Default ~/dev. "~/" is expanded. */
+  cwd?: string;
 }
 
 export interface AutoApproveConfig {
@@ -291,6 +304,13 @@ export function validateConfig(config: RunnerConfig): void {
     }
     const countries = config.appStore.countries ?? [];
     if (countries.length === 0 || countries.some(c => !/^[a-z]{2}$/.test(c))) fail("appStore.countries must be lowercase two-letter country codes");
+  }
+  if (config.handoff) {
+    const h = config.handoff;
+    if (h.enabled !== undefined && typeof h.enabled !== "boolean") fail("handoff.enabled must be true or false");
+    for (const key of ["herdrBin", "workspace", "cwd"] as const) {
+      if (h[key] !== undefined && (typeof h[key] !== "string" || !h[key])) fail(`handoff.${key} must be a non-empty string`);
+    }
   }
   if (config.chat) {
     const c = config.chat;

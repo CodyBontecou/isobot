@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { DISCORD_MAX_BYTES, mb, type MediaFile } from "./media.js";
+import type { HandoffWatch } from "./handoff.js";
 import type { Job, Store } from "./store.js";
 
 /** Every job card's footer starts with this; the bridge and the staff chat recognize cards by it. */
@@ -20,6 +21,8 @@ export interface NotifierOptions {
   store?: Pick<Store, "cursor" | "setCursor">;
   /** Optional link to the job in isobot's UI; `{id}` is replaced with the URL-encoded job id. */
   jobUrl?: string;
+  /** Records posts that get a 💻 (Herdr handoff); without it nothing gets one. */
+  handoff?: Pick<HandoffWatch, "add">;
   fetcher?: typeof fetch;
 }
 
@@ -70,6 +73,8 @@ const PHASES: Record<Phase, { label: string; emoji: string; step: Step | "done" 
  * src/discord/approval.ts). A job card offers stop, continue and clean up; a proposal start and clean up.
  */
 export const CONTROLS = { start: "✅", stop: "🛑", continue: "🔁", cleanup: "🧹" } as const;
+/** Moves the conversation into a tab of the owner's local Herdr. The runner acts on it, not the bridge (handoff.ts). */
+export const HANDOFF = "💻";
 export const CARD_CONTROLS = [CONTROLS.stop, CONTROLS.continue, CONTROLS.cleanup];
 export const PROPOSAL_CONTROLS = [CONTROLS.start, CONTROLS.cleanup];
 
@@ -96,6 +101,8 @@ export interface Card {
   fixRounds: number;
   reviewRounds: number;
   notes: number;
+  /** The card carries a 💻 (cards posted before handoff existed get one on their next update). */
+  handoff?: boolean;
 }
 
 export type CardUpdate = Partial<Pick<Card, "phase" | "detail" | "prUrl" | "extraSteps" | "fixRounds" | "reviewRounds" | "notes" | "title">>;
@@ -119,12 +126,13 @@ export class Notifier {
    * A channel-level message (runner started, triage digest, usage pause). `reactions` are added as
    * one-click controls; only a bot can add them, so a webhook posts the text alone.
    */
-  async discord(content: string, reactions: readonly string[] = []): Promise<void> {
+  async discord(content: string, reactions: readonly string[] = [], { handoff = true } = {}): Promise<void> {
     if (this.options.bot) {
       const { channelId } = this.options.bot;
       try {
         const posted = await this.bot("POST", `/channels/${channelId}/messages`, message(content)) as { id: string };
-        await this.react(channelId, posted.id, reactions);
+        if (handoff && this.options.handoff) this.options.handoff.add(channelId, posted.id, { kind: "message" });
+        await this.react(channelId, posted.id, handoff && this.options.handoff ? [...reactions, HANDOFF] : reactions);
       } catch (error) {
         warn(error);
       }
@@ -145,7 +153,7 @@ export class Notifier {
     try {
       const card = this.apply(this.load(job) ?? newCard(job), update);
       await this.publish(job, card);
-      if (post && card.threadId) await this.bot("POST", `/channels/${card.threadId}/messages`, message(post));
+      if (post && card.threadId) await this.threadPost(job, card.threadId, post);
     } catch (error) {
       warn(error);
     }
@@ -155,7 +163,16 @@ export class Notifier {
   async say(job: Pick<Job, "id">, post: string): Promise<void> {
     const card = this.load(job);
     if (!this.options.bot || !card?.threadId) return;
-    await this.bot("POST", `/channels/${card.threadId}/messages`, message(post)).catch(warn);
+    await this.threadPost(job, card.threadId, post).catch(warn);
+  }
+
+  /** A post in a job's thread; with handoff on, it gets a 💻 that opens the job's session. */
+  private async threadPost(job: Pick<Job, "id">, threadId: string, post: string): Promise<void> {
+    const posted = await this.bot("POST", `/channels/${threadId}/messages`, message(post)) as { id: string } | null;
+    if (posted?.id && this.options.handoff) {
+      this.options.handoff.add(threadId, posted.id, { kind: "job", jobId: job.id });
+      await this.react(threadId, posted.id, [HANDOFF]);
+    }
   }
 
   /**
@@ -234,6 +251,11 @@ export class Notifier {
     if (card.messageId && card.channelId) {
       try {
         await this.bot("PATCH", `/channels/${card.channelId}/messages/${card.messageId}`, body);
+        if (this.options.handoff && !card.handoff) {
+          this.options.handoff.add(card.channelId, card.messageId, { kind: "job", jobId: job.id });
+          await this.react(card.channelId, card.messageId, [HANDOFF]);
+          card.handoff = true;
+        }
         this.save(job.id, card);
         return;
       } catch (error) {
@@ -253,9 +275,15 @@ export class Notifier {
     await this.bot("POST", `/channels/${thread.id}/messages`, message(
       `Following ${card.issueUrl}\nReply here to talk to isobot about this job: your replies go to the builder ` +
       `(during a build, or as a revision of an open PR). Comments on the issue and \`npm run runner -- say\` work the same way.\n` +
-      `React on the card: ${CONTROLS.stop} stop (un-click to continue) · ${CONTROLS.continue} build again after a failure or stop · ${CONTROLS.cleanup} dismiss and clean up.`,
+      `React on the card: ${CONTROLS.stop} stop (un-click to continue) · ${CONTROLS.continue} build again after a failure or stop · ${CONTROLS.cleanup} dismiss and clean up` +
+      `${this.options.handoff ? ` · ${HANDOFF} continue the builder's session in a Herdr tab on the Mac` : ""}.`,
     ));
-    await this.react(channelId, created.id, CARD_CONTROLS);
+    if (this.options.handoff) {
+      this.options.handoff.add(channelId, created.id, { kind: "job", jobId: job.id });
+      card.handoff = true;
+      this.save(job.id, card);
+    }
+    await this.react(channelId, created.id, this.options.handoff ? [...CARD_CONTROLS, HANDOFF] : CARD_CONTROLS);
   }
 
   /** Adds the bot's reactions in order, so they show up as buttons. A failed one is only logged. */
