@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { AgentRun, Builder, JobDevices, Review } from "./builder.js";
+import type { AgentRun, Builder, JobDevices, PreviousReview, Review } from "./builder.js";
 import { hasDevices, type DeviceLease, type Devices } from "./devices.js";
 import { collectMedia, mediaMarkdown, type MediaFile } from "./media.js";
 import { isTransient, UsageLimitError } from "./errors.js";
@@ -13,7 +13,7 @@ import type { DiffStat } from "./git.js";
 import type { GitHubApi, Issue, IssueComment, PullRequest } from "./github.js";
 import { asksToRetry, maxCommentId, noteFeedback, ownerNotes, quoteNote, withNotes, type OwnerNote } from "./notes.js";
 import type { CardUpdate, Notifier } from "./notify.js";
-import { evaluateGate, matchesGlob, reviewShortfalls, type CheckReport, type GateDecision } from "./policy.js";
+import { evaluateGate, matchesGlob, reviewShortfalls, reviewStopReason, type CheckReport, type GateDecision } from "./policy.js";
 import type { FollowUp, Job, JobKind, Store } from "./store.js";
 
 /** The git operations the pipeline needs; `Repo` implements it, tests fake it. */
@@ -586,6 +586,9 @@ export class Pipeline {
       let review: Review | undefined;
       let fixRounds = 0;
       let reviewRounds = 0;
+      // Each review sees the last one and the builder's answer, so rounds converge instead of starting over.
+      let previous: PreviousReview | undefined;
+      const confidences: number[] = [];
       for (;;) {
         // The owner spoke up (Discord thread, issue comment, `runner say`): their note comes first.
         if (noteRounds < MAX_NOTE_ROUNDS) {
@@ -616,27 +619,34 @@ export class Pipeline {
         await this.feed(job, { phase: "reviewing" });
         review = await builder.review({
           cwd: workspace, task, diff: await repo.diff(baseSha, sha), checks: formatChecks(checks),
-          media: collectMedia(mediaDir).files.map(f => f.file),
+          media: collectMedia(mediaDir).files.map(f => f.file), previous,
         });
-        store.event(job.id, "review", `${review.verdict} ${review.confidence} ${review.risk}: ${review.summary}`,
-          { type: "review", v: 1, round: reviewRounds + 1, verdict: review.verdict, confidence: review.confidence, risk: review.risk });
+        confidences.push(review.confidence);
+        store.event(job.id, "review", `${review.verdict} ${review.confidence} ${review.risk}: ${review.summary}`, {
+          type: "review", v: 1, round: reviewRounds + 1, verdict: review.verdict, confidence: review.confidence, risk: review.risk,
+          concerns: review.concerns, blockers: review.blockers ?? [],
+        });
         await this.deps.notifier.say(job, reviewLine(review));
         // A change request always goes back. An approval that misses the merge bar (confidence or risk)
         // goes back too when the repo could merge, so the builder works the doubts down instead of stopping short.
         const shortfalls = reviewShortfalls(review, policy);
         const mayMerge = policy.autonomy === "merge" || policy.ownerAutonomy === "merge";
         const retry = review.verdict === "request_changes" || (mayMerge && shortfalls.length > 0);
-        if (retry && reviewRounds < this.deps.config.builder.maxReviewRounds) {
+        // More rounds can't fix what only the owner can settle, and a stalled score won't move with more code.
+        const stop = retry ? reviewStopReason(review, confidences) : null;
+        if (retry && !stop && reviewRounds < this.deps.config.builder.maxReviewRounds) {
           reviewRounds++;
           await this.feed(job, { phase: "addressing", reviewRounds });
           const feedback = reviewFeedback(review, shortfalls);
           run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback, devices, media: builderMedia }));
           laterRounds.push({ label: `Review round ${reviewRounds}`, summary: run.summary });
             this.builderEvent(job, laterRounds.at(-1)!.label, run);
+          previous = { confidence: review.confidence, concerns: review.concerns, blockers: review.blockers ?? [], response: run.summary };
           sha = await commit(`Address review for #${issue.number}`);
           checks = await runChecks(run.summary);
           continue;
         }
+        if (stop) await this.deps.notifier.say(job, `⏸️ No more review rounds: ${stop}.`);
         // A note that arrived during the review goes in before anything is pushed.
         if (noteRounds < MAX_NOTE_ROUNDS && (await this.readNotes(job)).fresh.length) continue;
         break;
@@ -720,7 +730,7 @@ export class Pipeline {
     if (!gate.merge) {
       await github.addLabels(job.owner, job.repo, job.number, [this.labels.review]);
       store.update(job.id, { state: "pr_open" });
-      const reasons = gate.reasons.map(r => `- ${r}`).join("\n");
+      const reasons = gate.reasons.map(r => `- ${r}`).join("\n") + needsYou(context.review);
       await github.comment(job.owner, job.repo, job.number, `🔍 isobot opened ${prUrl} and is leaving the merge to you:\n${reasons}`);
       await this.feed(job, { phase: "waiting", detail: reasons },
         `🔍 Leaving the merge to you:\n${reasons}\n\nReply here to ask for changes; isobot will revise the PR.`,
@@ -1281,21 +1291,30 @@ function prBody(input: { issue: Issue; run: string; rounds?: { label: string; su
     "## Runner checks",
     formatChecks(checks),
     "## Independent review",
-    `**${review.verdict}** · confidence ${review.confidence.toFixed(2)} · risk ${review.risk}\n\n${review.summary}${review.concerns.length ? `\n\n${review.concerns.map(c => `- ${c}`).join("\n")}` : ""}`,
+    `**${review.verdict}** · confidence ${review.confidence.toFixed(2)} · risk ${review.risk}\n\n${review.summary}${review.concerns.length ? `\n\n${review.concerns.map(c => `- ${c}`).join("\n")}` : ""}${needsYou(review)}`,
     `<sub>${diff.files.length} files · ${diff.changedLines} lines changed · built by isobot</sub>`,
   ].join("\n\n");
 }
 
+/** The doubts only the owner can settle, as a section for a PR body or hand-off comment ("" when there are none). */
+function needsYou(review: Review): string {
+  const blockers = review.blockers ?? [];
+  return blockers.length ? `\n\n**Needs you** (code can't settle these):\n${blockers.map(b => `- ${b}`).join("\n")}` : "";
+}
+
 function reviewFeedback(review: Review, shortfalls: string[]): string {
   const concerns = review.concerns.map(c => `- ${c}`).join("\n");
-  if (review.verdict === "request_changes") {
-    return `An independent reviewer requested changes (confidence ${review.confidence.toFixed(2)}, risk ${review.risk}):\n\n${review.summary}\n\n${concerns}`;
-  }
+  const blockers = (review.blockers ?? []).map(b => `- ${b}`).join("\n");
+  const head = review.verdict === "request_changes"
+    ? [`An independent reviewer requested changes (confidence ${review.confidence.toFixed(2)}, risk ${review.risk}):`, review.summary]
+    : [`An independent reviewer approved, but the change can't merge yet: ${shortfalls.join("; ")}.`, `Reviewer's summary:\n\n${review.summary}`];
   return [
-    `An independent reviewer approved, but the change can't merge yet: ${shortfalls.join("; ")}.`,
-    `Reviewer's summary:\n\n${review.summary}`,
-    concerns ? `What kept their confidence down:\n\n${concerns}` : "They listed no specific concerns; re-check correctness and edge cases, and add tests that prove the behaviour.",
-    "Resolve these doubts with real fixes or tests. Stay within the task: don't add unrelated changes, and never weaken or skip tests.",
+    ...head,
+    concerns ? `Concerns to resolve:\n\n${concerns}` : "They listed no specific concerns; re-check correctness and edge cases, and add tests that prove the behaviour.",
+    ...(blockers ? [`These go to the owner; don't try to resolve them in code:\n\n${blockers}`] : []),
+    "Resolve the concerns with real fixes or tests, in the simplest way that works: a smaller change is easier to trust than more machinery. " +
+      "If a concern can't be resolved in code, say so in your summary instead of working around it. " +
+      "Stay within the task: don't add unrelated changes, and never weaken or skip tests.",
   ].join("\n\n");
 }
 
@@ -1363,5 +1382,6 @@ function checksLine(report: CheckReport): string {
 
 function reviewLine(review: Review): string {
   const concerns = review.concerns.slice(0, 5).map(c => `- ${c}`).join("\n");
-  return `🔍 Review: **${review.verdict === "approve" ? "approved" : "changes requested"}** · confidence ${review.confidence.toFixed(2)} · risk ${review.risk}\n${quote(review.summary, 10)}${concerns ? `\n${concerns}` : ""}`;
+  const blockers = (review.blockers ?? []).slice(0, 3).map(b => `- 🙋 ${b}`).join("\n");
+  return `🔍 Review: **${review.verdict === "approve" ? "approved" : "changes requested"}** · confidence ${review.confidence.toFixed(2)} · risk ${review.risk}\n${quote(review.summary, 10)}${concerns ? `\n${concerns}` : ""}${blockers ? `\n${blockers}` : ""}`;
 }

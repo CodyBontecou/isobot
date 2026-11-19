@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { agentSettings, builderSettings, ClaudeCodeBuilder, defaultDenyPaths, parseResult, parseReview, parseTriage, RESUME_PROMPT, revisePrompt } from "./builder.js";
+import { agentSettings, builderSettings, ClaudeCodeBuilder, defaultDenyPaths, parseResult, parseReview, parseTriage, previousReview, RESUME_PROMPT, revisePrompt } from "./builder.js";
 
 test("parses the CLI's JSON result, including after stray diagnostics", () => {
   const payload = { type: "result", subtype: "success", is_error: false, session_id: "s1", result: "done", structured_output: { a: 1 } };
@@ -102,4 +102,21 @@ test("agent runs may use tools the builder is denied, and nothing else changes",
   assert.ok(!parsed.permissions.deny.includes("mcp__plugin_openseo_openseo"));
   assert.ok(parsed.permissions.deny.includes("Skill(x)"));
   assert.ok(parsed.permissions.deny.includes("Read(//s)"));
+});
+
+test("parseReview keeps blockers apart from concerns", () => {
+  const review = parseReview({ verdict: "approve", confidence: 0.8, risk: "medium", summary: "s", concerns: ["a"], blockers: ["needs a device"] });
+  assert.deepEqual(review.concerns, ["a"]);
+  assert.deepEqual(review.blockers, ["needs a device"]);
+  assert.deepEqual(parseReview({ verdict: "approve", confidence: 0.9 }).blockers, []);
+});
+
+test("previousReview shows the reviewer the last round and the builder's claim", () => {
+  assert.equal(previousReview(undefined), "");
+  const text = previousReview({ confidence: 0.78, concerns: ["Empty list crashes"], blockers: [], response: "Guarded the empty list and added a test." });
+  assert.match(text, /## Previous review round/);
+  assert.match(text, /confidence 0\.78/);
+  assert.match(text, /Concerns:\n- Empty list crashes/);
+  assert.match(text, /Blockers:\n\(none\)/);
+  assert.match(text, /verify it against the diff[\s\S]*Guarded the empty list/);
 });

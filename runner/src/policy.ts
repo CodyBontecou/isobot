@@ -34,6 +34,27 @@ export function reviewShortfalls(review: Review, policy: Pick<RepoPolicy, "minRe
   return reasons;
 }
 
+/** How much an approval's confidence must rise over two review rounds to be worth a third. */
+export const MIN_REVIEW_GAIN = 0.03;
+
+/**
+ * Why another review round wouldn't help, or null when it might. Called only when the review asks for one.
+ * `confidences` is every review's confidence for this build, oldest first, the current one last.
+ */
+export function reviewStopReason(review: Review, confidences: number[]): string | null {
+  const blockers = review.blockers ?? [];
+  if (review.concerns.length === 0 && blockers.length > 0) {
+    return "every remaining concern needs you, not more code";
+  }
+  if (review.verdict === "approve" && confidences.length >= 3) {
+    const recent = confidences.slice(-3);
+    if (recent[2] - recent[0] < MIN_REVIEW_GAIN) {
+      return `reviewer confidence stopped improving (${recent.map(c => c.toFixed(2)).join(" → ")})`;
+    }
+  }
+  return null;
+}
+
 /**
  * Deterministic merge gate. The model's opinion is one input; everything else is
  * checked here so a confident but wrong agent can't talk its way into main.

@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import path from "node:path";
 import { loadConfig, type RepoPolicy } from "./config.js";
-import { evaluateGate, matchesGlob, skipMarkers, type GateInput } from "./policy.js";
+import { evaluateGate, matchesGlob, reviewStopReason, skipMarkers, type GateInput } from "./policy.js";
+import type { Review } from "./builder.js";
 
 const policy: RepoPolicy = {
   autonomy: "merge", checks: ["npm test"], protectedPaths: [".github/**", "**/*auth*/**", "**/Info.plist"],
@@ -123,4 +124,20 @@ test("a change that adds a skip marker leaves the merge to a human", () => {
   } }));
   assert.equal(decision.merge, false);
   assert.match(decision.reasons.join(";"), /disables or narrows tests: skip\/only\/todo in src\/x.test.ts/);
+});
+
+test("reviewStopReason stops on owner-only doubts and on a stalled approval", () => {
+  const review = (over: Partial<Review>): Review => ({ verdict: "approve", confidence: 0.8, risk: "medium", summary: "", concerns: ["Edge case"], blockers: [], ...over });
+  assert.match(reviewStopReason(review({ concerns: [], blockers: ["Needs a device"] }), [0.8])!, /needs you/);
+  assert.match(reviewStopReason(review({ verdict: "request_changes", concerns: [], blockers: ["Product call"] }), [0.5])!, /needs you/);
+  // Fixable concerns alongside blockers still earn a round.
+  assert.equal(reviewStopReason(review({ blockers: ["Needs a device"] }), [0.8]), null);
+  // No concerns and no blockers: the builder is still asked to re-check (older behaviour).
+  assert.equal(reviewStopReason(review({ concerns: [] }), [0.8]), null);
+  assert.equal(reviewStopReason(review({}), [0.8, 0.8]), null);
+  assert.match(reviewStopReason(review({ confidence: 0.82 }), [0.8, 0.81, 0.82])!, /stopped improving \(0\.80 → 0\.81 → 0\.82\)/);
+  assert.match(reviewStopReason(review({ confidence: 0.74 }), [0.8, 0.8, 0.74])!, /stopped improving/);
+  assert.equal(reviewStopReason(review({ confidence: 0.84 }), [0.72, 0.78, 0.84]), null);
+  // A change request keeps going while it has fixable concerns, however the score moves.
+  assert.equal(reviewStopReason(review({ verdict: "request_changes", confidence: 0.6 }), [0.6, 0.6, 0.6]), null);
 });
