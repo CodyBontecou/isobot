@@ -8,7 +8,7 @@
     "timeoutMinutes": 60,
     "maxTurns": 300,
     "maxFixRounds": 3,
-    "maxReviewRounds": 3,
+    "maxReviewRounds": 5,
     "settings": {
       "permissions": {
         "deny": [
