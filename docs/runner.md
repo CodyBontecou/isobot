@@ -413,7 +413,7 @@ content train (`runner/src/content.ts`). Health.md (healthmd.app), GitSync.md (g
      source, primary sources for other products, no duplicate pages, links both ways, the site's
      conventions (`content.notes`), and a `Published URLs:` line at the end of the summary.
    Content merges with `content.autonomy` (default `merge`) and never rides the release train.
-   At most `content.maxConcurrentJobs` (default 1) content builds run at once, so app work isn't held up.
+   At most `content.maxConcurrentJobs` content builds run at once (1 by default; the runner's config sets 2 of its 3 slots), so one slot always stays free for app work.
 4. **Publish.** Once every published URL answers 200 on the live site, the site's `indexNow`
    command runs with the URLs (or OpenSEO's IndexNow when there is none), the OpenSEO research
    log gets one line, and the job's thread hears about it. Pages still not live 3 hours after the

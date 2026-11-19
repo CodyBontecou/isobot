@@ -25,7 +25,7 @@
     "checkInHour": 9
   },
   "content": {
-    "maxConcurrentJobs": 1,
+    "maxConcurrentJobs": 2,
     "maxCreditsPerRun": 100,
     "maxCreditsPerDay": 1500,
     "minCreditsRemaining": 300,
