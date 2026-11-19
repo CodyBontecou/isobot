@@ -15,6 +15,8 @@ COPY --from=sandbox-tools /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shi
 RUN git config --system user.name isobot \
   && git config --system user.email isobot@users.noreply.github.com \
   && git config --system advice.detachedHead false \
+  && printf '__pycache__/\n*.pyc\n.DS_Store\n' > /etc/gitignore \
+  && git config --system core.excludesFile /etc/gitignore \
   && mkdir -p /workspace /isobot
 WORKDIR /workspace
 CMD ["sleep", "infinity"]

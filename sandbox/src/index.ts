@@ -37,6 +37,8 @@ const BASE_ENV: Record<string, string> = {
   // Claude Code runs as root here, where skipping its permission prompts needs this. The Container is the sandbox.
   IS_SANDBOX: "1",
   CI: "1",
+  // Checks run Python; its bytecode caches would otherwise end up in the builder's next commit.
+  PYTHONDONTWRITEBYTECODE: "1",
 };
 /** Requests keep a Container awake; a running process doesn't. The alarm checks well inside this. */
 const INACTIVITY_MS = 30 * 60_000;

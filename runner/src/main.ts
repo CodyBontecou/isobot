@@ -402,6 +402,9 @@ async function cloudSmoke(rt: Runtime, owner: string, name: string, withChecks: 
       task: "This is a smoke test of isobot's cloud builds. Create a file named ISOBOT_SMOKE.md at the repository root containing exactly the line `cloud build smoke test`, commit it, and reply with a one-sentence summary. Change nothing else.",
     });
     step(`builder ${run.ok ? "finished" : "failed"}: ${(run.summary || run.error || "").slice(0, 300)}`);
+    // Like a build: the commit is taken before checks run, so their output never lands in it.
+    await repo.commitPending(dir, "WIP: smoke test");
+    const sha = await repo.capture(dir, branch);
     if (withChecks) {
       const policy = policyFor(rt.config, `${owner}/${name}`);
       const commands = policy.content?.checks ?? policy.checks;
@@ -410,8 +413,6 @@ async function cloudSmoke(rt: Runtime, owner: string, name: string, withChecks: 
       for (const result of report.results) step(`${result.ok ? "✅" : "❌"} ${result.command}${result.ok ? "" : `\n${result.output.slice(-1500)}`}`);
       if (!report.passed) return false;
     }
-    await repo.commitPending(dir, "WIP: smoke test");
-    const sha = await repo.capture(dir, branch);
     const diff = await repo.diffStat(main, sha);
     step(`captured ${sha.slice(0, 12)}: ${await repo.ahead(main, sha)} commit(s), files ${diff.files.map(f => f.path).join(", ") || "(none)"}`);
     return run.ok && diff.files.some(f => f.path === "ISOBOT_SMOKE.md");
