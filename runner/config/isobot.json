@@ -382,6 +382,8 @@
         "perDay": 3,
         "allowedPaths": [
           "website-content/guides/**",
+          "scripts/website/test_*.py",
+          "scripts/website/README.md",
           "website-content/pages/blog/**",
           "website-content/pages/compare/**",
           "website-content/pages/docs/**",
