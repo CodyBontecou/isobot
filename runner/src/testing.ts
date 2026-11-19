@@ -1,6 +1,6 @@
 import { writeFileSync } from "node:fs";
 import path from "node:path";
-import type { AgentRun, Builder, JobDevices, Review, TriageItem, TriageResult } from "./builder.js";
+import type { AgentRun, Builder, JobDevices, PreviousReview, Review, TriageItem, TriageResult } from "./builder.js";
 import { loadConfig, type Labels, type RunnerConfig } from "./config.js";
 import type { DiffStat } from "./git.js";
 import type { CiState, GitHubApi, Issue, IssueComment, PullRequest } from "./github.js";
@@ -223,6 +223,7 @@ export class FakeBuilder implements Builder {
   captures: Record<string, Buffer> = {};
   /** Media paths each review saw. */
   reviewMedia: (string[] | undefined)[] = [];
+  reviewPrevious: (PreviousReview | undefined)[] = [];
 
   async implement(input: { cwd: string; task: string; devices?: JobDevices; media?: string; sessionId?: string }): Promise<AgentRun> {
     this.implementCalls++;
@@ -245,8 +246,9 @@ export class FakeBuilder implements Builder {
     this.reviseSessions.push(input.sessionId);
     return { ok: true, sessionId: "session-1", summary: "Fixed." };
   }
-  async review(input: { task: string; media?: string[] }): Promise<Review> {
+  async review(input: { task: string; media?: string[]; previous?: PreviousReview }): Promise<Review> {
     this.reviewTasks.push(input.task);
+    this.reviewPrevious.push(input.previous);
     this.reviewMedia.push(input.media);
     return this.reviews.shift() ?? { verdict: "approve", confidence: 0.95, risk: "low", summary: "Looks right.", concerns: [] };
   }

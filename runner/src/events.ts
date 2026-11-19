@@ -7,7 +7,8 @@ export type EventData =
   | { type: "state"; v: 1; from: string | null; to: string }
   | { type: "builder"; v: 1; round: string; ok: boolean }
   | { type: "checks"; v: 1; passed: boolean; failed: string[] }
-  | { type: "review"; v: 1; round: number; verdict: "approve" | "request_changes"; confidence: number; risk: string }
+  // concerns and blockers were added later, so older review events lack them.
+  | { type: "review"; v: 1; round: number; verdict: "approve" | "request_changes"; confidence: number; risk: string; concerns?: string[]; blockers?: string[] }
   | { type: "pr"; v: 1; number: number; files: number; lines: number }
   | { type: "ci"; v: 1; state: string; waitedMinutes: number }
   | { type: "gate"; v: 1; merge: boolean; reasons: string[] }
@@ -23,7 +24,7 @@ export function describeEvent(kind: string, detail: string | null, data: EventDa
     case "state": return `${data.from ?? "new"} → ${data.to}${detail ? ` (${firstLine(detail)})` : ""}`;
     case "builder": return `builder ${data.round}${data.ok ? "" : " (did not finish cleanly)"}`;
     case "checks": return data.passed ? "checks passed" : `checks failed: ${data.failed.join(", ") || "(unknown)"}`;
-    case "review": return `review ${data.round}: ${data.verdict} · confidence ${data.confidence.toFixed(2)} · risk ${data.risk}`;
+    case "review": return `review ${data.round}: ${data.verdict} · confidence ${data.confidence.toFixed(2)} · risk ${data.risk}${data.blockers?.length ? ` · ${data.blockers.length} for you` : ""}`;
     case "pr": return `PR #${data.number} (${data.files} files, ${data.lines} lines)`;
     case "ci": return `CI ${data.state} after ${data.waitedMinutes} min`;
     case "gate": return data.merge ? "gate: merge" : `gate: left to you (${data.reasons.join("; ")})`;

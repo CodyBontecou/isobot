@@ -158,6 +158,49 @@ test("low-confidence approvals stop after maxReviewRounds and leave the merge to
   assert.match(github.commentsFor(OWNER, NAME, 32).at(-1)!, /confidence 0\.80 is below 0\.85/);
 });
 
+test("a review whose only doubts need the owner stops the rounds and lists them on the hand-off", async () => {
+  const { github, pipeline, builder, store } = setup(config => {
+    config.repos[REPO] = { autonomy: "merge", checks: ["make test"] };
+  });
+  builder.reviews = [{
+    verdict: "approve", confidence: 0.78, risk: "medium", summary: "Correct as far as the simulator goes",
+    concerns: [], blockers: ["Stereo capture is unverified on a real iPhone"],
+  }];
+  github.add(OWNER, NAME, 34, "Stereo", ["isobot:ready"]);
+  await cycle(pipeline);
+  assert.equal(builder.reviseFeedback.length, 0);
+  assert.equal(github.merged.length, 0);
+  assert.match(github.commentsFor(OWNER, NAME, 34).at(-1)!, /Needs you[\s\S]*unverified on a real iPhone/);
+  const review = store.eventsSince(0, { jobId: `${REPO}#34` }).flatMap(e => e.data?.type === "review" ? [e.data] : [])[0];
+  assert.deepEqual(review?.blockers, ["Stereo capture is unverified on a real iPhone"]);
+  assert.deepEqual(review?.concerns, []);
+});
+
+test("an approval whose confidence stalls stops before maxReviewRounds", async () => {
+  const { github, pipeline, builder } = setup(config => {
+    config.repos[REPO] = { autonomy: "merge", checks: ["make test"] };
+    config.builder.maxReviewRounds = 5;
+  });
+  const at = (confidence: number) => ({ verdict: "approve" as const, confidence, risk: "medium" as const, summary: "Close", concerns: ["Edge case"] });
+  builder.reviews = [at(0.8), at(0.81), at(0.82), at(0.95)];
+  github.add(OWNER, NAME, 35, "Feature", ["isobot:ready"]);
+  await cycle(pipeline);
+  assert.equal(builder.reviseFeedback.length, 2);
+  assert.equal(github.merged.length, 0);
+});
+
+test("each review sees the previous round's concerns and the builder's answer", async () => {
+  const { github, pipeline, builder } = setup(config => {
+    config.repos[REPO] = { autonomy: "merge", checks: ["make test"] };
+  });
+  builder.reviews = [{ verdict: "request_changes", confidence: 0.5, risk: "medium", summary: "Bug", concerns: ["Empty list crashes"], blockers: ["Needs a device run"] }];
+  github.add(OWNER, NAME, 36, "Feature", ["isobot:ready"]);
+  await cycle(pipeline);
+  assert.match(builder.reviseFeedback[0], /Empty list crashes[\s\S]*go to the owner; don't try to resolve them in code:[\s\S]*Needs a device run/);
+  assert.equal(builder.reviewPrevious[0], undefined);
+  assert.deepEqual(builder.reviewPrevious[1], { confidence: 0.5, concerns: ["Empty list crashes"], blockers: ["Needs a device run"], response: "Fixed." });
+});
+
 test("pr autonomy doesn't spend rounds raising an approval's confidence", async () => {
   const { github, pipeline, builder } = setup(config => {
     config.repos[REPO] = { autonomy: "pr", checks: ["make test"] };
@@ -1018,7 +1061,7 @@ test("a build records typed events for checks, review, PR, CI and the gate", asy
   const types = data.map(d => d.type);
   for (const type of ["claim", "state", "builder", "checks", "review", "pr", "ci", "gate"]) assert.ok(types.includes(type as never), `has ${type}`);
   const review = data.find(d => d.type === "review");
-  assert.deepEqual(review, { type: "review", v: 1, round: 1, verdict: "approve", confidence: 0.95, risk: "low" });
+  assert.deepEqual(review, { type: "review", v: 1, round: 1, verdict: "approve", confidence: 0.95, risk: "low", concerns: [], blockers: [] });
   assert.deepEqual(data.find(d => d.type === "gate"), { type: "gate", v: 1, merge: true, reasons: [] });
   assert.ok(data.some(d => d.type === "state" && d.from === "awaiting_ci" && d.to === "merged"));
 });
