@@ -33,7 +33,7 @@ export interface UploadFile {
 }
 
 export type Phase =
-  | "queued" | "devices" | "implementing" | "revising" | "checking" | "fixing" | "reviewing" | "addressing"
+  | "queued" | "blocked" | "devices" | "implementing" | "revising" | "checking" | "fixing" | "reviewing" | "addressing"
   | "pushing" | "ci" | "waiting" | "merged" | "releasing" | "released" | "releaseFailed"
   | "ship" | "shipping" | "shipped" | "shipFailed" | "retrying" | "paused" | "failed" | "stopped" | "cleaned" | "closed";
 
@@ -42,6 +42,7 @@ type Step = "Build" | "Checks" | "Review" | "PR" | "Merge" | "Release" | "Ship";
 
 const PHASES: Record<Phase, { label: string; emoji: string; step: Step | "done" | null; mark: Mark }> = {
   queued: { label: "Queued", emoji: "⏳", step: "Build", mark: "wait" },
+  blocked: { label: "Waiting on another issue", emoji: "⛓", step: "Build", mark: "wait" },
   devices: { label: "Booting test devices", emoji: "📱", step: "Build", mark: "active" },
   implementing: { label: "Implementing", emoji: "🔨", step: "Build", mark: "active" },
   revising: { label: "Revising with your note", emoji: "💬", step: "Build", mark: "active" },

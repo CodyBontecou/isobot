@@ -28,6 +28,8 @@ import { ensureShims } from "./shims.js";
 import { hasDevices, LocalDevices } from "./devices.js";
 import { removeDerivedData } from "./cleanup.js";
 import { Store } from "./store.js";
+import { explainGrants } from "./grants.js";
+import { followUpLines, inspect } from "./inspect.js";
 import type { LiveStatus } from "./chatTools.js";
 import { AppStoreSource, DiscordSource, EmailSource, GitHubSource, VoxSource, triage, type Source } from "./triage.js";
 
@@ -101,7 +103,7 @@ function runtime(): Runtime {
     shimDir,
   });
   const repoFor = (owner: string, repo: string) => new Repo(env.home, owner, repo, env.githubToken);
-  const pipeline = new Pipeline({ config, env, store, github, builder, notifier, repo: repoFor, checks, devices });
+  const pipeline = new Pipeline({ config, env, store, github, builder, notifier, repo: repoFor, checks, devices, runnerId: env.runnerId });
   const labels = Object.values(config.labels);
   const sources: Source[] = [new GitHubSource(github, configuredRepos(config), labels)];
   if (env.piUrl && env.piToken) sources.push(new DiscordSource(env.piUrl, env.piToken, lowerKeys(config.discordCategories)));
@@ -452,6 +454,9 @@ const HELP = `isobot runner
   checks <repo>       Run a repo's configured checks on its default branch, sandboxed like a build
   say <repo#n> <text> Send isobot a note about a job, like replying in its Discord thread
   retry <repo#n> [note] Build an issue again (a failed or finished job, or a new one); the note goes to the builder
+  inspect [repo#n] [--follow] [--json]
+                      Timeline of what isobot did, across jobs or for one, and what it will check next
+  grants [repo]       Who may approve, stop, merge, chat and hand off, and each repo's merge rules
   content <repo> research [--dry-run] | report
                       Run a site's content research now (files an issue; --dry-run prints the brief instead)
                       or its weekly search report`;
@@ -470,6 +475,7 @@ async function main(): Promise<void> {
       console.log(`[once] claimed ${claimed.length} issue(s)`);
       await Promise.all(rt.pipeline.startQueued());
       await rt.pipeline.followUp();
+      await rt.pipeline.settled();
       await rt.pipeline.cleanUp();
       return;
     }
@@ -489,6 +495,8 @@ async function main(): Promise<void> {
       for (const job of rt.store.all(30)) {
         console.log(`${job.updatedAt.slice(0, 16)}  ${job.state.padEnd(13)} ${job.id}  ${job.title}${job.prNumber ? `  PR #${job.prNumber}` : ""}${job.notBefore && job.state === "queued" ? `  (retry after ${job.notBefore.slice(11, 16)})` : ""}${job.lastError ? `\n      ↳ ${job.lastError.split("\n")[0].slice(0, 160)}` : ""}`);
       }
+      const pending = followUpLines(rt.store.followUps());
+      if (pending.length) console.log(`\nFollow-ups:\n${pending.map(line => `  ${line}`).join("\n")}`);
       return;
     }
     case "setup":
@@ -565,6 +573,33 @@ async function main(): Promise<void> {
       }
       console.log(result.message);
       if (!result.ok) process.exitCode = 1;
+      return;
+    }
+    case "inspect": {
+      const args = process.argv.slice(3);
+      const target = args.find(a => !a.startsWith("--"));
+      const ref = target ? resolveIssue(rt.config, target) : null;
+      if (target && !ref) {
+        console.error("Usage: inspect [owner/repo#n | repo#n] [--follow] [--json]");
+        process.exitCode = 2;
+        return;
+      }
+      await inspect(rt.store, {
+        jobId: ref ? Store.jobId(ref.owner, ref.repo, ref.number) : undefined,
+        follow: args.includes("--follow") || args.includes("-f"), json: args.includes("--json"),
+      });
+      return;
+    }
+    case "grants": {
+      const target = process.argv[3];
+      const ref = target ? resolveIssue(rt.config, `${target}#1`) : null;
+      const chatEnv = process.env.ISOBOT_CHAT_USERS ? "ISOBOT_CHAT_USERS" : process.env.ISOBOT_ALLOWED_USERS ? "ISOBOT_ALLOWED_USERS" : null;
+      const ids = (process.env.ISOBOT_CHAT_USERS || process.env.ISOBOT_ALLOWED_USERS || "").split(",").map(s => s.trim()).filter(Boolean);
+      console.log(explainGrants({
+        config: rt.config, viewer: await rt.github.viewer(), runnerId: rt.env.runnerId,
+        chatUsers: { ids, source: chatEnv ?? "The Discord bot's owner (ISOBOT_CHAT_USERS and ISOBOT_ALLOWED_USERS are unset)" },
+        repo: ref ? `${ref.owner}/${ref.repo}` : target,
+      }));
       return;
     }
     case "content": {

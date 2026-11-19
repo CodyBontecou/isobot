@@ -64,7 +64,10 @@ export interface GitHubApi {
   issue(owner: string, repo: string, number: number): Promise<Issue>;
   addLabels(owner: string, repo: string, number: number, labels: string[]): Promise<void>;
   removeLabel(owner: string, repo: string, number: number, label: string): Promise<void>;
-  comment(owner: string, repo: string, number: number, body: string): Promise<void>;
+  /** Posts a runner comment and returns its id. */
+  comment(owner: string, repo: string, number: number, body: string): Promise<number>;
+  /** Rewrites a runner comment (claim lease renewals). */
+  updateComment(owner: string, repo: string, commentId: number, body: string): Promise<void>;
   createIssue(owner: string, repo: string, title: string, body: string, labels: string[]): Promise<Issue>;
   closeIssue(owner: string, repo: string, number: number, reason?: "completed" | "not_planned"): Promise<void>;
   findPull(owner: string, repo: string, branch: string): Promise<PullRequest | null>;
@@ -176,8 +179,13 @@ export class GitHub implements GitHubApi {
   }
 
   /** Every runner comment carries RUNNER_MARKER so it is never mistaken for a note from the owner. */
-  async comment(owner: string, repo: string, number: number, body: string): Promise<void> {
-    await this.octokit.issues.createComment({ owner, repo, issue_number: number, body: `${body.slice(0, 64_000)}\n\n${RUNNER_MARKER}` });
+  async comment(owner: string, repo: string, number: number, body: string): Promise<number> {
+    const { data } = await this.octokit.issues.createComment({ owner, repo, issue_number: number, body: `${body.slice(0, 64_000)}\n\n${RUNNER_MARKER}` });
+    return data.id;
+  }
+
+  async updateComment(owner: string, repo: string, commentId: number, body: string): Promise<void> {
+    await this.octokit.issues.updateComment({ owner, repo, comment_id: commentId, body: `${body.slice(0, 64_000)}\n\n${RUNNER_MARKER}` });
   }
 
   /** A comment written on the owner's behalf (`runner say`): no runner marker, so it counts as a note. */

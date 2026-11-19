@@ -88,8 +88,15 @@ export class FakeGitHub implements GitHubApi {
     const issue = this.get(owner, repo, number);
     issue.labels = issue.labels.filter(l => l !== label);
   }
-  async comment(owner: string, repo: string, number: number, body: string): Promise<void> {
-    this.comments.push({ id: this.nextComment++, key: `${owner}/${repo}#${number}`, body: `${body}\n\n${RUNNER_MARKER}` });
+  async comment(owner: string, repo: string, number: number, body: string): Promise<number> {
+    const id = this.nextComment++;
+    this.comments.push({ id, key: `${owner}/${repo}#${number}`, body: `${body}\n\n${RUNNER_MARKER}` });
+    return id;
+  }
+  async updateComment(_owner: string, _repo: string, commentId: number, body: string): Promise<void> {
+    const comment = this.comments.find(c => c.id === commentId);
+    if (!comment) throw new Error("no comment");
+    comment.body = `${body}\n\n${RUNNER_MARKER}`;
   }
   closedAs = new Map<string, string>();
   async closeIssue(owner: string, repo: string, number: number, reason = "completed"): Promise<void> {

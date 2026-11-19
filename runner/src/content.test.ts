@@ -36,7 +36,6 @@ function setup(content: Partial<ContentConfig> = {}) {
       return { configured: commands.length > 0, passed: true, results: commands.map(command => ({ command, ok: true, output: "" })) };
     },
     devices: { lease: async (id: string) => { leases.push(id); return { env: {}, describe: () => "", release: async () => {} }; } } as never,
-    sleep: async () => {},
   });
   return { config, store, github, builder, repo, pipeline, checkCalls, leases };
 }

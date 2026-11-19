@@ -10,11 +10,11 @@ import { failureFeedback, formatChecks } from "./checks.js";
 import { configuredRepos, contentPolicy, policyFor, type Environment, type RepoPolicy, type RunnerConfig } from "./config.js";
 import { contentEvidenceKey, CONTENT_BUILD_RULES } from "./content.js";
 import type { DiffStat } from "./git.js";
-import type { CiState, GitHubApi, Issue, IssueComment, PullRequest } from "./github.js";
+import type { GitHubApi, Issue, IssueComment, PullRequest } from "./github.js";
 import { asksToRetry, maxCommentId, noteFeedback, ownerNotes, quoteNote, withNotes, type OwnerNote } from "./notes.js";
 import type { CardUpdate, Notifier } from "./notify.js";
 import { evaluateGate, matchesGlob, reviewShortfalls, type CheckReport, type GateDecision } from "./policy.js";
-import type { Job, JobKind, Store } from "./store.js";
+import type { FollowUp, Job, JobKind, Store } from "./store.js";
 
 /** The git operations the pipeline needs; `Repo` implements it, tests fake it. */
 export interface RepoOps {
@@ -56,7 +56,10 @@ export interface PipelineDeps {
   mediaRoot?: string;
   /** Boots per-job simulators/emulators for repos with `devices` configured. */
   devices?: Devices;
-  sleep?: (ms: number) => Promise<void>;
+  /** The clock follow-ups and claim leases run on (tests move it). */
+  now?: () => Date;
+  /** This runner's name in claim leases, so two runners (e.g. a laptop and the mini) never build one issue twice. */
+  runnerId?: string;
 }
 
 /**
@@ -74,6 +77,17 @@ const MAX_NOTE_ROUNDS = 5;
 const CI_WAIT_MS = 90 * 60_000;
 /** How long a new PR may go without any CI reporting before "no CI" is final. */
 const CI_GRACE_MS = 5 * 60_000;
+/** How often a PR waiting for CI, or a job waiting on another issue, is checked. */
+const CI_POLL_MS = 30_000;
+const BLOCKED_POLL_MS = 2 * 60_000;
+/** A follow-up that keeps erroring is retried this often, and gives up (fails the job) after this many tries. */
+const FOLLOW_UP_RETRY_MS = 5 * 60_000;
+const FOLLOW_UP_MAX_ERRORS = 5;
+/** A claim lease lasts this long and is renewed when less than LEASE_RENEW_MS is left, while the job is ours. */
+const LEASE_MS = 45 * 60_000;
+const LEASE_RENEW_MS = 20 * 60_000;
+/** Job states in which this runner holds the issue's claim. */
+const HELD_STATES = ["queued", "blocked", "building", "awaiting_ci"];
 export const PROPOSAL_MARKER = "<!-- isobot:triage:";
 
 /** What the builder is asked to do, where it came from, and a fingerprint to detect edits. */
@@ -101,6 +115,26 @@ interface Checkpoint extends Progress {
   sha: string;
 }
 
+/**
+ * Everything the merge decision needs once the build itself is over, so a PR can wait for CI as a
+ * follow-up in SQLite instead of holding a build slot (and survive a restart while it waits).
+ */
+interface MergeContext {
+  sha: string;
+  prNumber: number;
+  prUrl: string;
+  title: string;
+  diff: DiffStat;
+  checks: CheckReport;
+  review: Review;
+  fingerprint: string;
+  trusted: boolean;
+  author: string;
+  /** Follow-up errors so far (see runFollowUps). */
+  errors?: number;
+}
+
+const leaseKey = (id: string) => `lease:${id}`;
 const progressKey = (id: string) => `progress:${id}`;
 const checkpointKey = (id: string) => `checkpoint:${id}`;
 
@@ -109,6 +143,8 @@ const REBUILDABLE = ["merged", "released", "shipped", "closed", "failed", "stopp
 
 export class Pipeline {
   private running = new Set<string>();
+  /** Follow-up work running beside the cycle (a merge and release after CI), by job id. */
+  private background = new Map<string, Promise<void>>();
   /** Set on SIGTERM/SIGINT: builds dying because their processes were killed are interruptions, not failures. */
   private shuttingDown = false;
   private viewer?: string;
@@ -128,6 +164,19 @@ export class Pipeline {
   }
 
   private get labels() { return this.deps.config.labels; }
+
+  private now(): Date {
+    return this.deps.now?.() ?? new Date();
+  }
+
+  private get runnerId(): string {
+    return (this.deps.runnerId ?? "runner").replace(/[^\w.-]+/g, "-");
+  }
+
+  /** Resolves once follow-up work started in the background (merges and releases after CI) has finished. */
+  async settled(): Promise<void> {
+    while (this.background.size) await Promise.all(this.background.values());
+  }
 
   /** Moves approved issues (ready label) into the local queue and claims them on GitHub. */
   async discover(): Promise<Job[]> {
@@ -151,6 +200,19 @@ export class Pipeline {
             await github.comment(owner, repo, issue.number, `isobot only builds issues approved by its owner; \`${this.labels.ready}\` was added by @${approver ?? "unknown"}.`);
             continue;
           }
+          // Another runner (say the mini, while this is the laptop) already holds the issue: leave it to that one.
+          const before = await github.issueComments(owner, repo, issue.number);
+          const viewer = await this.viewerLogin();
+          const held = hasLabel(issue, this.labels.building)
+            ? liveLeases(before, viewer, this.now()).find(lease => lease.runner !== this.runnerId) : undefined;
+          if (held) {
+            await github.removeLabel(owner, repo, issue.number, this.labels.ready);
+            await github.comment(owner, repo, issue.number,
+              `isobot's runner \`${held.runner}\` is already working on this (its claim runs until ${held.until.slice(0, 16).replace("T", " ")} UTC), so this one left it alone. Approve it again once that build is done.`);
+            store.event(storeId(owner, repo, issue.number), "claim", `held by ${held.runner}`, { type: "claim", v: 1, runner: this.runnerId, outcome: "held_elsewhere", holder: held.runner });
+            continue;
+          }
+          const baseline = maxCommentId(before);
           const kind = this.kindOf(owner, repo, issue);
           const job = store.enqueue(owner, repo, issue.number, issue.title, kind);
           await github.removeLabel(owner, repo, issue.number, this.labels.ready);
@@ -161,14 +223,22 @@ export class Pipeline {
           }
           await github.removeLabel(owner, repo, issue.number, this.labels.failed);
           await github.addLabels(owner, repo, issue.number, [this.labels.building]);
-          await github.comment(owner, repo, issue.number,
-            `🤖 isobot picked this up and is building it now. Add the \`${this.labels.stop}\` label at any time to stop.`);
+          if (!(await this.claim(job, baseline))) continue;
           await this.listenForNotes(job);
           const { release } = this.policyOf(owner, repo, kind);
-          await this.feed(job, {
-            phase: "queued", title: issue.title,
-            extraSteps: [...(release.onMerge.length ? ["Release" as const] : []), ...(release.onShip.length ? ["Ship" as const] : [])],
-          });
+          const extraSteps = [...(release.onMerge.length ? ["Release" as const] : []), ...(release.onShip.length ? ["Ship" as const] : [])];
+          // "Blocked by #12" in the issue: claimed now, built once #12 is closed.
+          const blockers = await this.openBlockers(issue);
+          if (blockers.length) {
+            store.update(job.id, { state: "blocked" });
+            store.schedule(job.id, "blocked", new Date(this.now().getTime() + BLOCKED_POLL_MS), { on: blockers }, this.now());
+            store.event(job.id, "blocked", blockers.join(", "), { type: "blocked", v: 1, on: blockers });
+            await github.comment(owner, repo, issue.number, `⛓ Waiting on ${blockers.join(", ")}. isobot builds this once ${blockers.length === 1 ? "it's" : "they're all"} closed.`);
+            await this.feed(store.get(job.id)!, { phase: "blocked", title: issue.title, extraSteps, detail: `Waiting on ${blockers.join(", ")}` });
+            claimed.push(job);
+            continue;
+          }
+          await this.feed(job, { phase: "queued", title: issue.title, extraSteps });
           claimed.push(job);
         } catch (error) {
           console.warn(`[discover] ${owner}/${repo}#${issue.number}: ${(error as Error).message}`);
@@ -176,6 +246,63 @@ export class Pipeline {
       }
     }
     return claimed;
+  }
+
+  /**
+   * Posts the claim comment with this runner's lease, then reads the issue again. Two runners that claimed the
+   * same approval at once both see both leases; the earlier comment wins and the other backs off.
+   */
+  private async claim(job: Job, baseline: number): Promise<boolean> {
+    const { github, store } = this.deps;
+    const text = `🤖 isobot picked this up and is building it now. Add the \`${this.labels.stop}\` label at any time to stop.`;
+    const until = new Date(this.now().getTime() + LEASE_MS);
+    const commentId = await github.comment(job.owner, job.repo, job.number, `${text}\n\n${leaseMarker(this.runnerId, until)}`);
+    store.setCursor(leaseKey(job.id), JSON.stringify({ commentId, until: until.toISOString(), text }));
+    const contenders = liveLeases(await github.issueComments(job.owner, job.repo, job.number), await this.viewerLogin(), this.now())
+      .filter(lease => lease.id > baseline).sort((a, b) => a.id - b.id);
+    const winner = contenders[0];
+    if (winner && winner.runner !== this.runnerId) {
+      store.forget(job.id);
+      store.setCursor(leaseKey(job.id), "");
+      store.event(job.id, "claim", `lost to ${winner.runner}`, { type: "claim", v: 1, runner: this.runnerId, outcome: "lost", holder: winner.runner });
+      console.warn(`[discover] ${job.id}: runner ${winner.runner} claimed it first; leaving it to that runner`);
+      return false;
+    }
+    store.event(job.id, "claim", this.runnerId, { type: "claim", v: 1, runner: this.runnerId, outcome: "won" });
+    return true;
+  }
+
+  /** Keeps this runner's claim leases alive while it holds the jobs; a runner that dies lets them lapse. */
+  private async renewLeases(): Promise<void> {
+    const { github, store } = this.deps;
+    for (const job of store.inState(...HELD_STATES as Job["state"][])) {
+      const raw = store.cursor(leaseKey(job.id));
+      if (!raw) continue;
+      try {
+        const lease = JSON.parse(raw) as { commentId: number; until: string; text: string };
+        if (Date.parse(lease.until) - this.now().getTime() > LEASE_RENEW_MS) continue;
+        const until = new Date(this.now().getTime() + LEASE_MS);
+        await github.updateComment(job.owner, job.repo, lease.commentId, `${lease.text}\n\n${leaseMarker(this.runnerId, until)}`);
+        store.setCursor(leaseKey(job.id), JSON.stringify({ ...lease, until: until.toISOString() }));
+      } catch (error) {
+        console.warn(`[lease] ${job.id}: couldn't renew: ${(error as Error).message}`);
+      }
+    }
+  }
+
+  /** The issues named in "Blocked by" / "Depends on" lines of the issue that are still open, as `#12` or `owner/repo#12`. */
+  private async openBlockers(issue: Issue): Promise<string[]> {
+    const open: string[] = [];
+    for (const ref of parseBlockers(issue.body, issue.owner, issue.repo)) {
+      if (ref.owner === issue.owner.toLowerCase() && ref.repo === issue.repo.toLowerCase() && ref.number === issue.number) continue;
+      const name = ref.owner === issue.owner.toLowerCase() && ref.repo === issue.repo.toLowerCase() ? `#${ref.number}` : `${ref.owner}/${ref.repo}#${ref.number}`;
+      try {
+        if ((await this.deps.github.issue(ref.owner, ref.repo, ref.number)).state === "open") open.push(name);
+      } catch {
+        open.push(`${name} (isobot can't read it)`);
+      }
+    }
+    return open;
   }
 
   /** A content-train issue (content label) in a repo with a site; everything else is ordinary work. */
@@ -369,13 +496,13 @@ export class Pipeline {
           cwd: workspace!, ...ids, task, devices, media: mediaDir,
           feedback: notes.fresh.length ? noteFeedback(notes.fresh) : "Re-read the task and the owner's follow-up notes, and make sure this branch satisfies all of them.",
         }), job.sessionId);
-        store.event(job.id, "revised", run.summary);
+        store.event(job.id, "revised", run.summary, { type: "builder", v: 1, round: "revise PR", ok: run.ok });
       } else {
         baseSha = mainSha;
         workspace = await repo.createWorkspace(branch, baseSha);
         await this.feed(job, { phase: "implementing" });
         run = await builderStep(ids => builder.implement({ cwd: workspace!, task, devices, media: mediaDir, sessionId: ids.newSessionId }), null);
-        store.event(job.id, "implemented", run.summary);
+        store.event(job.id, "implemented", run.summary, { type: "builder", v: 1, round: "implement", ok: run.ok });
       }
       const commit = async (message: string) => {
         await repo.commitPending(workspace!, message);
@@ -388,6 +515,8 @@ export class Pipeline {
       const runChecks = async (summary: string) => {
         await this.feed(job, { phase: "checking" }, `🔨 Builder:\n${quote(summary || "(no summary)", 15)}`);
         const report = await this.checks(workspace!, policy.checks, lease?.env);
+        store.event(job.id, "checks", report.passed ? "passed" : "failed",
+          { type: "checks", v: 1, passed: report.passed, failed: report.results.filter(r => !r.ok).map(r => r.command) });
         await this.deps.notifier.say(job, checksLine(report));
         return report;
       };
@@ -408,6 +537,7 @@ export class Pipeline {
             await this.feed(job, { phase: "revising", notes: this.noteCount(job, late.fresh.length) }, this.ackNotes(late.fresh));
             run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback: noteFeedback(late.fresh), devices, media: mediaDir }));
             laterRounds.push({ label: "Owner note", summary: run.summary });
+            this.builderEvent(job, laterRounds.at(-1)!.label, run);
             sha = await commit(`Apply owner feedback for #${issue.number}`);
             checks = await runChecks(run.summary);
             continue;
@@ -418,6 +548,7 @@ export class Pipeline {
           await this.feed(job, { phase: "fixing", fixRounds });
           run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback: failureFeedback(checks), devices, media: mediaDir }));
           laterRounds.push({ label: `Check fix ${fixRounds}`, summary: run.summary });
+            this.builderEvent(job, laterRounds.at(-1)!.label, run);
           sha = await commit(`Fix checks for #${issue.number}`);
           checks = await runChecks(run.summary);
           continue;
@@ -428,7 +559,8 @@ export class Pipeline {
           cwd: workspace, task, diff: await repo.diff(baseSha, sha), checks: formatChecks(checks),
           media: collectMedia(mediaDir).files.map(f => f.file),
         });
-        store.event(job.id, "review", `${review.verdict} ${review.confidence} ${review.risk}: ${review.summary}`);
+        store.event(job.id, "review", `${review.verdict} ${review.confidence} ${review.risk}: ${review.summary}`,
+          { type: "review", v: 1, round: reviewRounds + 1, verdict: review.verdict, confidence: review.confidence, risk: review.risk });
         await this.deps.notifier.say(job, reviewLine(review));
         // A change request always goes back. An approval that misses the merge bar (confidence or risk)
         // goes back too when the repo could merge, so the builder works the doubts down instead of stopping short.
@@ -441,6 +573,7 @@ export class Pipeline {
           const feedback = reviewFeedback(review, shortfalls);
           run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback, devices, media: mediaDir }));
           laterRounds.push({ label: `Review round ${reviewRounds}`, summary: run.summary });
+            this.builderEvent(job, laterRounds.at(-1)!.label, run);
           sha = await commit(`Address review for #${issue.number}`);
           checks = await runChecks(run.summary);
           continue;
@@ -469,56 +602,20 @@ export class Pipeline {
       if (media.files.length) await this.deps.notifier.media(job, `📸 What the change looks like (also on ${pr.url}):`, media.files);
       if (media.notes.length) await this.deps.notifier.say(job, `📸 Some captures weren't published:\n${media.notes.map(n => `- ${n}`).join("\n")}`);
 
-      const gateNow = async (): Promise<GateDecision> => {
-        const current = await github.issue(job.owner, job.repo, job.number);
-        const owner = await this.ownerOriginated(current);
-        const effective = owner ? { ...policy, autonomy: policy.ownerAutonomy ?? policy.autonomy } : policy;
-        const decision = evaluateGate({ policy: effective, diff, checks, review: review!, issueLabels: current.labels, stopLabel: this.labels.stop });
-        if (!owner && policy.autonomy !== "merge" && policy.ownerAutonomy === "merge") {
-          decision.reasons.push(`it isn't marked as yours; when you add \`${this.labels.auto}\` yourself, isobot merges once every gate passes`);
-        }
-        if (!source.trusted) decision.reasons.push(`the issue was written by @${source.author}, who isn't trusted to merge without you`);
-        if ((await this.taskFor(current)).fingerprint !== source.fingerprint) decision.reasons.push("the issue text changed while isobot was building");
-        if (current.state === "closed") decision.reasons.push("the issue was closed");
-        if ((await this.readNotes(job)).fresh.length) decision.reasons.push("you sent a note isobot hasn't applied yet; it will revise the PR with it next");
-        return { merge: decision.reasons.length === 0, reasons: decision.reasons };
+      store.event(job.id, "pr", pr.url, { type: "pr", v: 1, number: pr.number, files: diff.files.length, lines: diff.changedLines });
+      const context: MergeContext = {
+        sha, prNumber: pr.number, prUrl: pr.url, title: issue.title, diff, checks, review,
+        fingerprint: source.fingerprint, trusted: source.trusted, author: source.author,
       };
-      let gate = await gateNow();
+      const gate = await this.gate(job, policy, context);
       if (gate.merge && policy.requireCi) {
+        // CI is a follow-up, not a wait inside the build: the slot frees for the next job, and a restart keeps it.
+        store.update(job.id, { state: "awaiting_ci" });
+        store.schedule(job.id, "ci", new Date(this.now().getTime() + CI_POLL_MS), context, this.now());
         await this.feed(job, { phase: "ci" });
-        const ci = await this.waitForCi(job, sha);
-        // Labels and issue text can change during a long CI run; judge again right before merging.
-        gate = ci === "success" ? await gateNow() : { merge: false, reasons: [ci === "none" ? "no GitHub CI reported on the PR" : `GitHub CI is ${ci}`] };
-      }
-      await github.removeLabel(job.owner, job.repo, job.number, this.labels.building);
-
-      if (!gate.merge) {
-        await github.addLabels(job.owner, job.repo, job.number, [this.labels.review]);
-        store.update(job.id, { state: "pr_open" });
-        const reasons = gate.reasons.map(r => `- ${r}`).join("\n");
-        await github.comment(job.owner, job.repo, job.number, `🔍 isobot opened ${pr.url} and is leaving the merge to you:\n${reasons}`);
-        await this.feed(job, { phase: "waiting", detail: reasons },
-          `🔍 Leaving the merge to you:\n${reasons}\n\nReply here to ask for changes; isobot will revise the PR.`,
-          `🔍 **${job.owner}/${job.repo}#${job.number}** ${issue.title}: PR ready for your review: <${pr.url}>`);
         return;
       }
-
-      let mergeSha: string;
-      try {
-        // `sha` pins the merge to the reviewed commit; GitHub refuses if the branch moved.
-        mergeSha = await github.merge(job.owner, job.repo, pr.number, sha, `${issue.title} (#${pr.number})`);
-      } catch (error) {
-        // Usually a conflict with a newer main: the PR is still good, so hand it to the owner.
-        await github.addLabels(job.owner, job.repo, job.number, [this.labels.review]);
-        store.update(job.id, { state: "pr_open", lastError: (error as Error).message });
-        await github.comment(job.owner, job.repo, job.number, `🔍 Every gate passed but GitHub refused the merge (${(error as Error).message}). ${pr.url} is ready for you.`);
-        await this.feed(job, { phase: "waiting", detail: "Every gate passed, but GitHub refused the merge" }, `🔍 GitHub refused the merge: ${(error as Error).message.slice(0, 300)}`);
-        return;
-      }
-      store.update(job.id, { state: "merged" });
-      await github.comment(job.owner, job.repo, job.number, `✅ isobot merged ${pr.url} after checks, review (confidence ${review.confidence.toFixed(2)}) and policy gates passed.`);
-      await this.feed(job, { phase: "merged" }, `✅ Merged ${pr.url}`, `✅ **${job.owner}/${job.repo}#${job.number}** ${issue.title}: merged <${pr.url}>`);
-      await this.afterMerge(store.get(job.id)!, mergeSha, policy);
+      await this.conclude(job, policy, context, gate);
     } catch (error) {
       if (this.shuttingDown) return;
       if (isTransient(error)) await this.retryLater(job, error as Error);
@@ -532,6 +629,154 @@ export class Pipeline {
         if (workspace) await repo.removeWorkspace(branch).catch(() => undefined);
       }
     }
+  }
+
+  private builderEvent(job: Job, round: string, run: AgentRun): void {
+    this.deps.store.event(job.id, "builder", round, { type: "builder", v: 1, round, ok: run.ok });
+  }
+
+  /** The merge decision, from the build's results and the issue as it is now. Re-run right before merging. */
+  private async gate(job: Job, policy: RepoPolicy, context: MergeContext): Promise<GateDecision> {
+    const current = await this.deps.github.issue(job.owner, job.repo, job.number);
+    const owner = await this.ownerOriginated(current);
+    const effective = owner ? { ...policy, autonomy: policy.ownerAutonomy ?? policy.autonomy } : policy;
+    const decision = evaluateGate({ policy: effective, diff: context.diff, checks: context.checks, review: context.review, issueLabels: current.labels, stopLabel: this.labels.stop });
+    if (!owner && policy.autonomy !== "merge" && policy.ownerAutonomy === "merge") {
+      decision.reasons.push(`it isn't marked as yours; when you add \`${this.labels.auto}\` yourself, isobot merges once every gate passes`);
+    }
+    if (!context.trusted) decision.reasons.push(`the issue was written by @${context.author}, who isn't trusted to merge without you`);
+    if ((await this.taskFor(current)).fingerprint !== context.fingerprint) decision.reasons.push("the issue text changed while isobot was building");
+    if (current.state === "closed") decision.reasons.push("the issue was closed");
+    if ((await this.readNotes(job)).fresh.length) decision.reasons.push("you sent a note isobot hasn't applied yet; it will revise the PR with it next");
+    return { merge: decision.reasons.length === 0, reasons: decision.reasons };
+  }
+
+  /** Merges the reviewed commit when the gate allows, then releases; otherwise leaves the PR to the owner. */
+  private async conclude(job: Job, policy: RepoPolicy, context: MergeContext, gate: GateDecision): Promise<void> {
+    const { github, store } = this.deps;
+    const { prUrl, prNumber, title } = context;
+    store.event(job.id, "gate", gate.merge ? "merge" : gate.reasons.join("; "), { type: "gate", v: 1, merge: gate.merge, reasons: gate.reasons });
+    await github.removeLabel(job.owner, job.repo, job.number, this.labels.building);
+
+    if (!gate.merge) {
+      await github.addLabels(job.owner, job.repo, job.number, [this.labels.review]);
+      store.update(job.id, { state: "pr_open" });
+      const reasons = gate.reasons.map(r => `- ${r}`).join("\n");
+      await github.comment(job.owner, job.repo, job.number, `🔍 isobot opened ${prUrl} and is leaving the merge to you:\n${reasons}`);
+      await this.feed(job, { phase: "waiting", detail: reasons },
+        `🔍 Leaving the merge to you:\n${reasons}\n\nReply here to ask for changes; isobot will revise the PR.`,
+        `🔍 **${job.owner}/${job.repo}#${job.number}** ${title}: PR ready for your review: <${prUrl}>`);
+      return;
+    }
+
+    let mergeSha: string;
+    try {
+      // `sha` pins the merge to the reviewed commit; GitHub refuses if the branch moved.
+      mergeSha = await github.merge(job.owner, job.repo, prNumber, context.sha, `${title} (#${prNumber})`);
+    } catch (error) {
+      // Usually a conflict with a newer main: the PR is still good, so hand it to the owner.
+      await github.addLabels(job.owner, job.repo, job.number, [this.labels.review]);
+      store.update(job.id, { state: "pr_open", lastError: (error as Error).message });
+      await github.comment(job.owner, job.repo, job.number, `🔍 Every gate passed but GitHub refused the merge (${(error as Error).message}). ${prUrl} is ready for you.`);
+      await this.feed(job, { phase: "waiting", detail: "Every gate passed, but GitHub refused the merge" }, `🔍 GitHub refused the merge: ${(error as Error).message.slice(0, 300)}`);
+      return;
+    }
+    store.update(job.id, { state: "merged" });
+    await github.comment(job.owner, job.repo, job.number, `✅ isobot merged ${prUrl} after checks, review (confidence ${context.review.confidence.toFixed(2)}) and policy gates passed.`);
+    await this.feed(job, { phase: "merged" }, `✅ Merged ${prUrl}`, `✅ **${job.owner}/${job.repo}#${job.number}** ${title}: merged <${prUrl}>`);
+    await this.afterMerge(store.get(job.id)!, mergeSha, policy);
+  }
+
+  /**
+   * Runs the follow-ups that are due: PRs waiting for CI and jobs waiting on another issue. They live in SQLite,
+   * so a restart loses none, and a PR waiting for CI holds no build slot.
+   */
+  private async runFollowUps(): Promise<void> {
+    if (this.shuttingDown) return;
+    const { store } = this.deps;
+    for (const followUp of store.dueFollowUps(this.now())) {
+      if (this.running.has(followUp.jobId) || this.background.has(followUp.jobId)) continue;
+      const job = store.get(followUp.jobId);
+      if (!job) {
+        store.clearFollowUp(followUp.jobId, followUp.kind);
+        continue;
+      }
+      try {
+        if (followUp.kind === "ci") await this.ciFollowUp(job, followUp);
+        else if (followUp.kind === "blocked") await this.blockedFollowUp(job, followUp);
+        else store.clearFollowUp(job.id, followUp.kind);
+      } catch (error) {
+        await this.followUpFailed(job, followUp, error as Error);
+      }
+    }
+  }
+
+  private async followUpFailed(job: Job, followUp: FollowUp, error: Error): Promise<void> {
+    const { store } = this.deps;
+    const payload = JSON.parse(followUp.payload) as { errors?: number };
+    const errors = (payload.errors ?? 0) + 1;
+    console.warn(`[follow-up] ${job.id} ${followUp.kind}: ${error.message}`);
+    if (isTransient(error) || errors < FOLLOW_UP_MAX_ERRORS) {
+      store.schedule(job.id, followUp.kind, new Date(this.now().getTime() + FOLLOW_UP_RETRY_MS), { ...payload, errors });
+      return;
+    }
+    store.clearFollowUp(job.id, followUp.kind);
+    await this.fail(job, new Error(`waiting for ${followUp.kind === "ci" ? "CI" : "the issues it depends on"} kept failing: ${error.message}`));
+  }
+
+  /** A PR that passed every other gate, waiting for GitHub CI. When CI settles, the gate runs again and decides. */
+  private async ciFollowUp(job: Job, followUp: FollowUp): Promise<void> {
+    const { store, github } = this.deps;
+    if (job.state !== "awaiting_ci") return store.clearFollowUp(job.id, "ci");
+    const context = JSON.parse(followUp.payload) as MergeContext;
+    const waited = this.now().getTime() - Date.parse(followUp.createdAt);
+    const state = await github.ciState(job.owner, job.repo, context.sha);
+    let outcome: string | null = null;
+    if (state === "success" || state === "failure") outcome = state;
+    // Check suites can take minutes to register; "none" is only final after the grace period.
+    else if (state === "none" && waited > CI_GRACE_MS) outcome = "none";
+    else if (waited > CI_WAIT_MS) outcome = "still pending after 90 minutes";
+    if (!outcome) return store.snooze(job.id, "ci", new Date(this.now().getTime() + CI_POLL_MS));
+    store.event(job.id, "ci", outcome, { type: "ci", v: 1, state: outcome, waitedMinutes: Math.round(waited / 60_000) });
+    const policy = this.policyOf(job.owner, job.repo, job.kind);
+    // The merge and release run beside the cycle, like a build, so a long release doesn't hold up claiming.
+    const work = (async () => {
+      try {
+        // Labels and issue text can change during a long CI run; judge again right before merging.
+        const gate = outcome === "success" ? await this.gate(job, policy, context)
+          : { merge: false, reasons: [outcome === "none" ? "no GitHub CI reported on the PR" : `GitHub CI is ${outcome}`] };
+        await this.conclude(job, policy, context, gate);
+        store.clearFollowUp(job.id, "ci");
+      } catch (error) {
+        if (!this.shuttingDown) await this.followUpFailed(job, followUp, error as Error);
+      }
+    })().finally(() => this.background.delete(job.id));
+    this.background.set(job.id, work);
+  }
+
+  /** A claimed job waiting on other issues ("Blocked by #12"). It builds once they are all closed. */
+  private async blockedFollowUp(job: Job, followUp: FollowUp): Promise<void> {
+    const { store, github } = this.deps;
+    if (job.state !== "blocked") return store.clearFollowUp(job.id, "blocked");
+    const issue = await github.issue(job.owner, job.repo, job.number);
+    if (issue.state === "closed" || hasLabel(issue, this.labels.stop)) {
+      store.clearFollowUp(job.id, "blocked");
+      return this.stop(job, issue);
+    }
+    // Read from the issue as it is now, so editing a blocker out of it takes effect.
+    const open = await this.openBlockers(issue);
+    if (open.length) {
+      const before = (JSON.parse(followUp.payload) as { on?: string[] }).on ?? [];
+      store.schedule(job.id, "blocked", new Date(this.now().getTime() + BLOCKED_POLL_MS), { on: open });
+      if (open.join() !== before.join()) {
+        store.event(job.id, "blocked", open.join(", "), { type: "blocked", v: 1, on: open });
+        await this.feed(job, { phase: "blocked", detail: `Waiting on ${open.join(", ")}` });
+      }
+      return;
+    }
+    store.clearFollowUp(job.id, "blocked");
+    store.update(job.id, { state: "queued" });
+    await this.feed(job, { phase: "queued" }, "⛓ Everything this depends on is done; building it next.");
   }
 
   private feed(job: Job, update: CardUpdate, post?: string, headline?: string): Promise<void> {
@@ -622,6 +867,8 @@ export class Pipeline {
   /** Follows PRs that wait for a human: merged → release; closed → done; stop label → stopped. */
   async followUp(): Promise<void> {
     const { github, store } = this.deps;
+    await this.runFollowUps();
+    await this.renewLeases();
     for (const job of store.inState("pr_open")) {
       try {
         if (!job.prNumber) continue;
@@ -724,7 +971,8 @@ export class Pipeline {
             continue;
           }
           const job = store.get(id);
-          if (job && ["queued", "building"].includes(job.state)) store.update(id, { state: "stopped" });
+          if (job && ["queued", "blocked", "building", "awaiting_ci"].includes(job.state)) store.update(id, { state: "stopped" });
+          store.clearFollowUp(id);
           const removed = await this.deps.repo(owner, repo).purge(issue.number);
           const ours = [this.labels.proposed, this.labels.ready, this.labels.building, this.labels.review, this.labels.failed, this.labels.ship, this.labels.stop, this.labels.auto];
           for (const label of ours) if (hasLabel(issue, label)) await github.removeLabel(owner, repo, issue.number, label);
@@ -798,19 +1046,6 @@ export class Pipeline {
       return await this.deps.checks(dir, commands, { timeoutMs: 90 * 60_000, sandbox: false });
     } finally {
       await repo.removeWorkspace(name).catch(() => undefined);
-    }
-  }
-
-  private async waitForCi(job: Job, sha: string): Promise<CiState | "still pending after 90 minutes"> {
-    const sleep = this.deps.sleep ?? ((ms: number) => new Promise(resolve => setTimeout(resolve, ms)));
-    const started = Date.now();
-    for (;;) {
-      await sleep(30_000);
-      const state = await this.deps.github.ciState(job.owner, job.repo, sha);
-      if (state === "success" || state === "failure") return state;
-      // Check suites can take minutes to register; "none" is only final after the grace period.
-      if (state === "none" && Date.now() - started > CI_GRACE_MS) return "none";
-      if (Date.now() - started > CI_WAIT_MS) return "still pending after 90 minutes";
     }
   }
 
@@ -904,6 +1139,43 @@ function reviewFeedback(review: Review, shortfalls: string[]): string {
     concerns ? `What kept their confidence down:\n\n${concerns}` : "They listed no specific concerns; re-check correctness and edge cases, and add tests that prove the behaviour.",
     "Resolve these doubts with real fixes or tests. Stay within the task: don't add unrelated changes, and never weaken or skip tests.",
   ].join("\n\n");
+}
+
+/** The marker in a claim comment saying which runner holds the issue, and until when (renewed while it works). */
+export function leaseMarker(runner: string, until: Date): string {
+  return `<!-- isobot:lease runner=${runner} until=${until.toISOString()} -->`;
+}
+
+/** Unexpired leases in the issue's comments. Only the runner's own account can write one that counts. */
+export function liveLeases(comments: IssueComment[], viewer: string, now: Date): { id: number; runner: string; until: string }[] {
+  const leases: { id: number; runner: string; until: string }[] = [];
+  for (const comment of comments) {
+    if (comment.author.toLowerCase() !== viewer.toLowerCase()) continue;
+    const match = /<!-- isobot:lease runner=([\w.-]+) until=([\dT:.\-Z]+) -->/.exec(comment.body);
+    if (match && Date.parse(match[2]) > now.getTime()) leases.push({ id: comment.id, runner: match[1], until: match[2] });
+  }
+  return leases;
+}
+
+/**
+ * Issues a body says it waits on: lines starting "Blocked by", "Depends on" or "Waits on", naming `#12`,
+ * `owner/repo#12` or an issue URL. Lowercased, deduplicated, in order.
+ */
+export function parseBlockers(body: string, owner: string, repo: string): { owner: string; repo: string; number: number }[] {
+  const found = new Map<string, { owner: string; repo: string; number: number }>();
+  const text = body.replace(/<!--[\s\S]*?-->/g, "");
+  for (const line of text.split("\n")) {
+    const match = /^\s*(?:[-*]\s*)?(?:\*\*)?(?:blocked by|depends on|waits on)(?:\*\*)?\s*:?\s*(.+)$/i.exec(line);
+    if (!match) continue;
+    const refs = /(?:https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/(?:issues|pull)\/(\d+))|(?:([\w.-]+)\/([\w.-]+))?#(\d+)/g;
+    for (const ref of match[1].matchAll(refs)) {
+      const item = ref[3]
+        ? { owner: ref[1].toLowerCase(), repo: ref[2].toLowerCase(), number: Number(ref[3]) }
+        : { owner: (ref[4] ?? owner).toLowerCase(), repo: (ref[5] ?? repo).toLowerCase(), number: Number(ref[6]) };
+      found.set(`${item.owner}/${item.repo}#${item.number}`, item);
+    }
+  }
+  return [...found.values()];
 }
 
 function hasLabel(issue: Pick<Issue, "labels">, label: string): boolean {

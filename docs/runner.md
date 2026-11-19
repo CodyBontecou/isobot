@@ -9,7 +9,9 @@ new Discord, GitHub, email and App Store review activity into proposals. Design:
 ## What happens to an issue
 
 1. You add `isobot:ready` (or create a ticket with `@isobot` in Discord).
-2. Within a minute the runner swaps it to `isobot:building` and comments.
+2. Within a minute the runner swaps it to `isobot:building` and comments. The comment carries
+   the runner's claim lease (see [Two runners](#two-runners)). If the issue says it waits on
+   others (see [Dependencies](#dependencies)), it stays claimed and builds once they're closed.
 3. A Claude Code builder implements it on `isobot/<number>-<slug>` in a throwaway
    clone and commits.
 4. The runner runs the repo's `checks`. Failures go back to the builder
@@ -22,7 +24,8 @@ new Discord, GitHub, email and App Store review activity into proposals. Design:
 6. The runner pushes and opens a PR with the summary, check results and review.
 7. If every gate passes and the repo's autonomy is `merge`, it waits for GitHub
    CI, re-checks the gates, and squash-merges exactly the reviewed commit.
-   Otherwise it labels `isobot:review` and explains why.
+   Otherwise it labels `isobot:review` and explains why. The CI wait is a follow-up
+   (below), so the build slot goes to the next job while CI runs.
 8. After a merge (by isobot or by you): `release.onMerge` commands run. If the
    repo has `release.onShip`, the issue waits for you to add `isobot:ship`.
 
@@ -57,6 +60,8 @@ doesn't propose your whole backlog.
 | `doctor` | Configuration, connectivity, sandbox and heartbeat checks |
 | `say <repo#n> <text>` | Send isobot a note about a job, as if you'd replied in its Discord thread |
 | `retry <repo#n> [note]` | Build an issue again (failed, merged, closed or stopped job, or one never built), optionally with a note for the builder |
+| `inspect [repo#n] [--follow] [--json]` | Timeline of what isobot did, across jobs or for one, and what it will check next. `--follow` keeps printing new events |
+| `grants [repo]` | Who may approve, stop, merge, chat and hand off, and each repo's merge rules, gathered from config and `runner.env` |
 
 Logs: `~/Library/Application Support/isobot/logs/runner.log` (rotated at
 10 MB, three kept). State: `runner.sqlite` and `heartbeat.json` beside it.
@@ -215,6 +220,60 @@ Reactions and Attach Files there, and View Channel, Read Message History and Add
 you want to mention it. The runner finds new messages by reading the server's channel list and active
 threads every 5 seconds, then only the channels that changed.
 
+## Follow-ups
+
+Some steps wait on the outside world: GitHub CI on a PR, or another issue closing. The runner
+doesn't sleep inside the build for those. It saves a follow-up in `runner.sqlite` (job, what to
+check, when) and checks the ones that are due on every cycle. So:
+
+- **A PR waiting for CI holds no build slot.** The job shows as `awaiting_ci`; the next job
+  starts. CI is checked every 30 seconds. "No CI" is final after 5 minutes, and after 90
+  minutes of pending the PR is left to you. When CI settles, the gates run again on the issue
+  as it is then, and isobot merges (and releases) or hands the PR to you.
+- **A restart loses nothing.** Follow-ups are in SQLite, so a runner restarted while a PR waits
+  for CI carries on waiting instead of reviewing again.
+- A follow-up that keeps erroring is retried every 5 minutes; after five non-temporary errors the
+  job fails with the reason.
+
+`status` and `inspect` list what's pending and when it's next checked. 🧹 or the stop label ends
+a wait like it ends a build.
+
+## Dependencies
+
+Put a line in the issue body to make it wait on other issues:
+
+```
+Blocked by #12
+Depends on codybontecou/health-md#7 and https://github.com/codybontecou/vox.md/issues/90
+```
+
+Lines starting `Blocked by`, `Depends on` or `Waits on` count (a list bullet or bold is fine);
+other mentions of `#12` don't. When you approve such an issue, isobot claims it straight away
+(state `blocked`, card "Waiting on another issue") and checks every 2 minutes. Once every issue
+it names is closed, it queues the build. So you can approve a chain at once and each step
+starts when the one before merges. Editing a blocker out of the issue takes effect on the next
+check. An issue isobot can't read (wrong repo, no access) counts as still open, and the card
+says so. A closed issue counts as done however it was closed.
+
+## Two runners
+
+Each runner has a name, `ISOBOT_RUNNER_ID` in `runner.env` (default: the host name). Its claim
+comment carries a lease, `<!-- isobot:lease runner=<name> until=<time> -->`, valid for 45
+minutes and renewed while the job is queued, blocked, building or waiting for CI. A runner that
+dies stops renewing, and its lease lapses.
+
+- An issue with `isobot:building` and another runner's live lease is left alone: that runner
+  removes the ready label and comments that `<name>` has it. Approve it again once that build is
+  done.
+- Two runners that claim the same approval at the same moment both post a lease, read the
+  issue again, and the earlier comment wins; the other forgets its job.
+- Only leases written by the runner's own GitHub account count, so nobody can block builds by
+  pasting a marker.
+
+This matters while moving to the Mac mini, or with a laptop and the mini both running. With
+one runner it costs one extra comment read per claim and a comment edit every ~25 minutes per
+long job.
+
 ## When things go wrong
 
 - **Temporary problems** (network, GitHub outages, Claude overload) put the
@@ -228,7 +287,8 @@ threads every 5 seconds, then only the channels that changed.
   whatever each interrupted build left uncommitted and queues it to continue from that
   commit: a builder that was mid-run resumes the same Claude Code session (its id is
   chosen and saved before the run starts) in the same workspace path, with new devices.
-  A build that was in checks, review or CI runs them again without rerunning the builder.
+  A build that was in checks or review runs them again without rerunning the builder
+  (a PR waiting for CI just keeps waiting: see [Follow-ups](#follow-ups)).
   Captures it already made are kept. A deliberate stop (SIGTERM) doesn't use up one of
   the job's attempts. If the workspace is gone (a reboot cleared it) or the session is,
   the build starts over from the task and the saved commit, or from scratch. So you can

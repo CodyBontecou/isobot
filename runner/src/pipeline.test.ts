@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { RunnerConfig } from "./config.js";
 import { Notifier } from "./notify.js";
-import { buildTask, Pipeline, slug } from "./pipeline.js";
+import { buildTask, leaseMarker, parseBlockers, Pipeline, slug } from "./pipeline.js";
 import type { CheckReport } from "./policy.js";
 import { Store } from "./store.js";
 import { DISCORD_REPLY_MARKER } from "./notes.js";
@@ -24,6 +24,7 @@ function setup(configure: (config: RunnerConfig) => void = () => {}, checks: Che
   const repo = new FakeRepo();
   const checkCalls: string[][] = [];
   const checkEnvs: (Record<string, string> | undefined)[] = [];
+  const clock = { t: Date.parse("2026-11-19T12:00:00Z") };
   const pipeline = new Pipeline({
     config, env: { home: "/tmp/isobot-test" }, store, github, builder,
     notifier: discord ? new Notifier({ bot: { token: "t", channelId: CHANNEL }, store, fetcher: discord.fetch }) : new Notifier(),
@@ -33,15 +34,27 @@ function setup(configure: (config: RunnerConfig) => void = () => {}, checks: Che
       checkEnvs.push(options.env);
       return checks.shift() ?? { configured: commands.length > 0, passed: true, results: commands.map(command => ({ command, ok: true, output: "" })) };
     },
-    sleep: async () => {},
+    now: () => new Date(clock.t),
     devices,
   });
-  return { config, store, github, builder, repo, pipeline, checkCalls, checkEnvs };
+  clocks.set(pipeline, { clock, store });
+  return { config, store, github, builder, repo, pipeline, checkCalls, checkEnvs, clock };
 }
 
+/** Each test pipeline's clock, which cycle() moves on while a PR waits for CI. */
+const clocks = new WeakMap<Pipeline, { clock: { t: number }; store: Store }>();
+
+/** One runner pass, then the CI follow-ups it scheduled, run until they settle (the clock moves on between polls). */
 async function cycle(pipeline: Pipeline) {
   await pipeline.discover();
   await Promise.all(pipeline.startQueued());
+  const timing = clocks.get(pipeline);
+  if (!timing) return;
+  for (let i = 0; i < 400 && timing.store.inState("awaiting_ci").length; i++) {
+    timing.clock.t += 31_000;
+    await pipeline.followUp();
+    await pipeline.settled();
+  }
 }
 
 test("pr autonomy: claims the issue, builds, reviews and opens a PR for a human", async () => {
@@ -200,15 +213,8 @@ test("no CI reported within the grace period blocks an automatic merge", async (
     config.repos[REPO] = { autonomy: "merge", checks: ["make test"] };
   });
   github.ci = "none";
-  const realNow = Date.now;
-  let fake = realNow();
-  Date.now = () => (fake += 60_000);
-  try {
-    github.add(OWNER, NAME, 20, "Change", ["isobot:ready"]);
-    await cycle(pipeline);
-  } finally {
-    Date.now = realNow;
-  }
+  github.add(OWNER, NAME, 20, "Change", ["isobot:ready"]);
+  await cycle(pipeline);
   assert.equal(github.merged.length, 0);
   assert.match(github.commentsFor(OWNER, NAME, 20).at(-1)!, /no GitHub CI reported/);
 });
@@ -744,7 +750,7 @@ test("the PR summary describes the change, not the last fix round", async () => 
 function restarted(t: ReturnType<typeof setup>) {
   return new Pipeline({
     config: t.config, env: { home: "/tmp/isobot-test" }, store: t.store, github: t.github, builder: t.builder,
-    notifier: new Notifier(), repo: () => t.repo, sleep: async () => {},
+    notifier: new Notifier(), repo: () => t.repo,
     checks: async (_cwd, commands) => {
       t.checkCalls.push(commands);
       return { configured: commands.length > 0, passed: true, results: commands.map(command => ({ command, ok: true, output: "" })) };
@@ -797,7 +803,7 @@ test("a restart during checks runs them again on the builder's work without reru
   // Stop the runner while its checks are running.
   const pipeline = new Pipeline({
     config: t.config, env: { home: "/tmp/isobot-test" }, store: t.store, github: t.github, builder: t.builder,
-    notifier: new Notifier(), repo: () => t.repo, sleep: async () => {},
+    notifier: new Notifier(), repo: () => t.repo,
     checks: async () => { pipeline.beginShutdown(); throw new Error("killed"); },
   });
   await Promise.all(pipeline.startQueued());
@@ -828,4 +834,190 @@ test("an interrupted build with no workspace left (a reboot cleared it) starts o
   assert.equal(t.builder.implementCalls, 1, "built from scratch");
   assert.deepEqual(t.builder.reviseResumed, []);
   assert.equal(t.store.get(`${REPO}#52`)!.state, "pr_open");
+});
+
+// Follow-ups: CI is checked from SQLite between cycles instead of inside the build.
+
+test("a PR waiting for CI frees its build slot, and a restarted runner picks the wait up and merges", async () => {
+  const { github, pipeline, store, config, builder, repo, clock } = setup(config => {
+    config.repos[REPO] = { autonomy: "merge", checks: ["make test"] };
+  });
+  github.ci = "pending";
+  github.add(OWNER, NAME, 40, "Change", ["isobot:ready"]);
+  await pipeline.discover();
+  await Promise.all(pipeline.startQueued());
+  const id = "codybontecou/time.md#40";
+  assert.equal(store.get(id)!.state, "awaiting_ci");
+  assert.deepEqual(pipeline.activeJobs, [], "no build slot is held while CI runs");
+  assert.deepEqual(store.followUps(id).map(f => f.kind), ["ci"]);
+  assert.ok(github.get(OWNER, NAME, 40).labels.includes("isobot:building"));
+
+  // A new runner process on the same database.
+  const restarted = new Pipeline({
+    config, env: { home: "/tmp/isobot-test" }, store, github, builder, notifier: new Notifier(), repo: () => repo,
+    checks: async () => ({ configured: true, passed: true, results: [] }), now: () => new Date(clock.t),
+  });
+  clock.t += 31_000;
+  await restarted.followUp();
+  await restarted.settled();
+  assert.equal(store.get(id)!.state, "awaiting_ci", "still pending: waits on");
+  github.ci = "success";
+  clock.t += 31_000;
+  await restarted.followUp();
+  await restarted.settled();
+  assert.deepEqual(github.merged, [100]);
+  assert.equal(store.get(id)!.state, "merged");
+  assert.deepEqual(store.followUps(id), []);
+  assert.ok(!github.get(OWNER, NAME, 40).labels.includes("isobot:building"));
+});
+
+test("CI still pending after 90 minutes leaves the merge to a human", async () => {
+  const { github, pipeline, store } = setup(config => {
+    config.repos[REPO] = { autonomy: "merge", checks: ["make test"] };
+  });
+  github.ci = "pending";
+  github.add(OWNER, NAME, 41, "Change", ["isobot:ready"]);
+  await cycle(pipeline);
+  assert.equal(github.merged.length, 0);
+  assert.equal(store.get("codybontecou/time.md#41")!.state, "pr_open");
+  assert.match(github.commentsFor(OWNER, NAME, 41).at(-1)!, /GitHub CI is still pending after 90 minutes/);
+});
+
+test("🧹 on a PR waiting for CI stops it and drops the follow-up", async () => {
+  const { github, pipeline, store } = setup(config => {
+    config.repos[REPO] = { autonomy: "merge", checks: ["make test"] };
+  });
+  github.ci = "pending";
+  github.add(OWNER, NAME, 42, "Change", ["isobot:ready"]);
+  await pipeline.discover();
+  await Promise.all(pipeline.startQueued());
+  await github.addLabels(OWNER, NAME, 42, ["isobot:cleanup"]);
+  await pipeline.cleanUp();
+  assert.equal(store.get("codybontecou/time.md#42")!.state, "stopped");
+  assert.deepEqual(store.followUps("codybontecou/time.md#42"), []);
+});
+
+// Dependencies: "Blocked by #n" claims the issue but builds it only once #n is closed.
+
+test("an issue blocked by an open issue is claimed, waits, and builds once the blocker closes", async () => {
+  const { github, pipeline, store, builder, clock } = setup();
+  github.add(OWNER, NAME, 50, "Base work", []);
+  github.add(OWNER, NAME, 51, "Follow-on", ["isobot:ready"], "Do the next thing\n\nBlocked by #50");
+  await cycle(pipeline);
+  const id = "codybontecou/time.md#51";
+  assert.equal(store.get(id)!.state, "blocked");
+  assert.equal(builder.implementCalls, 0);
+  assert.match(github.commentsFor(OWNER, NAME, 51).at(-1)!, /Waiting on #50/);
+  assert.ok(github.get(OWNER, NAME, 51).labels.includes("isobot:building"), "claimed while it waits");
+
+  clock.t += 3 * 60_000;
+  await pipeline.followUp();
+  assert.equal(store.get(id)!.state, "blocked", "still open: still waiting");
+
+  github.get(OWNER, NAME, 50).state = "closed";
+  clock.t += 3 * 60_000;
+  await pipeline.followUp();
+  assert.equal(store.get(id)!.state, "queued");
+  await Promise.all(pipeline.startQueued());
+  assert.equal(builder.implementCalls, 1);
+  assert.equal(store.get(id)!.state, "pr_open");
+});
+
+test("a blocked job stops when its issue gets the stop label, and re-approving it while blocked says so", async () => {
+  const { github, pipeline, store, clock } = setup();
+  github.add(OWNER, NAME, 52, "Base", []);
+  github.add(OWNER, NAME, 53, "Next", ["isobot:ready"], "Depends on: #52");
+  await cycle(pipeline);
+  await github.addLabels(OWNER, NAME, 53, ["isobot:ready"]);
+  await pipeline.discover();
+  assert.match(github.commentsFor(OWNER, NAME, 53).at(-1)!, /already on this \(blocked\)/);
+  await github.addLabels(OWNER, NAME, 53, ["isobot:stop"]);
+  clock.t += 3 * 60_000;
+  await pipeline.followUp();
+  assert.equal(store.get("codybontecou/time.md#53")!.state, "stopped");
+  assert.deepEqual(store.followUps("codybontecou/time.md#53"), []);
+});
+
+test("blocker lines name issues by number, repo and URL, and ignore other mentions", () => {
+  const body = [
+    "Fixes the export. See #3 for context.",
+    "Blocked by #12 and codybontecou/health-md#7",
+    "- **Depends on** https://github.com/codybontecou/vox.md/issues/90",
+    "waits on #12",
+    "<!-- Blocked by #99 -->",
+  ].join("\n");
+  assert.deepEqual(parseBlockers(body, "CodyBontecou", "time.md").map(r => `${r.owner}/${r.repo}#${r.number}`), [
+    "codybontecou/time.md#12", "codybontecou/health-md#7", "codybontecou/vox.md#90",
+  ]);
+});
+
+// Claim leases: two runners never build one issue.
+
+test("an issue another live runner holds is left alone, with a comment", async () => {
+  const { github, pipeline, store, builder, clock } = setup();
+  github.add(OWNER, NAME, 60, "Change", ["isobot:building", "isobot:ready"]);
+  github.addComment(OWNER, NAME, 60, `🤖 isobot picked this up\n\n${leaseMarker("mini", new Date(clock.t + 30 * 60_000))}`);
+  await cycle(pipeline);
+  assert.equal(store.get("codybontecou/time.md#60"), null);
+  assert.equal(builder.implementCalls, 0);
+  assert.ok(!github.get(OWNER, NAME, 60).labels.includes("isobot:ready"));
+  assert.match(github.commentsFor(OWNER, NAME, 60).at(-1)!, /runner `mini` is already working on this/);
+});
+
+test("a lapsed lease (its runner died) or one written by someone else doesn't block a claim", async () => {
+  const { github, pipeline, builder, clock } = setup();
+  github.add(OWNER, NAME, 61, "Change", ["isobot:building", "isobot:ready"]);
+  github.addComment(OWNER, NAME, 61, leaseMarker("mini", new Date(clock.t - 60_000)));
+  github.addComment(OWNER, NAME, 61, leaseMarker("fake", new Date(clock.t + 30 * 60_000)), "stranger");
+  await cycle(pipeline);
+  assert.equal(builder.implementCalls, 1);
+});
+
+test("two runners claiming the same approval at once: the earlier claim wins and the other backs off", async () => {
+  const { github, pipeline, store, builder, clock } = setup();
+  github.add(OWNER, NAME, 62, "Change", ["isobot:ready"]);
+  const post = github.comment.bind(github);
+  github.comment = async (owner, repo, number, body) => {
+    // The other runner's claim lands just before ours.
+    if (body.includes("isobot:lease")) github.addComment(owner, repo, number, leaseMarker("mini", new Date(clock.t + 45 * 60_000)));
+    return post(owner, repo, number, body);
+  };
+  await cycle(pipeline);
+  assert.equal(store.get("codybontecou/time.md#62"), null, "the local job is forgotten");
+  assert.equal(builder.implementCalls, 0);
+});
+
+test("a runner renews its lease while a job waits, so the claim never lapses under it", async () => {
+  const { github, pipeline, clock } = setup(config => {
+    config.repos[REPO] = { autonomy: "merge", checks: ["make test"] };
+  });
+  github.ci = "pending";
+  github.add(OWNER, NAME, 63, "Change", ["isobot:ready"]);
+  await pipeline.discover();
+  await Promise.all(pipeline.startQueued());
+  const until = () => /until=([^ ]+) -->/.exec(github.comments.find(c => c.key.endsWith("#63") && c.body.includes("isobot:lease"))!.body)![1];
+  const first = until();
+  clock.t += 10 * 60_000;
+  await pipeline.followUp();
+  assert.equal(until(), first, "plenty of time left: no renewal");
+  clock.t += 20 * 60_000;
+  await pipeline.followUp();
+  assert.ok(until() > first, "renewed");
+});
+
+// Typed events.
+
+test("a build records typed events for checks, review, PR, CI and the gate", async () => {
+  const { github, pipeline, store } = setup(config => {
+    config.repos[REPO] = { autonomy: "merge", checks: ["make test"] };
+  });
+  github.add(OWNER, NAME, 70, "Change", ["isobot:ready"]);
+  await cycle(pipeline);
+  const data = store.eventsSince(0, { jobId: "codybontecou/time.md#70" }).flatMap(e => e.data ? [e.data] : []);
+  const types = data.map(d => d.type);
+  for (const type of ["claim", "state", "builder", "checks", "review", "pr", "ci", "gate"]) assert.ok(types.includes(type as never), `has ${type}`);
+  const review = data.find(d => d.type === "review");
+  assert.deepEqual(review, { type: "review", v: 1, round: 1, verdict: "approve", confidence: 0.95, risk: "low" });
+  assert.deepEqual(data.find(d => d.type === "gate"), { type: "gate", v: 1, merge: true, reasons: [] });
+  assert.ok(data.some(d => d.type === "state" && d.from === "awaiting_ci" && d.to === "merged"));
 });
