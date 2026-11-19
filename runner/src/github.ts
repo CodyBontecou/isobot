@@ -74,7 +74,14 @@ export interface GitHubApi {
   ciState(owner: string, repo: string, sha: string): Promise<CiState>;
   merge(owner: string, repo: string, number: number, sha: string, title: string): Promise<string>;
   ensureLabels(owner: string, repo: string, labels: Labels): Promise<void>;
+  /** The commit the site's newest successful production deploy shipped, or null when there is none. */
+  latestDeploy(owner: string, repo: string, deploy: DeploySignal): Promise<string | null>;
+  /** Whether `head` contains `base` (the same commit, or a descendant of it). */
+  contains(owner: string, repo: string, base: string, head: string): Promise<boolean>;
 }
+
+/** How a site's production deploys show up on GitHub: a workflow's push runs, or a deployment environment. */
+export type DeploySignal = { workflow: string; environment?: never } | { environment: string; workflow?: never };
 
 export class GitHub implements GitHubApi {
   private octokit: Octokit;
@@ -249,6 +256,27 @@ export class GitHub implements GitHubApi {
       runs.map(run => ({ status: run.status, conclusion: run.conclusion })),
       statuses.data.statuses.map(status => status.state),
     );
+  }
+
+  async latestDeploy(owner: string, repo: string, deploy: DeploySignal): Promise<string | null> {
+    if (deploy.workflow) {
+      const { data } = await this.octokit.actions.listWorkflowRuns({
+        owner, repo, workflow_id: deploy.workflow, branch: await this.defaultBranch(owner, repo), event: "push", status: "success", per_page: 1,
+      });
+      return data.workflow_runs[0]?.head_sha ?? null;
+    }
+    const { data } = await this.octokit.repos.listDeployments({ owner, repo, environment: deploy.environment, per_page: 20 });
+    for (const deployment of data) {
+      const { data: statuses } = await this.octokit.repos.listDeploymentStatuses({ owner, repo, deployment_id: deployment.id, per_page: 1 });
+      if (statuses[0]?.state === "success") return deployment.sha;
+    }
+    return null;
+  }
+
+  async contains(owner: string, repo: string, base: string, head: string): Promise<boolean> {
+    if (base === head) return true;
+    const { data } = await this.octokit.repos.compareCommitsWithBasehead({ owner, repo, basehead: `${base}...${head}`, per_page: 1 });
+    return data.status === "identical" || data.status === "ahead";
   }
 
   async merge(owner: string, repo: string, number: number, sha: string, title: string): Promise<string> {

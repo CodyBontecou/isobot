@@ -414,10 +414,13 @@ content train (`runner/src/content.ts`). Health.md (healthmd.app), GitSync.md (g
      conventions (`content.notes`), and a `Published URLs:` line at the end of the summary.
    Content merges with `content.autonomy` (default `merge`) and never rides the release train.
    At most `content.maxConcurrentJobs` (default 1) content builds run at once, so app work isn't held up.
-4. **Publish.** Once every published URL answers 200 on the live site, the site's `indexNow`
+4. **Publish.** Once the site's newest successful production deploy contains the merge commit
+   (`content.deploy`: the push runs of a workflow such as `website-publish.yml`, or a GitHub
+   deployment environment such as Vercel's `Production`), and every published URL answers 200, the site's `indexNow`
    command runs with the URLs (or OpenSEO's IndexNow when there is none), the OpenSEO research
-   log gets one line, and the job's thread hears about it. Pages still not live 3 hours after the
-   merge are reported instead.
+   log gets one line, and the job's thread hears about it. A merge no deploy has shipped, or pages not
+   live, 3 hours after the merge are reported instead. Checking the deploy matters for refreshes: an
+   existing page answers 200 before its new text is out.
 5. **Weekly report.** On `content.reportWeekday` (Monday by default), each site's Search Console
    picture goes to the staff channel: clicks and impressions week over week, movers, how the week's
    pages are doing, refresh candidates and anything broken. It uses only free tools.
