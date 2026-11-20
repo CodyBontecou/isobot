@@ -624,6 +624,32 @@ test("replying retry to a failed job builds it again with the notes, without tou
   assert.doesNotMatch(github.get(OWNER, NAME, 44).labels.join(), /isobot:failed/);
 });
 
+test("retry still works after more than ten other jobs finished since, and quiet jobs' comments aren't read", async () => {
+  const discord = new FakeDiscord();
+  const { github, pipeline, store, repo } = setup(() => {}, [], discord);
+  repo.changes = false;
+  github.add(OWNER, NAME, 44, "Add CSV export", ["isobot:ready"]);
+  await cycle(pipeline);
+  assert.equal(store.get("codybontecou/time.md#44")!.state, "failed");
+  // A release train ships a batch at once: all of these finished after #44.
+  for (let n = 200; n < 212; n++) {
+    github.add(OWNER, NAME, n, `Shipped ${n}`, []);
+    store.enqueue(OWNER, NAME, n, `Shipped ${n}`);
+    store.update(`codybontecou/time.md#${n}`, { state: "shipped" });
+  }
+  await pipeline.followUp();
+  github.commentReads.length = 0;
+
+  github.addComment(OWNER, NAME, 44, reply("retry"));
+  await pipeline.followUp();
+  assert.ok(github.get(OWNER, NAME, 44).labels.includes("isobot:ready"));
+  assert.deepEqual(github.commentReads.filter(key => !key.endsWith("#44")), [], "jobs without new comments aren't read");
+
+  github.commentReads.length = 0;
+  await pipeline.followUp();
+  assert.deepEqual(github.commentReads.filter(key => /#2\d\d$/.test(key)), []);
+});
+
 test("a retry while the job is still open, or with the stop label, changes nothing", async () => {
   const { github, pipeline, store } = setup();
   github.add(OWNER, NAME, 45, "Add CSV export", ["isobot:ready"]);

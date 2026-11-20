@@ -101,6 +101,8 @@ const CI_POLL_MS = 30_000;
 const BLOCKED_POLL_MS = 2 * 60_000;
 /** A follow-up that keeps erroring is retried this often, and gives up (fails the job) after this many tries. */
 const FOLLOW_UP_RETRY_MS = 5 * 60_000;
+/** How long after a job finishes a reply on it ("retry", or a note) is still answered. */
+const FINISHED_NOTES_HOURS = 48;
 const FOLLOW_UP_MAX_ERRORS = 5;
 /** A claim lease lasts this long and is renewed when less than LEASE_RENEW_MS is left, while the job is ours. */
 const LEASE_MS = 45 * 60_000;
@@ -507,6 +509,7 @@ export class Pipeline {
         store.event(job.id, "devices", lease.describe());
       }
       const devices: JobDevices | undefined = lease ?? undefined;
+      const timeoutMinutes = job.kind === "content" ? this.deps.config.builder.contentTimeoutMinutes : undefined;
       const notes = await this.takeNotes(job);
       // Everything the owner said since approving goes into the task, so the reviewer judges against it too.
       let task = withNotes(source.task, notes.all);
@@ -535,7 +538,7 @@ export class Pipeline {
         mainSummary = resume.main;
         if (resume.stage === "builder") {
           await this.feed(job, { phase: "implementing" }, "♻️ The runner restarted mid-build. The builder picks up where it left off.");
-          run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback: "", devices, media: builderMedia, resumed: true }));
+          run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback: "", devices, media: builderMedia, timeoutMinutes, resumed: true }));
         } else {
           await this.deps.notifier.say(job, "♻️ The runner restarted mid-build. Checks and review run again on the builder's work so far.");
           run = { ok: true, sessionId: sessionId(), summary: resume.summary };
@@ -552,7 +555,7 @@ export class Pipeline {
         await this.feed(job, { phase: "revising", notes: this.noteCount(job, notes.fresh.length) }, this.ackNotes(notes.fresh));
         noteRounds++;
         run = await builderStep(ids => builder.revise({
-          cwd: workspace!, ...ids, task, devices, media: builderMedia,
+          cwd: workspace!, ...ids, task, devices, media: builderMedia, timeoutMinutes,
           feedback: notes.fresh.length ? noteFeedback(notes.fresh) : "Re-read the task and the owner's follow-up notes, and make sure this branch satisfies all of them.",
         }), job.sessionId);
         store.event(job.id, "revised", run.summary, { type: "builder", v: 1, round: "revise PR", ok: run.ok });
@@ -560,7 +563,7 @@ export class Pipeline {
         baseSha = mainSha;
         workspace = await repo.createWorkspace(branch, baseSha);
         await this.feed(job, { phase: "implementing" });
-        run = await builderStep(ids => builder.implement({ cwd: workspace!, task, devices, media: builderMedia, sessionId: ids.newSessionId }), null);
+        run = await builderStep(ids => builder.implement({ cwd: workspace!, task, devices, media: builderMedia, timeoutMinutes, sessionId: ids.newSessionId }), null);
         store.event(job.id, "implemented", run.summary, { type: "builder", v: 1, round: "implement", ok: run.ok });
       }
       const commit = async (message: string) => {
@@ -597,7 +600,7 @@ export class Pipeline {
             noteRounds++;
             task = withNotes(source.task, late.all);
             await this.feed(job, { phase: "revising", notes: this.noteCount(job, late.fresh.length) }, this.ackNotes(late.fresh));
-            run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback: noteFeedback(late.fresh), devices, media: builderMedia }));
+            run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback: noteFeedback(late.fresh), devices, media: builderMedia, timeoutMinutes }));
             laterRounds.push({ label: "Owner note", summary: run.summary });
             this.builderEvent(job, laterRounds.at(-1)!.label, run);
             sha = await commit(`Apply owner feedback for #${issue.number}`);
@@ -608,7 +611,7 @@ export class Pipeline {
         if (!checks.passed && fixRounds < this.deps.config.builder.maxFixRounds) {
           fixRounds++;
           await this.feed(job, { phase: "fixing", fixRounds });
-          run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback: failureFeedback(checks), devices, media: builderMedia }));
+          run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback: failureFeedback(checks), devices, media: builderMedia, timeoutMinutes }));
           laterRounds.push({ label: `Check fix ${fixRounds}`, summary: run.summary });
             this.builderEvent(job, laterRounds.at(-1)!.label, run);
           sha = await commit(`Fix checks for #${issue.number}`);
@@ -638,7 +641,7 @@ export class Pipeline {
           reviewRounds++;
           await this.feed(job, { phase: "addressing", reviewRounds });
           const feedback = reviewFeedback(review, shortfalls);
-          run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback, devices, media: builderMedia }));
+          run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback, devices, media: builderMedia, timeoutMinutes }));
           laterRounds.push({ label: `Review round ${reviewRounds}`, summary: run.summary });
             this.builderEvent(job, laterRounds.at(-1)!.label, run);
           previous = { confidence: review.confidence, concerns: review.concerns, blockers: review.blockers ?? [], response: run.summary };
@@ -1077,9 +1080,40 @@ export class Pipeline {
     }
   }
 
-  /** A reply on a finished job can't change it: "retry" builds it again, anything else gets told what would. */
+  /**
+   * A reply on a finished job can't change it: "retry" builds it again, anything else gets told what would.
+   * Every job that finished in the last 48 hours is covered, however many there are (a release train finishes
+   * a batch at once): one repository-wide comment listing per poll finds the issues with new comments, and
+   * only those have their notes read.
+   */
   private async answerFinished(): Promise<void> {
-    for (const job of this.deps.store.recentlyFinished(48)) {
+    const byRepo = new Map<string, Job[]>();
+    for (const job of this.deps.store.recentlyFinished(FINISHED_NOTES_HOURS, 1000)) {
+      const key = `${job.owner}/${job.repo}`.toLowerCase();
+      byRepo.set(key, [...(byRepo.get(key) ?? []), job]);
+    }
+    for (const [key, jobs] of byRepo) {
+      const cursorKey = `finished-notes-since:${key}`;
+      const checkedAt = this.now().getTime();
+      const since = this.deps.store.cursor(cursorKey) ?? new Date(checkedAt - FINISHED_NOTES_HOURS * 3_600_000).toISOString();
+      let commented: Set<number>;
+      try {
+        commented = await this.deps.github.commentedSince(jobs[0].owner, jobs[0].repo, since);
+      } catch (error) {
+        console.warn(`[notes] ${key}: ${(error as Error).message}`);
+        continue;
+      }
+      const ok = await this.answerFinishedJobs(jobs.filter(job => commented.has(job.number)));
+      // A minute of overlap for clock skew: notes already acted on are skipped by each job's own cursor.
+      // When a job failed, the window stays put so its comment is looked at again on the next poll.
+      if (ok) this.deps.store.setCursor(cursorKey, new Date(checkedAt - 60_000).toISOString());
+    }
+  }
+
+  /** answerFinished for the jobs with new comments; false when one of them couldn't be handled. */
+  private async answerFinishedJobs(jobs: Job[]): Promise<boolean> {
+    let ok = true;
+    for (const job of jobs) {
       try {
         const { fresh } = await this.takeNotes(job);
         if (!fresh.length) continue;
@@ -1094,9 +1128,11 @@ export class Pipeline {
           ? `💬 Got your note. This job failed, so nothing is running: ${again}.`
           : `💬 Got your note, but this job is already ${job.state.replace("_", " ")}, so there's no open PR to revise. To change more, ${again}.`);
       } catch (error) {
+        ok = false;
         console.warn(`[notes] ${job.id}: ${(error as Error).message}`);
       }
     }
+    return ok;
   }
 
   /** A PR that merged before the build got to it (see build()): record the merge and release as usual. */

@@ -293,3 +293,22 @@ test("executor must be local or cloudflare", () => {
   config.repos[REPO] = { ...config.repos[REPO], content: { ...SITE, executor: "aws" as never } };
   assert.throws(() => validateConfig(config), /content: executor must be "local" or "cloudflare"/);
 });
+
+test("content builds get builder.contentTimeoutMinutes; issue builds keep builder.timeoutMinutes", async () => {
+  const { github, pipeline, builder, config } = setup();
+  config.builder.contentTimeoutMinutes = 120;
+  github.add(OWNER, NAME, 5, "Export Time data to CSV", ["isobot:content", "isobot:ready", "isobot:auto"], "Write the guide.");
+  github.add(OWNER, NAME, 6, "Add CSV export", ["isobot:ready"]);
+  await pipeline.discover();
+  await Promise.all(pipeline.startQueued());
+  assert.equal(builder.implementCalls, 2);
+  assert.deepEqual([...builder.timeouts].sort(), [120, undefined]);
+});
+
+test("builder.contentTimeoutMinutes is validated", () => {
+  const config = testConfig();
+  config.builder.contentTimeoutMinutes = 0;
+  assert.throws(() => validateConfig(config), /builder\.contentTimeoutMinutes must be 1-240/);
+  config.builder.contentTimeoutMinutes = 120;
+  assert.doesNotThrow(() => validateConfig(config));
+});

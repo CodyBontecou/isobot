@@ -6,6 +6,7 @@
   "builder": {
     "kind": "claude",
     "timeoutMinutes": 60,
+    "contentTimeoutMinutes": 120,
     "maxTurns": 300,
     "maxFixRounds": 3,
     "maxReviewRounds": 5,

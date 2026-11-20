@@ -212,6 +212,8 @@ export interface RunnerConfig {
     kind: "claude";
     model?: string;
     timeoutMinutes: number;
+    /** Limit for content-train jobs, which translate the new page into every site locale; defaults to timeoutMinutes. */
+    contentTimeoutMinutes?: number;
     maxTurns?: number;
     maxFixRounds: number;
     maxReviewRounds: number;
@@ -334,6 +336,8 @@ export function validateConfig(config: RunnerConfig): void {
   if (!(config.triageMinutes >= 5)) fail("triageMinutes must be at least 5");
   if (!(config.maxConcurrentJobs >= 1 && config.maxConcurrentJobs <= 8)) fail("maxConcurrentJobs must be 1-8");
   if (config.builder?.kind !== "claude") fail("builder.kind must be \"claude\"");
+  const contentTimeout = config.builder.contentTimeoutMinutes;
+  if (contentTimeout !== undefined && !(contentTimeout >= 1 && contentTimeout <= 240)) fail("builder.contentTimeoutMinutes must be 1-240");
   // Added after the others; older configs get the default.
   if (config.labels && !config.labels.cleanup) config.labels.cleanup = "isobot:cleanup";
   if (config.labels && !config.labels.content) config.labels.content = "isobot:content";
