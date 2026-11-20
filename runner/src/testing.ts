@@ -30,7 +30,9 @@ export const MP4 = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from("fty
 /** In-memory GitHub for tests. */
 export class FakeGitHub implements GitHubApi {
   issues = new Map<string, Issue>();
-  comments: { id: number; key: string; body: string; author?: string }[] = [];
+  comments: { id: number; key: string; body: string; author?: string; at: string }[] = [];
+  /** Calls to issueComments, by `owner/repo#n`. */
+  commentReads: string[] = [];
   private nextComment = 1;
   pulls = new Map<number, PullRequest & { owner: string; repo: string; branch: string; body: string }>();
   merged: number[] = [];
@@ -59,7 +61,7 @@ export class FakeGitHub implements GitHubApi {
 
   /** A comment by someone other than the runner (the owner by default), as GitHub would list it. */
   addComment(owner: string, repo: string, number: number, body: string, author = this.login): void {
-    this.comments.push({ id: this.nextComment++, key: `${owner}/${repo}#${number}`, body, author });
+    this.comments.push({ id: this.nextComment++, key: `${owner}/${repo}#${number}`, body, author, at: new Date().toISOString() });
   }
 
   async viewer(): Promise<string> { return this.login; }
@@ -70,7 +72,12 @@ export class FakeGitHub implements GitHubApi {
   }
   async isPublic(owner: string, repo: string): Promise<boolean> { return this.publicRepos.has(`${owner}/${repo}`); }
   async issueComments(owner: string, repo: string, number: number): Promise<IssueComment[]> {
+    this.commentReads.push(`${owner}/${repo}#${number}`);
     return this.comments.filter(c => c.key === `${owner}/${repo}#${number}`).map(c => ({ id: c.id, author: c.author ?? this.login, body: c.body }));
+  }
+  async commentedSince(owner: string, repo: string, since: string): Promise<Set<number>> {
+    const prefix = `${owner}/${repo}#`.toLowerCase();
+    return new Set(this.comments.filter(c => c.key.toLowerCase().startsWith(prefix) && c.at >= since).map(c => Number(c.key.split("#")[1])));
   }
   async defaultBranch(): Promise<string> { return "main"; }
   async issuesWithLabel(owner: string, repo: string, label: string): Promise<Issue[]> {
@@ -90,13 +97,14 @@ export class FakeGitHub implements GitHubApi {
   }
   async comment(owner: string, repo: string, number: number, body: string): Promise<number> {
     const id = this.nextComment++;
-    this.comments.push({ id, key: `${owner}/${repo}#${number}`, body: `${body}\n\n${RUNNER_MARKER}` });
+    this.comments.push({ id, key: `${owner}/${repo}#${number}`, body: `${body}\n\n${RUNNER_MARKER}`, at: new Date().toISOString() });
     return id;
   }
   async updateComment(_owner: string, _repo: string, commentId: number, body: string): Promise<void> {
     const comment = this.comments.find(c => c.id === commentId);
     if (!comment) throw new Error("no comment");
     comment.body = `${body}\n\n${RUNNER_MARKER}`;
+    comment.at = new Date().toISOString();
   }
   closedAs = new Map<string, string>();
   async closeIssue(owner: string, repo: string, number: number, reason = "completed"): Promise<void> {
@@ -225,8 +233,11 @@ export class FakeBuilder implements Builder {
   reviewMedia: (string[] | undefined)[] = [];
   reviewPrevious: (PreviousReview | undefined)[] = [];
 
-  async implement(input: { cwd: string; task: string; devices?: JobDevices; media?: string; sessionId?: string }): Promise<AgentRun> {
+  /** The timeoutMinutes override each implement/revise call got (undefined: builder.timeoutMinutes). */
+  timeouts: (number | undefined)[] = [];
+  async implement(input: { cwd: string; task: string; devices?: JobDevices; media?: string; sessionId?: string; timeoutMinutes?: number }): Promise<AgentRun> {
     this.implementCalls++;
+    this.timeouts.push(input.timeoutMinutes);
     this.implementSessions.push(input.sessionId);
     this.during?.();
     this.deviceEnvs.push(input.devices?.env);
@@ -238,8 +249,9 @@ export class FakeBuilder implements Builder {
   reviseResumed: boolean[] = [];
   /** Runs before implement/revise return, e.g. to simulate a shutdown mid-run. */
   during?: () => void;
-  async revise(input: { feedback: string; sessionId: string | null; devices?: JobDevices; resumed?: boolean }): Promise<AgentRun> {
+  async revise(input: { feedback: string; sessionId: string | null; devices?: JobDevices; resumed?: boolean; timeoutMinutes?: number }): Promise<AgentRun> {
     this.during?.();
+    this.timeouts.push(input.timeoutMinutes);
     this.reviseResumed.push(Boolean(input.resumed));
     this.deviceEnvs.push(input.devices?.env);
     this.reviseFeedback.push(input.feedback);

@@ -56,6 +56,8 @@ export interface GitHubApi {
   viewer(): Promise<string>;
   defaultBranch(owner: string, repo: string): Promise<string>;
   issueComments(owner: string, repo: string, number: number): Promise<IssueComment[]>;
+  /** Numbers of the issues and PRs in the repository with a comment created or edited at or after `since` (ISO time). */
+  commentedSince(owner: string, repo: string, since: string): Promise<Set<number>>;
   /** Who most recently added `label` to the issue, or null if no such event exists. */
   labeledBy(owner: string, repo: string, number: number, label: string): Promise<string | null>;
   isPublic(owner: string, repo: string): Promise<boolean>;
@@ -138,6 +140,11 @@ export class GitHub implements GitHubApi {
   async issueComments(owner: string, repo: string, number: number): Promise<IssueComment[]> {
     const data = await this.octokit.paginate(this.octokit.issues.listComments, { owner, repo, issue_number: number, per_page: 100 });
     return data.map(comment => ({ id: comment.id, author: comment.user?.login ?? "unknown", body: comment.body ?? "" }));
+  }
+
+  async commentedSince(owner: string, repo: string, since: string): Promise<Set<number>> {
+    const data = await this.octokit.paginate(this.octokit.issues.listCommentsForRepo, { owner, repo, since, sort: "updated", direction: "asc", per_page: 100 });
+    return new Set(data.map(comment => Number(comment.issue_url.split("/").pop())).filter(Number.isInteger));
   }
 
   async defaultBranch(owner: string, repo: string): Promise<string> {

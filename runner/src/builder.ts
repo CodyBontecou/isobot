@@ -90,7 +90,7 @@ export interface JobDevices {
 export interface Builder {
   /** `media` is the job's $ISOBOT_MEDIA folder for screenshots and recordings of visible changes. */
   /** `sessionId` names the new session up front, so a runner restart can resume it (see Pipeline.recover). */
-  implement(input: { cwd: string; task: string; devices?: JobDevices; media?: string; sessionId?: string }): Promise<AgentRun>;
+  implement(input: { cwd: string; task: string; devices?: JobDevices; media?: string; sessionId?: string; timeoutMinutes?: number }): Promise<AgentRun>;
   /**
    * Continues `sessionId`, or starts a session named `newSessionId` when there is none (or it's gone).
    * `resumed`: the runner restarted mid-run; carry on instead of addressing `feedback`.
@@ -122,6 +122,8 @@ export interface ReviseInput {
   devices?: JobDevices;
   media?: string;
   resumed?: boolean;
+  /** Overrides builder.timeoutMinutes for this run (content jobs get their own limit). */
+  timeoutMinutes?: number;
 }
 
 /** To a builder session the runner's restart cut off. */
@@ -421,11 +423,11 @@ export class ClaudeCodeBuilder implements Builder {
     return ["--permission-mode", "bypassPermissions", "--append-system-prompt", `${BUILDER_RULES}\n${toolRules(devices, media)}`, "--mcp-config", mcpConfig];
   }
 
-  async implement(input: { cwd: string; task: string; devices?: JobDevices; media?: string; sessionId?: string }): Promise<AgentRun> {
+  async implement(input: { cwd: string; task: string; devices?: JobDevices; media?: string; sessionId?: string; timeoutMinutes?: number }): Promise<AgentRun> {
     const result = await this.call(input.cwd, input.task, [
       ...this.builderArgs(input.cwd, input.devices, input.media),
       ...(input.sessionId ? ["--session-id", input.sessionId] : []),
-    ], this.config.timeoutMinutes * 60_000, mediaEnv(input.media));
+    ], (input.timeoutMinutes ?? this.config.timeoutMinutes) * 60_000, mediaEnv(input.media));
     return this.agentRun(result);
   }
 
@@ -437,7 +439,7 @@ export class ClaudeCodeBuilder implements Builder {
         ...this.builderArgs(input.cwd, input.devices, input.media),
         // Resuming keeps the session's id, so the one saved before the run stays right.
         ...(input.sessionId ? ["--resume", input.sessionId] : input.newSessionId ? ["--session-id", input.newSessionId] : []),
-      ], this.config.timeoutMinutes * 60_000, mediaEnv(input.media));
+      ], (input.timeoutMinutes ?? this.config.timeoutMinutes) * 60_000, mediaEnv(input.media));
     } catch (error) {
       // A revision of an older PR can outlive its session (cleaned up, or a different machine): start fresh.
       if (input.sessionId && /no conversation found/i.test((error as Error).message)) return this.revise({ ...input, sessionId: null });
