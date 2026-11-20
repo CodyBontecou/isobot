@@ -6,7 +6,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { ClaudeCodeBuilder } from "./builder.js";
 import { CloudRepo, HttpSandboxApi, remoteChecks, remoteExec, runRemote, sandboxFor, sandboxName, type SandboxApi, type TaskRequest, type TaskStatus } from "./cloud.js";
-import { TransientError } from "./errors.js";
+import { isTransient, TransientError } from "./errors.js";
 import { Repo } from "./git.js";
 import { testConfig } from "./testing.js";
 
@@ -23,6 +23,8 @@ class LocalSandbox implements SandboxApi {
   tasks = new Map<string, TaskStatus>();
   argvs: string[][] = [];
   stuck = new Set<string>();
+  /** stderr for the next `git clone` calls to fail with, one per call. */
+  cloneFailures: string[] = [];
   private n = 0;
 
   map(p: string): string { return p.startsWith("/workspace/") || p.startsWith("/isobot/") ? path.join(this.root, p) : p; }
@@ -38,6 +40,10 @@ class LocalSandbox implements SandboxApi {
     const id = `00000000-0000-0000-0000-${String(++this.n).padStart(12, "0")}`;
     this.argvs.push(task.argv);
     if (this.stuck.has(task.argv[0])) { this.tasks.set(id, { state: "running" }); return { id }; }
+    if (task.argv[0] === "git" && task.argv.includes("clone") && this.cloneFailures.length) {
+      this.tasks.set(id, { state: "exited", exitCode: 128, stdout: "", stderr: this.cloneFailures.shift()! });
+      return { id };
+    }
     const cwd = this.map(task.cwd ?? "/workspace");
     mkdirSync(cwd, { recursive: true });
     const [cmd, ...args] = task.argv.map(a => this.map(a));
@@ -136,6 +142,36 @@ test("a sandbox that's still up at the right commit is kept with its dependencie
   await cloud.commitPending(dir, "x");
   await cloud.createWorkspace(branch, main);
   assert.ok(!existsSync(path.join(sandbox.map(dir), "node_modules.marker")), "recreated when HEAD moved");
+});
+
+const THROTTLED = "fatal: unable to access 'https://github.com/codybontecou/site.git/': The requested URL returned error: 429";
+
+test("a clone GitHub throttles is retried in place after a wait", async () => {
+  const { local, sandbox } = fixture();
+  const waits: number[] = [];
+  const cloud = new CloudRepo(local, sandbox, async ms => { waits.push(ms); });
+  const main = await cloud.sync("main");
+  sandbox.cloneFailures.push(THROTTLED, THROTTLED);
+  const dir = await cloud.createWorkspace("isobot/12-x", main);
+  assert.equal(readFileSync(path.join(sandbox.map(dir), "README.md"), "utf8"), "hello\n");
+  assert.deepEqual(waits.filter(ms => ms >= 30_000), [30_000, 120_000]);
+});
+
+test("a clone still throttled after the retries fails as transient, so the job is requeued rather than failed", async () => {
+  const { sandbox, cloud } = fixture();
+  const main = await cloud.sync("main");
+  sandbox.cloneFailures.push(THROTTLED, THROTTLED, THROTTLED);
+  await assert.rejects(cloud.createWorkspace("isobot/13-x", main), (error: Error) => isTransient(error) && /429/.test(error.message));
+});
+
+test("a clone that fails for good (not found) isn't retried", async () => {
+  const { local, sandbox } = fixture();
+  const waits: number[] = [];
+  const cloud = new CloudRepo(local, sandbox, async ms => { waits.push(ms); });
+  const main = await cloud.sync("main");
+  sandbox.cloneFailures.push("remote: Repository not found.\nfatal: repository 'https://github.com/codybontecou/site.git/' not found");
+  await assert.rejects(cloud.createWorkspace("isobot/14-x", main), (error: Error) => !isTransient(error));
+  assert.deepEqual(waits.filter(ms => ms >= 30_000), []);
 });
 
 test("interrupt stops what a restart left running in the sandbox", async () => {

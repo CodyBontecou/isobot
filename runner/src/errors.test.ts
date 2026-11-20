@@ -16,6 +16,11 @@ test("transient detection covers GitHub statuses and network errors", () => {
   assert.ok(isTransient(Object.assign(new Error("x"), { status: 429 })));
   assert.ok(!isTransient(Object.assign(new Error("Not Found"), { status: 404 })));
   assert.ok(isTransient(new Error("git fetch failed: fatal: unable to access: Could not resolve host: github.com")));
+  // GitHub throttling or failing git over HTTPS (seen on the build sandbox's clones).
+  assert.ok(isTransient(new Error("git clone failed in the build sandbox: fatal: unable to access 'https://github.com/o/r.git/': The requested URL returned error: 429")));
+  assert.ok(isTransient(new Error("fatal: unable to access 'https://github.com/o/r.git/': The requested URL returned error: 503")));
+  assert.ok(!isTransient(new Error("fatal: unable to access 'https://github.com/o/r.git/': The requested URL returned error: 403")));
+  assert.ok(!isTransient(new Error("fatal: unable to access 'https://github.com/o/r.git/': The requested URL returned error: 404")));
   assert.ok(isTransient(new Error("fetch failed", { cause: new Error("ECONNRESET") })));
   assert.ok(!isTransient(new Error("the builder made no changes")));
 });
