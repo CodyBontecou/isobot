@@ -125,21 +125,24 @@ export class Notifier {
 
   /**
    * A channel-level message (runner started, triage digest, usage pause). `reactions` are added as
-   * one-click controls; only a bot can add them, so a webhook posts the text alone.
+   * one-click controls; only a bot can add them, so a webhook posts the text alone. Returns where a bot
+   * posted it (null for a webhook or a failed post).
    */
-  async discord(content: string, reactions: readonly string[] = [], { handoff = true } = {}): Promise<void> {
+  async discord(content: string, reactions: readonly string[] = [], { handoff = true } = {}): Promise<{ channelId: string; messageId: string } | null> {
     if (this.options.bot) {
       const { channelId } = this.options.bot;
       try {
         const posted = await this.bot("POST", `/channels/${channelId}/messages`, message(content)) as { id: string };
         if (handoff && this.options.handoff) this.options.handoff.add(channelId, posted.id, { kind: "message" });
         await this.react(channelId, posted.id, handoff && this.options.handoff ? [...reactions, HANDOFF] : reactions);
+        return { channelId, messageId: posted.id };
       } catch (error) {
         warn(error);
       }
     } else if (this.options.webhookUrl) {
       await this.webhook(content);
     }
+    return null;
   }
 
   /**

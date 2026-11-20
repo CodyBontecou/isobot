@@ -16,9 +16,30 @@ app that measures App Store search. Code: `runner/src/aso.ts`.
    phrases worth measuring. The runner then measures the new phrases (`keywords_import`) and the draft itself
    (`audit.option.add`) through the tracker, and posts the exact diff with those measurements to the staff channel.
 
-The ASO train never writes to App Store Connect. Listing text, and the keyword field above all, is private
+4. **Apply (on your ✅).** See [Applying a proposal](#applying-a-proposal).
+
+Only an owner's approval writes to App Store Connect. Listing text, and the keyword field above all, is private
 strategy, so it goes only to the private staff channel, never into GitHub issues: the app repositories are public.
-Name, subtitle and keyword changes take effect with the next app version; promotional text can change at any time.
+
+## Applying a proposal
+
+A proposal's last message carries ✅ and 🛑. Every 5 minutes the runner reads them; only people on the staff chat's
+allowlist (`ISOBOT_CHAT_USERS`) count.
+
+- **✅** writes the promotional text to the live version at once (and to an editable version, if one exists), because
+  it changes without review. The name, subtitle and keyword field need a new version: they wait until an App Store
+  version is in Prepare for Submission (or rejected), then go onto that version's en-US localization and the
+  editable app info, and go live with it. The staff channel hears what was written, and where.
+- **🛑** dismisses the proposal. One nobody answers expires after 14 days. A new proposal replaces an unanswered one.
+- While an approved proposal waits for a version, no new research runs, so nothing is drafted over it.
+- The release trains ship to TestFlight, so they never open an App Store version. Whoever prepares an App Store
+  release can run `aso <repo> apply` right after creating the version instead of waiting for the next poll, which
+  matters when the version is created and submitted in one step.
+- A failed write is posted once and retried on every poll. Writes go through the runner's `asc` (its App Store
+  Connect key), never through ASO Tracker, whose key can't write.
+
+Proposals also warn when the keyword field has another company's name (Apple, Obsidian, GitHub…): App Review can
+reject that under guideline 2.3.7.
 
 ## Configuration
 
@@ -34,7 +55,8 @@ Name, subtitle and keyword changes take effect with the next app version; promot
 ```
 
 Per app: `locale` (default `en-US`), `storefront` (default `us`), `notes` (brand, tone, phrases to keep) and
-`autonomy`: `off`, `report` (snapshot and report only) or `propose` (default). Proposals always keep the brand at
+`autonomy`: `off`, `report` (snapshot and report only) or `propose` (default), and `platform` (`IOS`, the default,
+or `MAC_OS`) for where an approved proposal is written. Proposals always keep the brand at
 the start of the name. A field over Apple's limit falls back to the current text.
 
 The tracker's background process runs under launchd (`~/Library/LaunchAgents/tech.isolated.aso-tracker.plist`,
@@ -47,6 +69,10 @@ if it isn't running.
 npm run runner -- aso GitSync.md snapshot            # read the board into today's snapshot
 npm run runner -- aso GitSync.md report              # post the weekly report now
 npm run runner -- aso GitSync.md research --dry-run  # draft and measure a proposal; print it, post nothing
+npm run runner -- aso GitSync.md pending             # the latest proposal and how far it got
+npm run runner -- aso GitSync.md approve             # same as ✅ (also takes a proposal posted before ✅ existed)
+npm run runner -- aso GitSync.md reject              # same as 🛑
+npm run runner -- aso GitSync.md apply               # write an approved proposal now, e.g. right after creating a version
 ```
 
 ## Apple endpoints, and running on Cloudflare

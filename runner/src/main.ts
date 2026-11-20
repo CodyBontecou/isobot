@@ -168,9 +168,20 @@ function runtime(): Runtime {
       return { ok: result.code === 0 && !result.timedOut, output: `${result.stdout}\n${result.stderr}` };
     },
   });
+  const asoDiscord = env.discordBot ? new DiscordApi(env.discordBot.token) : null;
+  let asoOwners: Promise<Set<string>> | null = null;
   const aso = new AsoTrain({
     config, store, github, notifier, repo: repoFor, tracker: asoClient(config, env.home),
     agent: input => builder.agentJson(input),
+    // Only the staff chat's allowlist may approve; a failed lookup is retried on the next poll.
+    approvals: asoDiscord ? {
+      reactors: (channelId, messageId, emoji) => asoDiscord.reactors(channelId, messageId, emoji),
+      owners: () => (asoOwners ??= chatAllowlist(asoDiscord).catch(error => { asoOwners = null; throw error; })),
+    } : undefined,
+    asc: async args => {
+      const result = await run("asc", args, { cwd: env.home, env: workerEnv(), timeoutMs: 120_000 });
+      return { ok: result.code === 0 && !result.timedOut, stdout: result.stdout, stderr: result.stderr };
+    },
   });
   return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, content, aso, secrets, handoff };
 }
@@ -239,6 +250,7 @@ function acquireLock(env: Environment): void {
 /** How often the content train looks for research, publishing and reports to do. */
 const CONTENT_EVERY_MS = 5 * 60_000;
 const ASO_EVERY_MS = 60 * 60_000;
+const ASO_POLL_MS = 5 * 60_000;
 
 /** A cycle running longer than this (release steps included) counts as hung for the external heartbeat. */
 const HUNG_CYCLE_MS = 2 * 60 * 60_000;
@@ -275,6 +287,8 @@ async function loop(rt: Runtime): Promise<void> {
   let contentRunning = false;
   let lastAso = 0;
   let asoRunning = false;
+  let lastAsoPoll = 0;
+  let asoPolling = false;
   let cycleStartedAt: number | null = null;
   if (rt.env.heartbeatUrl) {
     const url = rt.env.heartbeatUrl;
@@ -316,6 +330,13 @@ async function loop(rt: Runtime): Promise<void> {
           // Reading boards and research take minutes: beside the cycle, one pass at a time.
           void rt.aso.tick().catch(error => console.warn(`[aso] failed: ${(error as Error).message}`))
             .finally(() => { asoRunning = false; });
+        }
+        if (!asoPolling && Date.now() - lastAsoPoll > ASO_POLL_MS && asoApps(rt.config).length) {
+          lastAsoPoll = Date.now();
+          asoPolling = true;
+          // Owners' ✅ on proposals, and approved listings waiting for an editable version.
+          void rt.aso.poll().catch(error => console.warn(`[aso] poll failed: ${(error as Error).message}`))
+            .finally(() => { asoPolling = false; });
         }
         if (!triageRunning && Date.now() - lastTriage > rt.config.triageMinutes * 60_000) {
           lastTriage = Date.now();
@@ -584,7 +605,10 @@ const HELP = `isobot runner
                       or its weekly search report
   aso <repo> snapshot | report | research [--dry-run]
                       Read an app's ASO Tracker board into today's snapshot, post its weekly rank report,
-                      or research a listing proposal now (--dry-run measures it but posts and records nothing)`;
+                      or research a listing proposal now (--dry-run measures it but posts and records nothing)
+  aso <repo> pending | approve | reject | apply
+                      Show the latest proposal's apply state, approve or dismiss it (like ✅ / 🛑 in Discord),
+                      or write an approved one to App Store Connect now (e.g. right after creating a version)`;
 
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "help";
@@ -766,13 +790,17 @@ async function main(): Promise<void> {
     case "aso": {
       const [target, what, flag] = process.argv.slice(3);
       const app = asoApps(rt.config).find(a => target && [a.repo, `${a.owner}/${a.repo}`, a.aso.appId].some(n => n.toLowerCase() === target.toLowerCase()));
-      if (!app || !["snapshot", "report", "research"].includes(what)) {
-        console.error(`Usage: aso <${asoApps(rt.config).map(a => a.repo).join(" | ") || "repo"}> snapshot | report | research [--dry-run]`);
+      if (!app || !["snapshot", "report", "research", "pending", "approve", "reject", "apply"].includes(what)) {
+        console.error(`Usage: aso <${asoApps(rt.config).map(a => a.repo).join(" | ") || "repo"}> snapshot | report | research [--dry-run] | pending | approve | reject | apply`);
         process.exitCode = 2;
         return;
       }
       if (what === "snapshot") console.log(`${(await rt.aso.snapshot(app)).length} phrases read`);
       else if (what === "report") console.log(await rt.aso.report(app, true) ?? "(no report)");
+      else if (what === "pending") console.log(JSON.stringify(rt.aso.pending(app), null, 2));
+      else if (what === "approve") console.log(await rt.aso.approve(app, "cli"));
+      else if (what === "reject") await rt.aso.reject(app, "cli");
+      else if (what === "apply") console.log(await rt.aso.apply(app, "cli"));
       else {
         const result = await rt.aso.maybeResearch(app, true, flag === "--dry-run");
         console.log(result ? `${JSON.stringify(result.proposal, null, 2)}\n\n${result.message}` : "(nothing)");

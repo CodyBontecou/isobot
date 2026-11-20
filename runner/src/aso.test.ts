@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { asoApps, validateConfig, type AsoAppConfig } from "./config.js";
-import { AsoTrain, boardCells, brandOf, movers, parseProposal, reportText, snapshotsByDay, splitMessage, type AsoClient, type Listing } from "./aso.js";
+import { applyHint, AsoTrain, boardCells, brandOf, brandWarnings, changedFields, editableAppInfo, movers, parseProposal, pickVersions, reportText, snapshotsByDay, splitMessage, type AsoClient, type Listing } from "./aso.js";
 import type { AgentJsonInput } from "./builder.js";
 import { Store } from "./store.js";
 import { FakeGitHub, FakeRepo, testConfig } from "./testing.js";
@@ -39,6 +39,32 @@ class FakeTracker implements AsoClient {
   }
 }
 
+/** App Store Connect as the asc CLI sees it: one live version, and an editable one once `editable` is set. */
+class FakeAsc {
+  calls: string[][] = [];
+  editable = false;
+  fail: string | null = null;
+  async run(args: string[]) {
+    this.calls.push(args);
+    if (this.fail && args.join(" ").includes(this.fail)) return { ok: false, stdout: "", stderr: "Forbidden" };
+    const attrs = (version: string, state: string, createdDate: string) => ({ versionString: version, appVersionState: state, createdDate });
+    if (args[0] === "versions") {
+      return { ok: true, stderr: "", stdout: JSON.stringify({ data: [
+        { id: "v301", attributes: attrs("3.0.1", "READY_FOR_DISTRIBUTION", "2026-11-16T11:00:00Z") },
+        { id: "v300", attributes: attrs("3.0.0", "READY_FOR_DISTRIBUTION", "2026-11-01T11:00:00Z") },
+        ...(this.editable ? [{ id: "v310", attributes: attrs("3.1.0", "PREPARE_FOR_SUBMISSION", "2026-11-25T11:00:00Z") }] : []),
+      ] }) };
+    }
+    if (args[0] === "apps") {
+      return { ok: true, stderr: "", stdout: JSON.stringify({ data: [
+        { id: "info-live", attributes: { state: "READY_FOR_DISTRIBUTION" } }, ...(this.editable ? [{ id: "info-next", attributes: { state: "PREPARE_FOR_SUBMISSION" } }] : []),
+      ] }) };
+    }
+    return { ok: true, stderr: "", stdout: "{}" };
+  }
+  writes() { return this.calls.filter(c => c[0] === "localizations").map(c => c.slice(0, -2).join(" ")); }
+}
+
 function setup(aso: Partial<AsoAppConfig> = {}, at = "2026-11-23T09:00:00") {
   const config = testConfig();
   for (const policy of Object.values(config.repos)) delete policy.aso;
@@ -47,18 +73,24 @@ function setup(aso: Partial<AsoAppConfig> = {}, at = "2026-11-23T09:00:00") {
   const store = new Store(":memory:");
   const tracker = new FakeTracker();
   const posts: string[] = [];
+  const reactions: string[][] = [];
   const agents: AgentJsonInput[] = [];
+  const asc = new FakeAsc();
+  const reacted: Record<string, string[]> = {};
   const repo = new FakeRepo();
   let now = new Date(at);
   let output: unknown = { action: "skip", reason: "nothing better", name: "", subtitle: "", keywords: "", promotionalText: "", rationale: "", newPhrases: [] };
   const train = new AsoTrain({
     config, store, github: new FakeGitHub() as never, tracker, repo: () => repo,
-    notifier: { discord: async (text: string) => { posts.push(text); } },
+    notifier: { discord: async (text: string, r: readonly string[] = []) => { posts.push(text); reactions.push([...r]); return { channelId: "staff", messageId: `m${posts.length}` }; } },
+    approvals: { reactors: async (_c, messageId, emoji) => reacted[`${messageId}${emoji}`] ?? [], owners: async () => new Set(["owner"]) },
+    asc: args => asc.run(args),
     agent: async input => { agents.push(input); return { output }; },
     now: () => now,
   });
   const app = asoApps(config).find(a => `${a.owner}/${a.repo}` === REPO)!;
-  return { config, store, tracker, posts, agents, repo, train, app, setNow: (d: string) => { now = new Date(d); }, setOutput: (o: unknown) => { output = o; } };
+  const react = (messageId: string, emoji: string, user: string) => { (reacted[`${messageId}${emoji}`] ??= []).push(user); };
+  return { config, store, tracker, posts, reactions, react, asc, agents, repo, train, app, setNow: (d: string) => { now = new Date(d); }, setOutput: (o: unknown) => { output = o; } };
 }
 
 test("config: aso blocks need the runner-wide cli and a numeric app id", () => {
@@ -203,7 +235,7 @@ test("a failed App Store Connect refresh or draft measurement is reported, not f
   await train.maybeResearch(app);
   const text = posts.join("\n");
   assert.match(text, /couldn't measure the draft: Subtitle repeats the name/);
-  assert.match(text, /Promotional text can change without a new version/);
+  assert.match(text, /React ✅ to apply: the promotional text goes live right away\. 🛑/);
 });
 
 test("a failed import job only warns when our new phrases weren't measured", async () => {
@@ -230,4 +262,114 @@ test("splitMessage keeps Discord messages under the limit, splitting between par
   assert.equal(parts.length, 2);
   assert.ok(parts.every(p => p.length <= 1900));
   assert.ok(parts[1].startsWith("b"));
+});
+
+const DRAFT = {
+  action: "propose", reason: "", rationale: "More demand.", name: "GitSync.md: Git Notes", subtitle: CURRENT.subtitle,
+  keywords: "commit,push,branch", promotionalText: "Git for your notes, now faster.", newPhrases: [],
+};
+
+async function proposed() {
+  const t = setup();
+  t.store.setCursor("aso:6758960270:report", "2026-11-23");
+  t.setOutput(DRAFT);
+  await t.train.maybeResearch(t.app);
+  return t;
+}
+
+test("a proposal carries ✅ and 🛑, and an owner's ✅ puts the promotional text live and queues the rest for the next version", async () => {
+  const { train, app, posts, reactions, react, asc, setNow } = await proposed();
+  assert.deepEqual(reactions.at(-1), ["✅", "🛑"], "the last message carries the controls");
+  assert.match(posts.join("\n"), /React ✅ to apply: the promotional text goes live right away, and the name and keywords go onto the next App Store version/);
+  const ref = `m${posts.length}`;
+  const p = train.pending(app)!;
+  assert.equal(p.state, "open");
+  assert.deepEqual(changedFields(p), ["name", "keywords", "promotionalText"]);
+
+  react(ref, "✅", "stranger");
+  await train.poll();
+  assert.equal(train.pending(app)!.state, "open", "only the staff chat's allowlist approves");
+  assert.equal(asc.calls.length, 0);
+
+  react(ref, "✅", "owner");
+  await train.poll();
+  assert.deepEqual(asc.writes(), ["localizations update --version v301 --locale en-US --promotional-text Git for your notes, now faster."]);
+  assert.match(posts.at(-1)!, /approved by <@owner>.*Promotional text is live on 3\.0\.1\. The name and keywords wait for the next App Store version/);
+  assert.equal(train.pending(app)!.state, "approved");
+  assert.equal(train.researchDue(app), false, "no new draft over an approved one");
+
+  const before = posts.length;
+  await train.poll();
+  assert.equal(posts.length, before, "waiting is said once");
+  assert.equal(asc.writes().length, 1);
+
+  asc.editable = true;
+  setNow("2026-11-25T12:00:00");
+  await train.poll();
+  assert.deepEqual(asc.writes().slice(1), [
+    "localizations update --version v310 --locale en-US --keywords commit,push,branch",
+    "localizations update --type app-info --app 6758960270 --app-info info-next --locale en-US --name GitSync.md: Git Notes",
+  ]);
+  assert.match(posts.at(-1)!, /The name and keywords are set on 3\.1\.0 \(prepare for submission\)/);
+  assert.equal(train.pending(app)!.state, "done");
+  await train.poll();
+  assert.equal(asc.writes().length, 3, "done is done");
+});
+
+test("🛑 dismisses a proposal, and an unanswered one expires", async () => {
+  const t = await proposed();
+  t.react(`m${t.posts.length}`, "🛑", "owner");
+  await t.train.poll();
+  assert.equal(t.train.pending(t.app)!.state, "rejected");
+  assert.match(t.posts.at(-1)!, /dismissed by <@owner>/);
+  assert.equal(t.asc.calls.length, 0);
+
+  const u = await proposed();
+  u.setNow("2026-12-08T09:00:00");
+  await u.train.poll();
+  assert.equal(u.train.pending(u.app)!.state, "expired");
+  await assert.rejects(u.train.approve(u.app, "cli"), /expired, not open/);
+});
+
+test("a failed write is reported once and retried; a newer proposal supersedes an open one", async () => {
+  const { train, app, posts, asc } = await proposed();
+  asc.fail = "--promotional-text";
+  await assert.rejects(train.approve(app, "cli"), /Forbidden/);
+  assert.match(posts.at(-1)!, /❌ \*\*GitSync.md\*\* listing update failed: asc localizations update failed: Forbidden/);
+  const count = posts.length;
+  await train.poll();
+  assert.equal(posts.length, count, "the same error isn't repeated");
+  asc.fail = null;
+  await train.poll();
+  assert.match(posts.at(-1)!, /Promotional text is live/);
+
+  const t = await proposed();
+  t.setNow("2026-11-30T09:00:00");
+  t.store.setCursor("aso:6758960270:report", "2026-11-30");
+  await t.train.maybeResearch(t.app);
+  const p = t.train.pending(t.app)!;
+  assert.equal(p.state, "open");
+  assert.equal(p.at.slice(0, 10), "2026-11-30");
+});
+
+test("a proposal from before approvals can be approved by command; every field is written", async () => {
+  const { train, app, store, asc } = setup();
+  store.setCursor("aso:6758960270:proposal", JSON.stringify({ at: "2026-11-20T13:34:00Z", ...DRAFT }));
+  asc.editable = true;
+  await train.approve(app, "cli");
+  assert.equal(asc.writes().length, 4, "promo on live and editable, keywords, and name + subtitle in one app-info update");
+  assert.ok(asc.writes().some(w => w.includes("--name GitSync.md: Git Notes --subtitle Git sync for notes")));
+  assert.equal(train.pending(app)!.state, "done");
+});
+
+test("version and app info picking, brand warnings and the apply hint", () => {
+  assert.deepEqual(pickVersions({ data: [
+    { id: "a", attributes: { versionString: "1.0", appVersionState: "READY_FOR_DISTRIBUTION", createdDate: "2026-01-01" } },
+    { id: "b", attributes: { versionString: "1.1", appVersionState: "WAITING_FOR_REVIEW", createdDate: "2026-02-01" } },
+  ] }), { live: { id: "a", version: "1.0", state: "READY_FOR_DISTRIBUTION", createdDate: "2026-01-01" }, editable: null }, "in review isn't editable");
+  assert.equal(editableAppInfo({ data: [{ id: "x", attributes: { state: "READY_FOR_DISTRIBUTION" } }] }), null);
+  assert.deepEqual(brandWarnings("data,obsidian,apple,hrv"), ["apple", "obsidian"]);
+  assert.match(applyHint(["promotionalText"]), /^React ✅ to apply: the promotional text goes live right away\. 🛑/);
+  assert.match(applyHint(["keywords"]), /the keywords go onto/);
+  assert.match(applyHint(["subtitle"]), /the subtitle goes onto/);
 });

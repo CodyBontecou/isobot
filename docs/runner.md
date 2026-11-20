@@ -64,6 +64,7 @@ doesn't propose your whole backlog.
 | `grants [repo]` | Who may approve, stop, merge, chat and hand off, and each repo's merge rules, gathered from config and `runner.env` |
 | `cloud-smoke <repo> [--checks]` | One real build in a Cloudflare build sandbox, never pushed ([cloud builds](cloud-builds.md)) |
 | `aso <repo> snapshot \| report \| research [--dry-run]` | Read an app's ASO Tracker board, post its weekly rank report now, or draft and measure a listing proposal ([ASO train](aso.md)) |
+| `aso <repo> pending \| approve \| reject \| apply` | Show, approve or dismiss an app's latest listing proposal, or write an approved one to App Store Connect now ([ASO train](aso.md#applying-a-proposal)) |
 | `release <repo#n>` | Run a merged job's `release.onMerge` again, e.g. one a restart interrupted. The running runner does it on its next pass |
 
 Logs: `~/Library/Application Support/isobot/logs/runner.log` (rotated at
