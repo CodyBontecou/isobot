@@ -14,6 +14,8 @@ export class UsageLimitError extends TransientError {}
 const NETWORK = /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EPIPE|socket hang up|fetch failed|network|Could not resolve host|Connection (reset|timed out|refused)|early EOF|unexpected disconnect|RPC failed|The remote end hung up|Operation timed out|TLS/i;
 const USAGE = /usage limit|hit your limit|limit reached|rate.?limit|too many requests/i;
 const OVERLOADED = /overloaded|529|API Error: 5\d\d|internal server error|service unavailable|bad gateway/i;
+/** git over HTTPS when GitHub throttles or fails (`The requested URL returned error: 429`). */
+const GIT_HTTP = /The requested URL returned error: (429|5\d\d)\b/;
 const AUTH = /not logged in|please run \/login|invalid api key|authentication|OAuth token (has )?expired|credential/i;
 
 /** Classifies a model (Claude Code) failure message. */
@@ -30,7 +32,7 @@ export function isTransient(error: unknown): boolean {
   const status = (error as { status?: number })?.status;
   if (typeof status === "number" && (status >= 500 || status === 429)) return true;
   const message = error instanceof Error ? `${error.message} ${String((error as { cause?: unknown }).cause ?? "")}` : String(error);
-  return NETWORK.test(message) || OVERLOADED.test(message);
+  return NETWORK.test(message) || OVERLOADED.test(message) || GIT_HTTP.test(message);
 }
 
 /** Best effort: "resets 3pm", "resets at 2026-11-16T15:00Z", or a unix timestamp after a pipe. */

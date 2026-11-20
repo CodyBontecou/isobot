@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ExecFn } from "./builder.js";
-import { TransientError } from "./errors.js";
+import { isTransient, TransientError } from "./errors.js";
 import type { DiffStat } from "./git.js";
 import type { RepoOps } from "./pipeline.js";
 import type { CheckReport } from "./policy.js";
@@ -96,6 +96,8 @@ export interface RemoteRunOptions {
 const wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 /** Polls that may fail in a row (network blips) before a run counts as unreachable. */
 const MAX_POLL_FAILURES = 12;
+/** Waits before retrying a throttled clone or checkout in place: 30 s, then 2 min. */
+const GITHUB_RETRY_MS = [30_000, 120_000];
 
 /** Runs one command in a sandbox and waits for it, like proc.run. A timeout kills it (and its children). */
 export async function runRemote(api: SandboxApi, name: string, argv: string[], options: RemoteRunOptions): Promise<RunResult> {
@@ -213,6 +215,24 @@ export class CloudRepo implements RepoOps {
     return result;
   }
 
+  /**
+   * git that reads from GitHub (clone, and a partial clone's checkout fetching blobs). GitHub throttles
+   * the shared Cloudflare egress now and then; a short wait usually clears it, so retry here before the
+   * job is requeued (isTransient classifies what's left).
+   */
+  private async gitFromGitHub(name: string, args: string[], cwd: string, before?: () => Promise<unknown>): Promise<RunResult> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await before?.();
+        return await this.git(name, args, cwd);
+      } catch (error) {
+        if (attempt >= GITHUB_RETRY_MS.length || !isTransient(error)) throw error;
+        console.warn(`[cloud] ${name}: git ${args[0]} failed (${(error as Error).message.slice(-120)}); retrying in ${GITHUB_RETRY_MS[attempt] / 1000}s`);
+        await (this.sleep ?? wait)(GITHUB_RETRY_MS[attempt]);
+      }
+    }
+  }
+
   async sync(defaultBranch: string): Promise<string> {
     this.defaultBranch = defaultBranch;
     return this.local.sync(defaultBranch);
@@ -234,8 +254,8 @@ export class CloudRepo implements RepoOps {
       const head = await this.git(name, ["rev-parse", "HEAD"], dir, true);
       if (head.code === 0 && head.stdout.trim() === baseSha) return dir;
     }
-    await runRemote(this.api, name, ["rm", "-rf", dir], { cwd: "/", sleep: this.sleep });
-    await this.git(name, ["clone", "--quiet", "--filter=blob:none", "--no-checkout", this.local.remote, dir], "/");
+    const clean = () => runRemote(this.api, name, ["rm", "-rf", dir], { cwd: "/", sleep: this.sleep });
+    await this.gitFromGitHub(name, ["clone", "--quiet", "--filter=blob:none", "--no-checkout", this.local.remote, dir], "/", clean);
     if ((await this.git(name, ["cat-file", "-e", `${baseSha}^{commit}`], dir, true)).code !== 0) {
       // Not on GitHub (a commit the runner kept after a restart): send it over.
       await this.git(name, ["fetch", "--quiet", "origin", baseSha], dir, true);
@@ -246,7 +266,7 @@ export class CloudRepo implements RepoOps {
         await this.git(name, ["fetch", "--quiet", BUNDLE_IN, `+${UPLOAD_REF}:${UPLOAD_REF}`], dir);
       }
     }
-    await this.git(name, ["checkout", "--quiet", "-B", branch, baseSha], dir);
+    await this.gitFromGitHub(name, ["checkout", "--quiet", "-B", branch, baseSha], dir);
     await this.api.writeFile(name, baseFile(name), baseSha);
     return dir;
   }

@@ -38,6 +38,10 @@ local.
   the runner stops what was running there, commits what the builder left, and resumes the same
   Claude Code session in the same Container. If the Container is gone (idle 30 minutes or
   evicted), the job starts over from the commit the runner kept, which is uploaded as a bundle.
+- **GitHub throttling.** GitHub sometimes answers the sandbox's clone (or the checkout that fetches
+  a partial clone's files) with `429`, even with the Worker's token, because Cloudflare's egress is
+  shared. The runner retries in place after 30 s and 2 min, then requeues the job with the usual
+  backoff instead of failing it. git's `returned error: 429` and `5xx` count as temporary anywhere.
 
 ## Turn it on for a site
 
