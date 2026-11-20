@@ -32,6 +32,14 @@
     "reportWeekday": 1,
     "hours": [6, 22]
   },
+  "aso": {
+    "cli": "~/dev/aso-tool/bin/aso.mjs",
+    "appBinary": "~/dev/aso-tool/release/mac-arm64/ASO Tracker.app/Contents/MacOS/ASO Tracker",
+    "appPath": "~/dev/aso-tool/release/mac-arm64/ASO Tracker.app/Contents/Resources/app.asar",
+    "reportWeekday": 1,
+    "researchEveryDays": 7,
+    "hours": [8, 22]
+  },
   "labels": {
     "proposed": "isobot:proposed",
     "ready": "isobot:ready",
@@ -218,6 +226,7 @@
         "notes": "Site source: apps/website (Vercel builds it from main). Add posts as apps/website/content/blog/<slug>.md; the filename is the slug (lowercase, hyphenated). Never edit generated HTML or dist/. Frontmatter: title, description, lead, date, updated, category, draft: false, tags, platform (apple|android|both; picks the App Store / Google Play badges), related (up to 3 existing published slugs). Every post needs verified (YYYY-MM-DD), verified_by and verified_method (executed|traced|mixed) plus a claim ledger at content/blog/_review/<slug>.md; test/blog-verification.test.mjs enforces this. Optional image/imageAlt are root-relative, with files under assets/blog/<slug>/. English only. Anything about privacy names the local folder export workflow; describe the Health.md Cloud pilot as separate, opt-in, single-owner and not generally available, and never claim Health.md has no cloud. Hub links can go in the topic clusters in scripts/build-blog.mjs. Avoid slugs containing auth, unlock, subscription, purchase or privacy. Free tools aren't supported here yet (they need build configuration changes): propose posts, guides, tutorials and refreshes only. The project context lists protected experiment pages: leave them alone."
       },
       "ownerAutonomy": "merge",
+      "aso": { "appId": "6757763969" },
       "train": {
         "appId": "6757763969",
         "testflight": { "group": "Liquid Glass Beta", "joinUrl": "https://testflight.apple.com/join/upA2Ux2E" },
@@ -275,6 +284,7 @@
         "requireCi": true,
         "notes": "Site source: site/ (hand-written HTML; Cloudflare Pages deploys main). New guide: site/blog/<slug>.html, copying the head and layout of an existing guide such as site/blog/git-lfs-ios.html; media in site/blog/<slug>/. Canonical URLs and internal links are extensionless (https://gitsync.md/blog/<slug>). Required: description, og:title/description/url/image and twitter:card; og:image and twitter:image pointing to a local 1200x630 PNG at site/social/blog/<slug>.png with matching width, height, type and alt meta (scripts/build_social_cards.py crashes when run whole on main, so call its render(title, category, path) function directly from a short Python snippet); BlogPosting JSON-LD with author.url https://gitsync.md/about and a visible /about author link; exactly one BreadcrumbList Home > /blog/ > page with matching visible breadcrumbs. By hand: the card and JSON-LD entry in site/blog/index.html, a <loc> in site/sitemap.xml (it must list exactly the indexable pages), a link from at least one related guide, and an llms.txt entry when relevant. Header CTA is /#download; the aside CTA is /v/web-homepage-<NNN> with a number not used by another page (existing posts use 101-110); Google Play: https://play.google.com/store/apps/details?id=com.bontecou.syncmd. Comparison pages go in site/compare/, free tools in site/tools/<slug>.html (client-side only). English only."
       },
+      "aso": { "appId": "6758960270" },
       "train": {
         "appId": "6758960270",
         "testflight": { "group": "External" },
@@ -350,6 +360,7 @@
         "indexNow": "$HOME/.local/bin/indexnow submit --host whereday.com --key-dir marketing/public --confirm",
         "notes": "Site source: marketing/ (Cloudflare Pages deploys main). New article: body HTML in marketing/content/<slug>.html (sections with h2 ids, an article-toc nav, no <html>/<head>). Add a PAGES entry in marketing/scripts/build_seo_pages.py with path /blog/<slug>/, section Guides, section_path /blog/, breadcrumb, type BlogPosting, title ('… — Whereday'), headline, description, lede, published, modified, source, optional image/image_alt from /screenshots/, and RELATED next steps. Add a visible link in marketing/public/blog/index.html (the build syncs its JSON-LD). Run python3 marketing/scripts/build_site.py and commit all regenerated marketing/public output; never patch generated HTML. Tools go under /tools/ with local_file_tool: true (no analytics) and get linked from /tools/. App Store CTA: https://apps.apple.com/app/id6761960794 ('Download free for iPhone'). Real dates; change modified only on a material update. Example data is synthetic and labelled as such. Keep the distinction between new-user plans and existing-user rights. English only."
       },
+      "aso": { "appId": "6761960794" },
       "train": {
         "appId": "6761960794",
         "testflight": { "group": "Beta Testers", "joinUrl": "https://testflight.apple.com/join/Tn2hDXRG" },
@@ -418,6 +429,7 @@
         "indexNow": "$HOME/.local/bin/indexnow submit --host vox.isolated.tech --key-dir website --confirm",
         "notes": "Site sources: website-content/; everything in website/ is generated and committed (Cloudflare Pages deploys main). New guide: website-content/guides/<slug>.html, starting with a JSON comment {slug (equal to the filename), title, description, subtitle, eyebrow, requirements, published, modified, image: /screenshots/...}, then body HTML (answer-box, toc nav, h2 ids, relative links like ../other-slug/). Add \"section\": \"compare\" for /compare/. By hand: a card and JSON-LD entry in website-content/pages/blog/index.html, contextual links from related guides and docs, an entry in website-content/llms.txt, and an English campaign in downloads.json (unique, 30 characters max). Then run build_locales.py --extract, translate every new or changed key in all 22 non-English locales/*.json (metadata status requires-human-review, source machine; follow docs/localization-glossary.md; keep app UI labels, URLs, code and placeholders exact), run build_locales.py --sync-campaigns, then npm run website:build && npm run website:check, and commit the generated website/**. Never set VOX_WEBSITE_PILOT. Don't touch the shared nav or footer (that regenerates the privacy pages). App Store links come from downloads.json."
       },
+      "aso": { "appId": "6758967337" },
       "train": {
         "appId": "6758967337",
         "testflight": { "group": "Public beta", "joinUrl": "https://testflight.apple.com/join/dQXXSTxv" },

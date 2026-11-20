@@ -55,6 +55,8 @@ export interface RepoPolicy {
   devices?: DeviceSpec;
   /** The app's marketing site: daily SEO research turns into content issues that build and merge (content.ts). */
   content?: ContentConfig;
+  /** App Store search tracking and listing proposals for the app, from the local ASO Tracker (aso.ts). */
+  aso?: AsoAppConfig;
   /**
    * Only files matching these globs may change for an automatic merge. Set by the content train for its
    * own jobs (the site's directory); unset means anywhere.
@@ -104,6 +106,39 @@ export interface ContentConfig {
   autonomy?: Autonomy;
   /** Where content jobs build (RepoPolicy.executor); defaults to "local". */
   executor?: Executor;
+}
+
+/**
+ * One app followed by the ASO train. ASO Tracker measures its phrases every day; the runner keeps a daily
+ * snapshot, posts a weekly rank report, and proposes measured listing changes. It never writes to App Store Connect.
+ */
+export interface AsoAppConfig {
+  /** App Store app id (the digits in apps.apple.com/app/id…); the app must already be in ASO Tracker. */
+  appId: string;
+  /** The App Store Connect locale proposals are written for. Default en-US. */
+  locale?: string;
+  /** The storefront whose ranks the report and proposals use. Default us. */
+  storefront?: string;
+  /** What to protect or aim for in this app's listing (brand, tone, phrases to keep). */
+  notes?: string;
+  /** off: follow nothing; report: snapshot and weekly report only; propose: also research listing proposals. Default propose. */
+  autonomy?: "off" | "report" | "propose";
+}
+
+/** Runner-wide settings for the ASO train (aso.ts). */
+export interface AsoLimits {
+  /** The ASO Tracker CLI: an installed app's `Contents/Resources/aso`, or a checkout's `bin/aso.mjs`. */
+  cli: string;
+  /** For a checkout's CLI: the Electron executable to start the tracker with (ASO_APP_BINARY). */
+  appBinary?: string;
+  /** For a checkout's CLI: the app bundle's app.asar (ASO_APP_PATH). */
+  appPath?: string;
+  /** Weekday (0 = Sunday) of the weekly rank report, or null for none. Default 1. */
+  reportWeekday?: number | null;
+  /** Days between listing research runs per app. Default 7. */
+  researchEveryDays?: number;
+  /** Local hours [from, to) research and reports run in. Default [8, 22]. */
+  hours?: [number, number];
 }
 
 /** Runner-wide limits for the content train. */
@@ -193,6 +228,8 @@ export interface RunnerConfig {
   chat?: ChatConfig;
   /** Limits for the content train (content.ts); per-site settings live in each repo's `content`. */
   content?: ContentLimits;
+  /** The ASO train (aso.ts); per-app settings live in each repo's `aso`. */
+  aso?: AsoLimits;
   /** 💻 on isobot's Discord messages opens the conversation in the owner's local Herdr (handoff.ts). */
   handoff?: HandoffConfig;
   defaults: RepoPolicy;
@@ -352,6 +389,15 @@ export function validateConfig(config: RunnerConfig): void {
       fail("content.hours must be [from, to) local hours with from < to");
     }
   }
+  if (config.aso) {
+    const a = config.aso;
+    if (!a.cli?.trim()) fail("aso.cli must be the ASO Tracker CLI's path");
+    if (a.reportWeekday !== undefined && a.reportWeekday !== null && !(Number.isInteger(a.reportWeekday) && a.reportWeekday >= 0 && a.reportWeekday <= 6)) fail("aso.reportWeekday must be 0-6 or null");
+    if (a.researchEveryDays !== undefined && !(Number.isInteger(a.researchEveryDays) && a.researchEveryDays >= 1 && a.researchEveryDays <= 90)) fail("aso.researchEveryDays must be 1-90");
+    if (a.hours !== undefined && !(Array.isArray(a.hours) && a.hours.length === 2 && a.hours.every(h => Number.isInteger(h) && h >= 0 && h <= 24) && a.hours[0] < a.hours[1])) {
+      fail("aso.hours must be [from, to) local hours with from < to");
+    }
+  }
   for (const [name, partial] of Object.entries(config.repos ?? {})) {
     if (!/^[\w.-]+\/[\w.-]+$/.test(name)) fail(`repo key ${name} must be owner/repo`);
     const policy = policyFor(config, name);
@@ -403,6 +449,14 @@ export function validateConfig(config: RunnerConfig): void {
         const named = (v: unknown) => typeof v === "string" && /^[\w./ -]{1,100}$/.test(v);
         if (named(d.workflow) === named(d.environment) || Object.keys(d).length !== 1) fail(`${name}: content.deploy must be { "workflow": "<file>.yml" } or { "environment": "<name>" }`);
       }
+    }
+    if (policy.aso) {
+      const a = policy.aso;
+      if (!/^\d{6,12}$/.test(a.appId ?? "")) fail(`${name}: aso.appId must be an App Store app id`);
+      if (a.locale !== undefined && !/^[a-z]{2,3}(-[A-Za-z0-9]{2,4})*$/.test(a.locale)) fail(`${name}: aso.locale must be an App Store Connect locale like en-US`);
+      if (a.storefront !== undefined && !/^[a-z]{2}$/.test(a.storefront)) fail(`${name}: aso.storefront must be a two-letter storefront like us`);
+      if (a.autonomy !== undefined && !["off", "report", "propose"].includes(a.autonomy)) fail(`${name}: unknown aso.autonomy "${a.autonomy}"`);
+      if (!config.aso) fail(`${name}: aso needs the runner-wide aso.cli`);
     }
     if (!(policy.minReviewConfidence > 0 && policy.minReviewConfidence <= 1)) fail(`${name}: minReviewConfidence must be in (0, 1]`);
     void partial;
@@ -522,6 +576,17 @@ function sandboxEnv(env: NodeJS.ProcessEnv): Environment["sandbox"] {
   if (!url || !token) throw new Error("set both ISOBOT_SANDBOX_URL and ISOBOT_SANDBOX_TOKEN, or neither");
   if (!/^https:\/\//.test(url)) throw new Error("ISOBOT_SANDBOX_URL must use HTTPS");
   return { url: url.replace(/\/$/, ""), token };
+}
+
+/** Apps the ASO train follows. */
+export function asoApps(config: RunnerConfig): { owner: string; repo: string; aso: AsoAppConfig }[] {
+  if (!config.aso) return [];
+  return Object.keys(config.repos).flatMap(key => {
+    const aso = policyFor(config, key).aso;
+    if (!aso || (aso.autonomy ?? "propose") === "off") return [];
+    const [owner, repo] = key.split("/");
+    return [{ owner, repo, aso }];
+  });
 }
 
 /** Repos with app or content builds on Cloudflare (`executor: "cloudflare"`). */

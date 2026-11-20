@@ -264,6 +264,15 @@ export class Store {
     return row?.value ?? null;
   }
 
+  /** Cursors whose key starts with `prefix`, oldest key first. */
+  cursorsWithPrefix(prefix: string): { key: string; value: string }[] {
+    return this.db.prepare("SELECT key, value FROM cursors WHERE substr(key, 1, ?) = ? ORDER BY key").all(prefix.length, prefix) as { key: string; value: string }[];
+  }
+
+  deleteCursor(key: string): void {
+    this.db.prepare("DELETE FROM cursors WHERE key = ?").run(key);
+  }
+
   setCursor(key: string, value: string): void {
     this.db.prepare("INSERT INTO cursors (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
   }
