@@ -2,6 +2,7 @@
 import { ImapFlow } from "imapflow";
 import { ReleaseTrain } from "./train.js";
 import { ContentTrain } from "./content.js";
+import { AsoTrain, type AsoClient } from "./aso.js";
 import type { CheckReport } from "./policy.js";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -14,7 +15,7 @@ import { chatAllowlist, claudeChatModel, StaffChat } from "./chat.js";
 import { ChatToolServer } from "./chatMcp.js";
 import { DiscordApi } from "./discordApi.js";
 import { CloudRepo, HttpSandboxApi, remoteChecks, remoteExec } from "./cloud.js";
-import { cloudRepos, configuredRepos, contentRepos, loadConfig, loadEnvironment, policyFor, type Environment, type RunnerConfig } from "./config.js";
+import { asoApps, cloudRepos, configuredRepos, contentRepos, loadConfig, loadEnvironment, policyFor, type Environment, type RunnerConfig } from "./config.js";
 import { Repo } from "./git.js";
 import { GitHub } from "./github.js";
 import { TERMINAL_MARKER } from "./notes.js";
@@ -56,6 +57,7 @@ interface Runtime {
   repoFor: (owner: string, repo: string) => Repo;
   train: ReleaseTrain;
   content: ContentTrain;
+  aso: AsoTrain;
   /** Runner secrets and state, for settings that keep agents out of them. */
   secrets: string[];
   /** Messages carrying a 💻 (Herdr handoff), when it's on. */
@@ -166,7 +168,41 @@ function runtime(): Runtime {
       return { ok: result.code === 0 && !result.timedOut, output: `${result.stdout}\n${result.stderr}` };
     },
   });
-  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, content, secrets, handoff };
+  const aso = new AsoTrain({
+    config, store, github, notifier, repo: repoFor, tracker: asoClient(config, env.home),
+    agent: input => builder.agentJson(input),
+  });
+  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, content, aso, secrets, handoff };
+}
+
+/** ASO Tracker's CLI: one JSON call per tool; it starts the tracker's daemon itself when it isn't running. */
+function asoClient(config: RunnerConfig, home: string): AsoClient {
+  return {
+    async call(tool, args, options = {}) {
+      const config_ = config.aso;
+      if (!config_) throw new Error("aso.cli isn't configured");
+      const home_ = homedir();
+      const expand = (v?: string) => v?.replace(/^~(?=\/)/, home_);
+      const a = { ...config_, cli: expand(config_.cli)!, appBinary: expand(config_.appBinary), appPath: expand(config_.appPath) };
+      const script = a.cli.endsWith(".mjs") || a.cli.endsWith(".js");
+      const argv = [...(script ? [a.cli] : []), tool, JSON.stringify(args), ...(options.wait ? ["--wait"] : [])];
+      const extra: Record<string, string> = {};
+      if (a.appBinary) extra.ASO_APP_BINARY = a.appBinary;
+      if (a.appPath) extra.ASO_APP_PATH = a.appPath;
+      const result = await run(script ? process.execPath : a.cli, argv, { cwd: home, env: workerEnv(extra), timeoutMs: options.timeoutMs ?? 120_000, maxBytes: 4_000_000 });
+      if (result.timedOut) throw new Error(`ASO Tracker ${tool} timed out`);
+      const text = result.stdout.trim();
+      let value: unknown = null;
+      try { value = text ? JSON.parse(text) : null; } catch { /* reported below */ }
+      const failed = (value as { ok?: unknown } | null)?.ok === false;
+      if (result.code !== 0 || failed) {
+        const reason = (value as { error?: unknown } | null)?.error ?? (result.stderr.trim() || text);
+        throw new Error(`ASO Tracker ${tool}: ${String(reason).slice(0, 400)}`);
+      }
+      if (value === null && text) throw new Error(`ASO Tracker ${tool} printed something that isn't JSON`);
+      return value;
+    },
+  };
 }
 
 /** `owner/repo#12`, or `repo#12` for a configured repository. */
@@ -202,6 +238,7 @@ function acquireLock(env: Environment): void {
 
 /** How often the content train looks for research, publishing and reports to do. */
 const CONTENT_EVERY_MS = 5 * 60_000;
+const ASO_EVERY_MS = 60 * 60_000;
 
 /** A cycle running longer than this (release steps included) counts as hung for the external heartbeat. */
 const HUNG_CYCLE_MS = 2 * 60 * 60_000;
@@ -236,6 +273,8 @@ async function loop(rt: Runtime): Promise<void> {
   let lastTriage = 0;
   let lastContent = 0;
   let contentRunning = false;
+  let lastAso = 0;
+  let asoRunning = false;
   let cycleStartedAt: number | null = null;
   if (rt.env.heartbeatUrl) {
     const url = rt.env.heartbeatUrl;
@@ -270,6 +309,13 @@ async function loop(rt: Runtime): Promise<void> {
           // Research takes minutes: like triage it runs beside the cycle, one pass at a time.
           void rt.content.tick().catch(error => console.warn(`[content] failed: ${(error as Error).message}`))
             .finally(() => { contentRunning = false; });
+        }
+        if (!asoRunning && Date.now() - lastAso > ASO_EVERY_MS && asoApps(rt.config).length) {
+          lastAso = Date.now();
+          asoRunning = true;
+          // Reading boards and research take minutes: beside the cycle, one pass at a time.
+          void rt.aso.tick().catch(error => console.warn(`[aso] failed: ${(error as Error).message}`))
+            .finally(() => { asoRunning = false; });
         }
         if (!triageRunning && Date.now() - lastTriage > rt.config.triageMinutes * 60_000) {
           lastTriage = Date.now();
@@ -535,7 +581,10 @@ const HELP = `isobot runner
                       site's content checks, and the commit back into a throwaway clone. Never pushes
   content <repo> research [--dry-run] | report
                       Run a site's content research now (files an issue; --dry-run prints the brief instead)
-                      or its weekly search report`;
+                      or its weekly search report
+  aso <repo> snapshot | report | research [--dry-run]
+                      Read an app's ASO Tracker board into today's snapshot, post its weekly rank report,
+                      or research a listing proposal now (--dry-run measures it but posts and records nothing)`;
 
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "help";
@@ -712,6 +761,22 @@ async function main(): Promise<void> {
       }
       if (what === "report") console.log(await rt.content.report(site, true) ?? "(no report)");
       else console.log(JSON.stringify(await rt.content.maybeResearch(site, true, flag === "--dry-run"), null, 2));
+      return;
+    }
+    case "aso": {
+      const [target, what, flag] = process.argv.slice(3);
+      const app = asoApps(rt.config).find(a => target && [a.repo, `${a.owner}/${a.repo}`, a.aso.appId].some(n => n.toLowerCase() === target.toLowerCase()));
+      if (!app || !["snapshot", "report", "research"].includes(what)) {
+        console.error(`Usage: aso <${asoApps(rt.config).map(a => a.repo).join(" | ") || "repo"}> snapshot | report | research [--dry-run]`);
+        process.exitCode = 2;
+        return;
+      }
+      if (what === "snapshot") console.log(`${(await rt.aso.snapshot(app)).length} phrases read`);
+      else if (what === "report") console.log(await rt.aso.report(app, true) ?? "(no report)");
+      else {
+        const result = await rt.aso.maybeResearch(app, true, flag === "--dry-run");
+        console.log(result ? `${JSON.stringify(result.proposal, null, 2)}\n\n${result.message}` : "(nothing)");
+      }
       return;
     }
     default:

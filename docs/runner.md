@@ -63,6 +63,7 @@ doesn't propose your whole backlog.
 | `inspect [repo#n] [--follow] [--json]` | Timeline of what isobot did, across jobs or for one, and what it will check next. `--follow` keeps printing new events |
 | `grants [repo]` | Who may approve, stop, merge, chat and hand off, and each repo's merge rules, gathered from config and `runner.env` |
 | `cloud-smoke <repo> [--checks]` | One real build in a Cloudflare build sandbox, never pushed ([cloud builds](cloud-builds.md)) |
+| `aso <repo> snapshot \| report \| research [--dry-run]` | Read an app's ASO Tracker board, post its weekly rank report now, or draft and measure a listing proposal ([ASO train](aso.md)) |
 | `release <repo#n>` | Run a merged job's `release.onMerge` again, e.g. one a restart interrupted. The running runner does it on its next pass |
 
 Logs: `~/Library/Application Support/isobot/logs/runner.log` (rotated at
@@ -553,6 +554,13 @@ Run one now with `npm run runner -- content <repo> research` (files an issue; ad
 
 Runner-wide limits go under the top-level `content`: `maxConcurrentJobs`, `maxCreditsPerRun`,
 `maxCreditsPerDay`, `minCreditsRemaining`, `reportWeekday`, `hours`.
+
+## ASO train
+
+Each App Store app with an `aso` block gets a daily snapshot of its App Store search ranks from the local
+ASO Tracker, a weekly rank report in the staff channel, and a weekly listing proposal (name, subtitle, keywords,
+promotional text) that ASO Tracker has measured. Proposals go only to the staff channel, and nothing is written
+to App Store Connect. See [ASO train](aso.md).
 
 ## Builder sandbox
 
