@@ -121,8 +121,13 @@ export interface AsoAppConfig {
   storefront?: string;
   /** What to protect or aim for in this app's listing (brand, tone, phrases to keep). */
   notes?: string;
-  /** off: follow nothing; report: snapshot and weekly report only; propose: also research listing proposals. Default propose. */
-  autonomy?: "off" | "report" | "propose";
+  /**
+   * off: follow nothing; report: snapshot and weekly report only; propose: also research listing proposals,
+   * applied on an owner's ✅; apply: research and apply them without asking. Default propose.
+   */
+  autonomy?: "off" | "report" | "propose" | "apply";
+  /** The App Store platform an approved proposal is written to. Default IOS. */
+  platform?: "IOS" | "MAC_OS";
 }
 
 /** Runner-wide settings for the ASO train (aso.ts). */
@@ -455,7 +460,8 @@ export function validateConfig(config: RunnerConfig): void {
       if (!/^\d{6,12}$/.test(a.appId ?? "")) fail(`${name}: aso.appId must be an App Store app id`);
       if (a.locale !== undefined && !/^[a-z]{2,3}(-[A-Za-z0-9]{2,4})*$/.test(a.locale)) fail(`${name}: aso.locale must be an App Store Connect locale like en-US`);
       if (a.storefront !== undefined && !/^[a-z]{2}$/.test(a.storefront)) fail(`${name}: aso.storefront must be a two-letter storefront like us`);
-      if (a.autonomy !== undefined && !["off", "report", "propose"].includes(a.autonomy)) fail(`${name}: unknown aso.autonomy "${a.autonomy}"`);
+      if (a.autonomy !== undefined && !["off", "report", "propose", "apply"].includes(a.autonomy)) fail(`${name}: unknown aso.autonomy "${a.autonomy}"`);
+      if (a.platform !== undefined && !["IOS", "MAC_OS"].includes(a.platform)) fail(`${name}: aso.platform must be IOS or MAC_OS`);
       if (!config.aso) fail(`${name}: aso needs the runner-wide aso.cli`);
     }
     if (!(policy.minReviewConfidence > 0 && policy.minReviewConfidence <= 1)) fail(`${name}: minReviewConfidence must be in (0, 1]`);
