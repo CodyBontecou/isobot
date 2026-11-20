@@ -221,10 +221,17 @@ export function parseProposal(value: unknown, current: Listing): Proposal {
     const text = String(v[key] ?? "").replace(/\s+/g, key === "keywords" ? "" : " ").trim();
     return text && chars(text) <= LIMITS[key] ? text : current[key];
   };
-  let name = field("name");
+  // Other companies' names (guideline 2.3.7): never added, only kept where the live listing already has them.
+  const noNewBrands = (key: "name" | "subtitle") => {
+    const text = field(key);
+    return brandsIn(text).every(b => brandsIn(current[key]).includes(b)) ? text : current[key];
+  };
+  let name = noNewBrands("name");
   const brand = brandOf(current.name);
   if (brand && !name.toLocaleLowerCase().includes(brand.toLocaleLowerCase())) name = current.name;
-  const keywords = field("keywords").split(",").map(k => k.trim()).filter(Boolean).join(",");
+  const live = new Set(current.keywords.toLocaleLowerCase().split(",").map(k => k.trim()));
+  const keywords = field("keywords").split(",").map(k => k.trim())
+    .filter(k => k && (!BRANDS.includes(k.toLocaleLowerCase()) || live.has(k.toLocaleLowerCase()))).join(",");
   const seen = new Set<string>();
   const newPhrases = (Array.isArray(v.newPhrases) ? v.newPhrases : []).flatMap(raw => {
     const p = raw as Record<string, unknown>;
@@ -237,7 +244,7 @@ export function parseProposal(value: unknown, current: Listing): Proposal {
     action: v.action === "propose" ? "propose" : "skip",
     reason: String(v.reason ?? "").trim().slice(0, 1000),
     rationale: String(v.rationale ?? "").trim().slice(0, 3000),
-    name, subtitle: field("subtitle"), keywords: keywords || current.keywords, promotionalText: field("promotionalText"), newPhrases,
+    name, subtitle: noNewBrands("subtitle"), keywords: keywords || current.keywords, promotionalText: field("promotionalText"), newPhrases,
   };
   if (proposal.action === "propose" && (["name", "subtitle", "keywords", "promotionalText"] as const).every(k => proposal[k] === current[k])) {
     return { ...proposal, action: "skip", reason: proposal.reason || "the proposal matched the current listing" };
@@ -316,6 +323,17 @@ export interface PendingListing {
   waitNoted?: boolean;
   /** The last apply error the owner heard about, so a failing hour doesn't repeat itself. */
   lastError?: string;
+}
+
+/** One applied change: `aso:<appId>:history`. */
+export interface Applied {
+  at: string;
+  fields: (keyof Listing)[];
+  draft: Listing;
+  /** The App Store version the name, subtitle and keywords went onto; absent when only promotional text changed. */
+  version?: string;
+  /** When that version went live. */
+  liveAt?: string;
 }
 
 /** The fields an approval changes: those the draft changed, or every non-empty one without a base. */
@@ -433,11 +451,13 @@ export class AsoTrain {
 
   /** Whether an app's next listing research is due. */
   researchDue(app: App): boolean {
-    if ((app.aso.autonomy ?? "propose") !== "propose" || !this.inHours()) return false;
+    const mode = app.aso.autonomy ?? "propose";
+    if ((mode !== "propose" && mode !== "apply") || !this.inHours()) return false;
     // The report goes first on its day, so research reads the same week's picture.
     if (this.limits.reportWeekday !== null && this.now().getDay() === this.limits.reportWeekday && this.deps.store.cursor(this.key(app, "report")) !== localDay(this.now())) return false;
-    // An approved proposal still waiting for a version would be drafted over; wait for it to land.
-    if (this.pending(app)?.state === "approved") return false;
+    // An owner-approved proposal still waiting for a version would be drafted over; wait for it to land.
+    // On its own (apply), a newer draft simply replaces one that isn't live yet.
+    if (mode === "propose" && this.pending(app)?.state === "approved") return false;
     const last = this.deps.store.cursor(this.key(app, "research"));
     return !last || this.now().getTime() - Date.parse(last) >= this.limits.researchEveryDays * 86_400_000 - 3_600_000;
   }
@@ -453,22 +473,71 @@ export class AsoTrain {
     if (dryRun) return result;
     store.setCursor(this.key(app, "proposal"), JSON.stringify({ at: this.now().toISOString(), ...result.proposal }));
     store.event(null, result.proposal.action === "skip" ? "aso_skip" : "aso_proposed", `${this.name(app)}: ${result.proposal.action === "skip" ? result.proposal.reason : result.proposal.name}`);
+    const auto = app.aso.autonomy === "apply";
     const parts = splitMessage(result.message);
     let ref: MessageRef | null = null;
     for (const [i, part] of parts.entries()) {
       const last = i === parts.length - 1 && result.proposal.action === "propose";
-      const posted = await this.deps.notifier.discord(part, last && this.deps.approvals ? [APPROVE, REJECT] : []);
+      const posted = await this.deps.notifier.discord(part, last && !auto && this.deps.approvals ? [APPROVE, REJECT] : []);
       if (last) ref = posted || null;
     }
     if (result.proposal.action === "propose") {
       const old = this.pending(app);
-      if (old?.state === "open") this.savePending(app, { ...old, state: "superseded" });
+      if (old?.state === "open" || old?.state === "approved") this.savePending(app, { ...old, state: "superseded" });
       this.savePending(app, {
-        at: this.now().toISOString(), locale: app.aso.locale ?? "en-US", ref, base: result.base, state: "open",
+        at: this.now().toISOString(), locale: app.aso.locale ?? "en-US", ref, base: result.base,
+        state: auto ? "approved" : "open", ...(auto ? { approvedBy: "auto" } : {}),
         draft: { name: result.proposal.name, subtitle: result.proposal.subtitle, keywords: result.proposal.keywords, promotionalText: result.proposal.promotionalText },
       });
+      if (auto) {
+        this.deps.store.event(null, "aso_approved", `${this.name(app)}: on its own`);
+        // A failure is posted by apply and retried by poll.
+        await this.apply(app).catch(() => undefined);
+      }
     }
     return result;
+  }
+
+  /** Listing changes isobot made, newest last: `aso:<appId>:history`. */
+  history(app: App): Applied[] {
+    const raw = this.deps.store.cursor(this.key(app, "history"));
+    return raw ? JSON.parse(raw) as Applied[] : [];
+  }
+
+  private record(app: App, entry: Applied): void {
+    const list = this.history(app).filter(e => e.at !== entry.at);
+    this.deps.store.setCursor(this.key(app, "history"), JSON.stringify([...list, entry].slice(-10)));
+  }
+
+  /** Notes when versioned changes reach the App Store, so the next research can judge them by their ranks. */
+  private async trackLive(app: App): Promise<void> {
+    const waiting = this.history(app).filter(e => e.version && !e.liveAt);
+    if (!waiting.length || !this.deps.asc) return;
+    const r = await this.deps.asc(["versions", "list", "--app", app.aso.appId, "--platform", app.aso.platform ?? "IOS", "--limit", "20", "--output", "json"]);
+    if (!r.ok) return;
+    const { live } = pickVersions(JSON.parse(r.stdout));
+    for (const e of waiting) {
+      if (live?.version === e.version) {
+        this.record(app, { ...e, liveAt: this.now().toISOString() });
+        this.deps.store.event(null, "aso_live", `${this.name(app)}: listing live with ${e.version}`);
+      }
+    }
+  }
+
+  /** What the last changes did to ranks, for the research prompt. */
+  private outcomes(app: App): string {
+    const lines = this.history(app).slice(-3).map(e => {
+      const what = `${e.at.slice(0, 10)}: ${e.fields.join(", ")} → ${JSON.stringify(e.draft)}`;
+      if (e.fields.every(f => f === "promotionalText")) return `- ${what} (promotional text only: not indexed, no rank effect)`;
+      if (!e.liveAt) return `- ${what} (${e.version ? `set on ${e.version}, not live yet` : "waiting for an App Store version"})`;
+      const before = this.snapshotOnOrBefore(app, localDay(new Date(Date.parse(e.liveAt) - 86_400_000)));
+      const after = this.snapshotOnOrBefore(app, localDay(this.now()));
+      if (!before || !after || before.day >= after.day) return `- ${what} (live since ${e.liveAt.slice(0, 10)}; no rank data to compare yet)`;
+      const m = movers(before.snap, after.snap, app.aso.storefront ?? "us");
+      const top = (xs: Move[]) => xs.slice(0, 6).map(x => `${x.text} ${place(x.from)}→${place(x.to)}`).join("; ");
+      return `- ${what} (live since ${e.liveAt.slice(0, 10)}; ${before.day} → ${after.day}: ranked ${m.before.ranked}→${m.now.ranked}, top 10 ${m.before.top10}→${m.now.top10}, top 50 ${m.before.top50}→${m.now.top50}. Up: ${top(m.gained) || "none"}. Down: ${top(m.lost) || "none"})`;
+    });
+    return lines.length ? `Listing changes isobot made, and what ranks did since they went live (judge them: keep what worked, undo what lost ground):\n${lines.join("\n")}` : "";
   }
 
   pending(app: App): PendingListing | null {
@@ -492,6 +561,7 @@ export class AsoTrain {
   }
 
   private async pollApp(app: App): Promise<void> {
+    await this.trackLive(app);
     const p = this.pending(app);
     if (!p) return;
     if (p.state === "open") {
@@ -593,7 +663,10 @@ export class AsoTrain {
       const done = (!fields.includes("promotionalText") || p.promoDone) && (!versioned.length || p.listingDoneOn);
       p = { ...p, state: done ? "done" : "approved", lastError: undefined };
       this.savePending(app, p);
-      if (done) this.deps.store.event(null, "aso_applied", `${this.name(app)}: ${fields.join(", ")}${p.listingDoneOn ? ` on ${p.listingDoneOn}` : ""}`);
+      if (done) {
+        this.deps.store.event(null, "aso_applied", `${this.name(app)}: ${fields.join(", ")}${p.listingDoneOn ? ` on ${p.listingDoneOn}` : ""}`);
+        this.record(app, { at: p.at, fields, draft: p.draft, ...(p.listingDoneOn ? { version: p.listingDoneOn } : {}) });
+      }
     } catch (error) {
       const message = (error as Error).message.slice(0, 400);
       const quiet = p.lastError === message;
@@ -603,7 +676,8 @@ export class AsoTrain {
       throw error;
     }
     if (!lines.length) return "nothing new to apply";
-    const text = `${APPROVE} **${this.name(app)}** listing${by && by !== "cli" ? ` (approved by <@${by}>)` : ""}: ${lines.join(" ")}`;
+    const who = p.approvedBy === "auto" ? " (on its own)" : by && by !== "cli" ? ` (approved by <@${by}>)` : "";
+    const text = `${APPROVE} **${this.name(app)}** listing${who}: ${lines.join(" ")}`;
     await this.deps.notifier.discord(text);
     return text;
   }
@@ -631,9 +705,10 @@ export class AsoTrain {
       `App: ${this.name(app)} (App Store id ${appId})`, `Locale: ${locale} · storefront: ${storefront}`, `Today: ${localDay(this.now())}`,
       `Current listing${refresh}:\n${JSON.stringify({ name: current.name, subtitle: current.subtitle, keywords: current.keywords, promotionalText: current.promotionalText }, null, 1)}`,
       `Measured phrases (${cells.length} tracked in ${storefront}; up to 150 with the highest demand). phrase | rank | demand | difficulty | coverage:\n${table.join("\n") || "(none measured yet)"}`,
-      previous ? `Your previous proposal (JSON; whether the owner applied it shows in the current listing):\n${previous.slice(0, 4000)}` : "No previous proposal.",
+      previous ? `Your previous proposal (JSON; whether it's live shows in the current listing):\n${previous.slice(0, 4000)}` : "No previous proposal.",
+      this.outcomes(app),
       "The app's repository (main branch) is the current directory, read-only.",
-    ].join("\n\n");
+    ].filter(Boolean).join("\n\n");
     const repo = this.deps.repo(app.owner, app.repo);
     const name = `aso__research-${Date.now()}`;
     const dir = await repo.checkoutAt(await repo.sync(await github.defaultBranch(app.owner, app.repo)), name);
@@ -684,7 +759,7 @@ export class AsoTrain {
     const unmeasured = fresh.length - newCells.length;
     const newNote = fresh.length && unmeasured
       ? `\n⚠️ ${unmeasured} of ${fresh.length} new phrases weren't measured${importError ? `: ${importError.slice(0, 200)}` : ""}` : "";
-    return { proposal, base: { name: current.name, subtitle: current.subtitle, keywords: current.keywords, promotionalText: current.promotionalText }, message: proposalMessage({ app: this.name(app), locale, current, proposal, measured, newCells, notes: `${newNote}${draftNote}` }) };
+    return { proposal, base: { name: current.name, subtitle: current.subtitle, keywords: current.keywords, promotionalText: current.promotionalText }, message: proposalMessage({ app: this.name(app), locale, current, proposal, measured, newCells, notes: `${newNote}${draftNote}`, auto: app.aso.autonomy === "apply" }) };
   }
 }
 
@@ -699,7 +774,7 @@ const FIELD_NAMES: Record<keyof Listing, string> = { name: "Name", subtitle: "Su
 /** The staff-channel proposal: the exact diff, the tracker's measurements, and what applying it takes. */
 export function proposalMessage(input: {
   app: string; locale: string; current: Listing; proposal: Proposal;
-  measured: ReturnType<typeof measuredOption>; newCells: Cell[]; notes?: string;
+  measured: ReturnType<typeof measuredOption>; newCells: Cell[]; notes?: string; auto?: boolean;
 }): string {
   const { current, proposal } = input;
   const fields = (Object.keys(FIELD_NAMES) as (keyof Listing)[]).filter(k => proposal[k] !== current[k]);
@@ -717,19 +792,24 @@ export function proposalMessage(input: {
     fresh.length ? `**New phrases now tracked**\n${fresh.join("\n")}` : "",
     input.notes?.trim() ?? "",
     brands.length ? `⚠️ The keyword field has other companies' names (${brands.map(b => `\`${b}\``).join(", ")}). App Review can reject that (guideline 2.3.7)${brands.every(b => current.keywords.toLocaleLowerCase().split(",").includes(b)) ? "; they're in the live field already" : ""}.` : "",
-    `Nothing was changed in App Store Connect. ${applyHint(fields)} The draft is also saved as an option in ASO Tracker's audit for ${input.app}.`,
+    input.auto
+      ? `isobot applies this on its own: ${applyParts(fields)}. The draft is also saved as an option in ASO Tracker's audit for ${input.app}.`
+      : `Nothing was changed in App Store Connect. ${applyHint(fields)} The draft is also saved as an option in ASO Tracker's audit for ${input.app}.`,
   ].filter(Boolean).join("\n\n");
 }
 
 /** What ✅ does for these fields. */
 export function applyHint(fields: (keyof Listing)[]): string {
+  return `React ${APPROVE} to apply: ${applyParts(fields)}. ${REJECT} dismisses it. It expires in ${OPEN_DAYS} days.`;
+}
+
+function applyParts(fields: (keyof Listing)[]): string {
   const promo = fields.includes("promotionalText");
   const versioned = fields.filter(k => k !== "promotionalText").map(k => FIELD_NAMES[k].toLocaleLowerCase());
-  const parts = [
+  return [
     promo ? "the promotional text goes live right away" : "",
     versioned.length ? `the ${joinWords(versioned)} go${versioned.length === 1 && versioned[0] !== "keywords" ? "es" : ""} onto the next App Store version once one is in Prepare for Submission` : "",
-  ].filter(Boolean);
-  return `React ${APPROVE} to apply: ${parts.join(", and ")}. ${REJECT} dismisses it. It expires in ${OPEN_DAYS} days.`;
+  ].filter(Boolean).join(", and ");
 }
 
 function joinWords(words: string[]): string {
@@ -738,6 +818,12 @@ function joinWords(words: string[]): string {
 
 /** Other companies' names App Review objects to in the keyword field (guideline 2.3.7). Not exhaustive. */
 const BRANDS = ["apple", "obsidian", "github", "gitlab", "bitbucket", "google", "fitbit", "garmin", "whoop", "oura", "strava", "notion", "dropbox", "evernote", "chatgpt", "openai", "samsung"];
+
+/** Other companies' names in free text, as whole words. */
+export function brandsIn(text: string): string[] {
+  const lower = text.toLocaleLowerCase();
+  return BRANDS.filter(b => new RegExp(`(^|[^a-z])${b}([^a-z]|$)`).test(lower));
+}
 
 export function brandWarnings(keywords: string): string[] {
   const words = keywords.toLocaleLowerCase().split(",").map(w => w.trim());

@@ -43,6 +43,8 @@ class FakeTracker implements AsoClient {
 class FakeAsc {
   calls: string[][] = [];
   editable = false;
+  /** The live version: 3.0.1 until a test releases the next one. */
+  liveVersion = "3.0.1";
   fail: string | null = null;
   async run(args: string[]) {
     this.calls.push(args);
@@ -50,7 +52,7 @@ class FakeAsc {
     const attrs = (version: string, state: string, createdDate: string) => ({ versionString: version, appVersionState: state, createdDate });
     if (args[0] === "versions") {
       return { ok: true, stderr: "", stdout: JSON.stringify({ data: [
-        { id: "v301", attributes: attrs("3.0.1", "READY_FOR_DISTRIBUTION", "2026-11-16T11:00:00Z") },
+        { id: "v301", attributes: attrs(this.liveVersion, "READY_FOR_DISTRIBUTION", this.liveVersion === "3.0.1" ? "2026-11-16T11:00:00Z" : "2026-11-25T11:00:00Z") },
         { id: "v300", attributes: attrs("3.0.0", "READY_FOR_DISTRIBUTION", "2026-11-01T11:00:00Z") },
         ...(this.editable ? [{ id: "v310", attributes: attrs("3.1.0", "PREPARE_FOR_SUBMISSION", "2026-11-25T11:00:00Z") }] : []),
       ] }) };
@@ -372,4 +374,51 @@ test("version and app info picking, brand warnings and the apply hint", () => {
   assert.match(applyHint(["promotionalText"]), /^React ✅ to apply: the promotional text goes live right away\. 🛑/);
   assert.match(applyHint(["keywords"]), /the keywords go onto/);
   assert.match(applyHint(["subtitle"]), /the subtitle goes onto/);
+});
+
+test("on its own (apply), a proposal is applied without reactions, replaces one not live yet, and its outcome feeds the next research", async () => {
+  const t = setup({ autonomy: "apply" });
+  t.store.setCursor("aso:6758960270:report", "2026-11-23");
+  t.setOutput(DRAFT);
+  await t.train.maybeResearch(t.app);
+  assert.deepEqual(t.reactions.at(-2), [], "no ✅ / 🛑 to answer");
+  assert.match(t.posts.at(-2)!, /isobot applies this on its own: the promotional text goes live right away, and the name and keywords go onto the next App Store version/);
+  assert.match(t.posts.at(-1)!, /listing \(on its own\): Promotional text is live on 3\.0\.1\. The name and keywords wait/);
+  assert.equal(t.train.pending(t.app)!.state, "approved");
+
+  // A week on, nothing was released: the next draft replaces the waiting one.
+  t.setNow("2026-11-30T09:00:00");
+  t.store.setCursor("aso:6758960270:report", "2026-11-30");
+  assert.equal(t.train.researchDue(t.app), true, "an unreleased change doesn't block research");
+  t.setOutput({ ...DRAFT, promotionalText: "Second try." });
+  await t.train.maybeResearch(t.app);
+  assert.equal(t.train.pending(t.app)!.draft.promotionalText, "Second try.");
+
+  // A version opens: the rest goes onto it; once it's live, ranks since then reach the next prompt.
+  t.asc.editable = true;
+  await t.train.poll();
+  assert.equal(t.train.pending(t.app)!.state, "done");
+  assert.deepEqual(t.train.history(t.app).map(e => e.version), ["3.1.0"]);
+  t.store.setCursor("aso:6758960270:day:2026-11-29", JSON.stringify({ "us|git notes": [80, 60] }));
+  t.store.setCursor("aso:6758960270:day:2026-12-14", JSON.stringify({ "us|git notes": [9, 60] }));
+  t.setNow("2026-12-01T09:00:00");
+  t.asc.editable = false;
+  t.asc.liveVersion = "3.1.0";
+  await t.train.poll();
+  assert.ok(t.train.history(t.app)[0].liveAt, "noticed the version going live");
+  t.setNow("2026-12-14T09:00:00");
+  t.store.setCursor("aso:6758960270:report", "2026-12-14");
+  await t.train.maybeResearch(t.app);
+  assert.match(t.agents.at(-1)!.prompt, /Listing changes isobot made.*\n- 2026-11-30: name, keywords, promotionalText .*live since 2026-12-01; 2026-11-29 → 2026-12-14: ranked 1→1, top 10 0→1.*Up: git notes #80→#9/s);
+});
+
+test("a proposal never adds other companies' names, but keeps ones the live listing already has", () => {
+  const current: Listing = { name: "Health.md", subtitle: "Daily Health Journal", keywords: "obsidian,hrv,sleep", promotionalText: "" };
+  const p = parseProposal({
+    action: "propose", name: "Health.md: Fitbit Export", subtitle: "Garmin & Health Journal", keywords: "obsidian,garmin,hrv,steps",
+    promotionalText: "", rationale: "", reason: "", newPhrases: [],
+  }, current);
+  assert.equal(p.name, "Health.md", "a new brand in the name falls back");
+  assert.equal(p.subtitle, current.subtitle);
+  assert.equal(p.keywords, "obsidian,hrv,steps");
 });

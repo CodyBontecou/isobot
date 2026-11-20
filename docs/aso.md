@@ -16,14 +16,23 @@ app that measures App Store search. Code: `runner/src/aso.ts`.
    phrases worth measuring. The runner then measures the new phrases (`keywords_import`) and the draft itself
    (`audit.option.add`) through the tracker, and posts the exact diff with those measurements to the staff channel.
 
-4. **Apply (on your ✅).** See [Applying a proposal](#applying-a-proposal).
+4. **Apply.** With `autonomy: "apply"` (all four apps), isobot applies its own proposals; with `propose`, an owner's ✅
+   does. See [Applying a proposal](#applying-a-proposal).
+5. **Learn.** Each applied change is kept (`aso:<appId>:history`). Once its version is live, the next research run
+   sees how ranks moved since, so it keeps what worked and undoes what lost ground.
 
-Only an owner's approval writes to App Store Connect. Listing text, and the keyword field above all, is private
+Only a proposal (applied on its own, or approved) writes to App Store Connect. Listing text, and the keyword field above all, is private
 strategy, so it goes only to the private staff channel, never into GitHub issues: the app repositories are public.
 
 ## Applying a proposal
 
-A proposal's last message carries ✅ and 🛑. Every 5 minutes the runner reads them; only people on the staff chat's
+With `autonomy: "apply"`, a proposal is applied as soon as it's measured, exactly as a ✅ would apply it, and the
+staff channel gets the diff and what was written, for the record. A new weekly proposal replaces one whose fields
+haven't gone live yet. Guards that hold either way: the brand stays at the start of the name, Apple's limits are
+kept, every claim is checked against the app's code, and no other company's name is added to the name, subtitle or
+keyword field (ones the live listing already has are kept).
+
+With `propose`, a proposal's last message carries ✅ and 🛑. Every 5 minutes the runner reads them; only people on the staff chat's
 allowlist (`ISOBOT_CHAT_USERS`) count.
 
 - **✅** writes the promotional text to the live version at once (and to an editable version, if one exists), because
@@ -55,7 +64,8 @@ reject that under guideline 2.3.7.
 ```
 
 Per app: `locale` (default `en-US`), `storefront` (default `us`), `notes` (brand, tone, phrases to keep) and
-`autonomy`: `off`, `report` (snapshot and report only) or `propose` (default), and `platform` (`IOS`, the default,
+`autonomy`: `off`, `report` (snapshot and report only), `propose` (default; applied on an owner's ✅) or `apply`
+(applied without asking), and `platform` (`IOS`, the default,
 or `MAC_OS`) for where an approved proposal is written. Proposals always keep the brand at
 the start of the name. A field over Apple's limit falls back to the current text.
 
