@@ -8,6 +8,12 @@ Apple's own numbers for each App Store app, from the App Store Connect Analytics
   subscriptions (paid, in trial, offer starts, conversions, churn). A flag posts a check-in on its own: new
   downloads at 2× or under 0.4× the 7-day average (when that is at least 5 a day), 3 or more churned subscriptions
   at twice the usual rate, or no new data for 5 days.
+- **First-run paywall funnel** (in the check-in over the last 7 days, and in the weekly report against the week
+  before): every app shows its paywall on first launch, so Apple's first-time downloads stand in for paywall
+  views. Subscription apps get paywall → trial (offer starts per download) and paywall → paid (subscriptions from
+  an offer, or Apple's direct `Subscribe` event, per download); apps without subscription events get paywall →
+  purchase. Apple can't see the paywall itself, and a download that's never opened counts too, so the rates are a
+  floor. Cohorts don't line up day by day (a trial converts a week later), so it's never shown for a single day.
 - **Weekly ASO report** ([ASO train](aso.md)): the last 7 days against the 7 before, and the same line in the
   listing research prompt. A week counts only when all 7 days have arrived, so a first backfill doesn't read as a
   jump.
@@ -38,9 +44,9 @@ State is in `runner.sqlite` cursors: `analytics:<appId>:day:<date>` (kept 400 da
 ## What it doesn't cover
 
 Apple's data stops at the App Store and StoreKit: impressions, page views, downloads, purchases and subscription
-events. It has no paywall views or paywall variants, and nothing about what people do inside the app between
-install and purchase. That needs in-app events of our own or a paywall SDK, which is a product decision, not a
-runner one.
+events. It has no real paywall views (repeat views, or the paywall opened from Settings), no paywall variants, and
+nothing about what people do inside the app between install and purchase. The apps removed their own analytics on
+2026-10-29 and stay that way: the first-run funnel above is built from Apple's numbers only.
 
 ## Configuration
 

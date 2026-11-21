@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { aggregate, AppAnalytics, conversion, dayLine, flags, mergeDay, paidSubscriptions, parseTsv, weekText, type AppDay } from "./analytics.js";
+import { aggregate, AppAnalytics, conversion, dayLine, flags, mergeDay, paidSubscriptions, parseTsv, paywall, paywallText, weekText, type AppDay } from "./analytics.js";
 import { formatCheckIn, type NeedsMe } from "./chatTools.js";
 import { reportText } from "./aso.js";
 import { validateConfig } from "./config.js";
@@ -88,6 +88,23 @@ test("the check-in line gives the day's numbers against the week before", () => 
   assert.equal(dayLine("GitSync.md", { day: "2026-11-17", m: { firstDownloads: 3, impressions: 90, pageViews: 0 } }, []), "**GitSync.md** (Nov 17): 3 new downloads · 90 impressions → 0 page views");
 });
 
+test("the first-run paywall funnel: per download, by subscriptions or by purchases", () => {
+  const sub = paywall({ firstDownloads: 80, purchases: 60, subEvents: { "Offer start": 32, "Paid subscription from offer": 14, Subscribe: 2, Renewal: 30 } })!;
+  assert.deepEqual(sub, { kind: "subscription", shown: 80, trials: 32, paid: 16, trialPct: 40, paidPct: 20 });
+  assert.equal(paywallText(sub), "paywall → trial 40%, → paid 20%");
+  assert.equal(paywallText(sub, { ...sub, trialPct: 30, paidPct: 25 }), "paywall → trial 40% (was 30%), → paid 20% (was 25%)");
+  // A lifetime-unlock app has purchases and no subscription events.
+  const once = paywall({ firstDownloads: 200, purchases: 19, subEvents: {} })!;
+  assert.deepEqual(once, { kind: "purchase", shown: 200, trials: null, paid: 19, trialPct: null, paidPct: 9.5 });
+  assert.equal(paywallText(once), "paywall → purchase 9.5%");
+  assert.equal(paywall({ firstDownloads: 0, purchases: 2 }), null);
+  assert.equal(paywall({ firstDownloads: 5 }), null);
+  // The check-in gives it over the last 7 days, not for one noisy day.
+  const week = days("2026-11-11", Array(7).fill({ firstDownloads: 10, subEvents: { "Offer start": 4, "Paid subscription from offer": 2 } }));
+  assert.match(dayLine("Health.md", week[6], week.slice(0, 6), week), / · paywall → trial 40%, → paid 20% \(7 days\)$/);
+  assert.doesNotMatch(dayLine("Health.md", week[6], week.slice(0, 6), week.slice(1)), /paywall/);
+});
+
 test("flags: download jumps and drops, churn spikes, and data that stopped arriving", () => {
   const week = days("2026-11-10", Array(7).fill({ firstDownloads: 10, subEvents: { "Voluntary churn": 1 } }));
   const at = (m: AppDay["m"]) => ({ day: "2026-11-17", m });
@@ -103,7 +120,7 @@ test("flags: download jumps and drops, churn spikes, and data that stopped arriv
 test("the weekly line compares the last 7 days with the 7 before", () => {
   const a = days("2026-11-11", Array(7).fill({ impressions: 100, pageViews: 10, firstDownloads: 3, purchases: 1, proceeds: 5, subStates: { "Full price": 20 } }));
   const b = days("2026-11-04", Array(7).fill({ impressions: 80, pageViews: 10, firstDownloads: 2, purchases: 1, proceeds: 5, subStates: { "Full price": 18 } }));
-  assert.equal(weekText(a, b), "**App Store analytics** (Nov 11–Nov 17, vs the 7 days before): impressions 700 (+25%) · page views 70 (+0%) · page → download 30% (was 20%) · new downloads 21 (+50%) · proceeds $35.00 (+0%) · paid subscriptions 20 (was 18)");
+  assert.equal(weekText(a, b), "**App Store analytics** (Nov 11–Nov 17, vs the 7 days before): impressions 700 (+25%) · page views 70 (+0%) · page → download 30% (was 20%) · new downloads 21 (+50%) · proceeds $35.00 (+0%) · paywall → purchase 33.3% (was 50%) · paid subscriptions 20 (was 18)");
   assert.equal(weekText([], b), null);
   assert.match(weekText(a, [])!, /^\*\*App Store analytics\*\* \(Nov 11–Nov 17\): impressions 700 · /);
   // A week still filling in isn't reported, and isn't compared against.

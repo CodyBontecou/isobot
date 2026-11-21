@@ -190,6 +190,45 @@ export function sumDays(days: AppDay[]): DayMetrics & { days: number } {
   return total;
 }
 
+/**
+ * The first-run paywall's funnel over a run of days, from Apple's numbers. Every app shows its paywall on first
+ * launch, so first-time downloads stand in for paywall views (Apple can't see the paywall; a download never
+ * opened counts too, so the rates are a floor). Subscription apps: offer starts (free trials) and paid
+ * subscriptions, from an offer or straight, per download. Apps without subscription events: purchases per download.
+ * Cohorts don't line up day by day (a trial converts a week later), so read it over a week or more.
+ */
+export interface Paywall {
+  kind: "subscription" | "purchase";
+  /** First-time downloads: the paywall's first-run audience. */
+  shown: number;
+  trials: number | null;
+  paid: number;
+  trialPct: number | null;
+  paidPct: number;
+}
+
+export function paywall(m: DayMetrics): Paywall | null {
+  if (!m.firstDownloads) return null;
+  const rate = (x: number) => Math.round((x / m.firstDownloads!) * 1000) / 10;
+  const events = m.subEvents && Object.keys(m.subEvents).length ? m.subEvents : null;
+  if (events) {
+    const trials = events["Offer start"] ?? 0;
+    const paid = (events["Paid subscription from offer"] ?? 0) + (events["Subscribe"] ?? 0);
+    return { kind: "subscription", shown: m.firstDownloads, trials, paid, trialPct: rate(trials), paidPct: rate(paid) };
+  }
+  if (m.purchases === undefined) return null;
+  return { kind: "purchase", shown: m.firstDownloads, trials: null, paid: m.purchases, trialPct: null, paidPct: rate(m.purchases) };
+}
+
+/** "paywall: 39% start a trial, 20% subscribe" for a check-in or report line. */
+export function paywallText(p: Paywall | null, before?: Paywall | null): string | null {
+  if (!p) return null;
+  const was = (now: number | null, then: number | null | undefined) => now !== null && then !== null && then !== undefined && before?.kind === p.kind ? ` (was ${then}%)` : "";
+  return p.kind === "subscription"
+    ? `paywall → trial ${p.trialPct}%${was(p.trialPct, before?.trialPct)}, → paid ${p.paidPct}%${was(p.paidPct, before?.paidPct)}`
+    : `paywall → purchase ${p.paidPct}%${was(p.paidPct, before?.paidPct)}`;
+}
+
 /** Product page view → first-time download, as a percentage. */
 export function conversion(m: DayMetrics): number | null {
   if (!m.pageViews || m.firstDownloads === undefined) return null;
@@ -203,7 +242,7 @@ const shortDay = (day: string) => new Date(`${day}T12:00:00Z`).toLocaleDateStrin
 const addDays = (day: string, by: number) => new Date(Date.parse(`${day}T12:00:00Z`) + by * 86_400_000).toISOString().slice(0, 10);
 
 /** One app's line in the daily check-in: its latest complete day, against the 7 days before. */
-export function dayLine(name: string, day: AppDay, before: AppDay[]): string {
+export function dayLine(name: string, day: AppDay, before: AppDay[], week?: AppDay[]): string {
   const m = day.m;
   const avg = (f: (x: DayMetrics) => number | null | undefined) => {
     const xs = before.map(d => f(d.m)).filter((x): x is number => typeof x === "number");
@@ -230,6 +269,8 @@ export function dayLine(name: string, day: AppDay, before: AppDay[]): string {
     }
     if (subs.length) parts.push(`subs: ${subs.join("; ")}`);
   }
+  const funnel = week?.length === 7 ? paywallText(paywall(sumDays(week))) : null;
+  if (funnel) parts.push(`${funnel} (7 days)`);
   return `**${name}** (${shortDay(day.day)}): ${parts.join(" · ") || "no activity"}`;
 }
 
@@ -276,6 +317,8 @@ export function weekText(thisWeek: AppDay[], lastWeek: AppDay[]): string | null 
     item("new downloads", a.firstDownloads, b?.firstDownloads),
     a.purchases ? item("proceeds", a.proceeds, b?.proceeds, usd) : null,
   ].filter(Boolean);
+  const funnel = paywallText(paywall(a), b ? paywall(b) : null);
+  if (funnel) parts.push(funnel);
   const paid = paidSubscriptions(a);
   const paidBefore = b ? paidSubscriptions(b) : null;
   if (paid !== null) parts.push(`paid subscriptions ${paid}${paidBefore !== null ? ` (was ${paidBefore})` : ""}`);
@@ -455,7 +498,7 @@ export class AppAnalytics implements AnalyticsView {
       const day = this.latest(appId);
       if (!day) continue;
       const before = this.days(appId, addDays(day.day, -7), addDays(day.day, -1));
-      lines.push(dayLine(this.name(appId), day, before));
+      lines.push(dayLine(this.name(appId), day, before, this.days(appId, addDays(day.day, -6), day.day)));
       found.push(...flags(this.name(appId), day, before, today));
     }
     return { lines, flags: found };
@@ -470,14 +513,14 @@ export class AppAnalytics implements AnalyticsView {
   describe(app: string | null, days: number): unknown {
     const apps = this.apps();
     if (!apps.length) return { error: "App Store analytics isn't configured on this runner (analytics in the runner config)" };
-    const note = "Apple's App Store Connect analytics, summed over territories and devices. pageViews are product page views; conversionPct is first-time downloads per product page view; proceeds are USD after Apple's commission; subStates are subscriptions by state on that day (a level, not a sum); subEvents count Apple's subscription event groups. Apple drops rows under its privacy thresholds, so small numbers are approximate, and the newest day is usually 2 days ago.";
+    const note = "Apple's App Store Connect analytics, summed over territories and devices. pageViews are product page views; conversionPct is first-time downloads per product page view; paywall is the first-run paywall funnel: every app shows its paywall on first launch, so shown is first-time downloads (Apple can't see the paywall itself; a download never opened counts too, so rates are a floor), trials are offer starts, paid is subscriptions from an offer or direct (or purchases, for apps without subscriptions); read it over a week, since trials convert days later; proceeds are USD after Apple's commission; subStates are subscriptions by state on that day (a level, not a sum); subEvents count Apple's subscription event groups. Apple drops rows under its privacy thresholds, so small numbers are approximate, and the newest day is usually 2 days ago.";
     if (!app) {
       return {
         note,
         apps: apps.map(a => {
           const day = this.latest(a.appId);
           const week = day ? sumDays(this.days(a.appId, addDays(day.day, -6), day.day)) : null;
-          return { appId: a.appId, repo: a.repo, name: this.name(a.appId), latestDay: day?.day ?? null, last7Days: week && { ...week, conversionPct: conversion(week), paidSubscriptions: paidSubscriptions(week) } };
+          return { appId: a.appId, repo: a.repo, name: this.name(a.appId), latestDay: day?.day ?? null, last7Days: week && { ...week, conversionPct: conversion(week), paidSubscriptions: paidSubscriptions(week), paywall: paywall(week) } };
         }),
       };
     }

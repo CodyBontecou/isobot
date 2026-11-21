@@ -11,7 +11,8 @@ app that measures App Store search. Code: `runner/src/aso.ts`.
    are in the top 10 and top 50, the biggest gains and losses (weighted by demand) against the snapshot from a week
    earlier, and listing phrases that rank nowhere. The first report is a baseline. With [App Store
    analytics](analytics.md) on, it also carries the app's last 7 days from Apple (impressions, product page views,
-   page → download conversion, new downloads, proceeds, paid subscriptions) against the 7 before, and research
+   page → download conversion, new downloads, proceeds, the first-run paywall's trial and paid rates, paid
+   subscriptions) against the 7 before, and research
    gets the same line, so a listing change is judged by conversion as well as by rank.
 3. **Propose (every `researchEveryDays`).** After that week's report, a Claude run gets the app's current listing
    (refreshed from App Store Connect), its 150 highest-demand measured phrases, its previous proposal and a
