@@ -2,6 +2,7 @@ import { asoApps, type AsoAppConfig, type AsoLimits, type RunnerConfig } from ".
 import type { AgentJsonInput } from "./builder.js";
 import { localDay, type ContentRepoOps } from "./content.js";
 import type { GitHubApi } from "./github.js";
+import type { AnalyticsView } from "./analytics.js";
 import type { Store } from "./store.js";
 
 /**
@@ -55,6 +56,8 @@ export interface AsoDeps {
   asc?: AscRun;
   repo(owner: string, repo: string): ContentRepoOps;
   agent(input: AgentJsonInput): Promise<{ output: unknown }>;
+  /** Apple's App Store analytics (analytics.ts): the report's and research's conversion numbers. */
+  analytics?: Pick<AnalyticsView, "weekLine">;
   now?(): Date;
 }
 
@@ -151,14 +154,14 @@ const place = (rank: number | null) => rank === null ? "—" : `#${rank}`;
 const moveLine = (m: Move) => `\`${m.text}\`${m.storefront === "us" ? "" : ` (${m.storefront})`} ${place(m.from)} → ${place(m.to)}${m.volume !== null ? ` · demand ${Math.round(m.volume)}` : ""}`;
 
 /** The weekly report's Discord text for one app. */
-export function reportText(input: { app: string; today: string; baselineDay: string | null; movers: Movers | null; current: Cell[]; storefront: string; limit?: number }): string {
+export function reportText(input: { app: string; today: string; baselineDay: string | null; movers: Movers | null; current: Cell[]; storefront: string; limit?: number; analytics?: string | null }): string {
   const limit = input.limit ?? 8;
   const head = `📊 **${input.app}** App Store search, week to ${input.today}`;
   const mine = input.current.filter(c => c.storefront === input.storefront && c.checkedAt && !c.error);
   const ranked = mine.filter(c => c.rank !== null);
   const summary = `${input.storefront.toUpperCase()}: ranked for ${ranked.length} of ${mine.length} tracked phrases · top 10: ${ranked.filter(c => c.rank! <= 10).length} · top 50: ${ranked.filter(c => c.rank! <= 50).length}`;
   const wasted = mine.filter(c => c.inListing && c.rank === null).sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0)).slice(0, 5);
-  const lines = [head, summary];
+  const lines = [head, summary, ...(input.analytics ? [input.analytics] : [])];
   if (!input.movers || !input.baselineDay) {
     lines.push("No snapshot from a week ago yet: this one is the baseline, and next week's report compares against it.");
   } else {
@@ -442,11 +445,21 @@ export class AsoTrain {
     const usable = latest && baseline && baseline.day < latest.day ? baseline : null;
     const text = reportText({
       app: this.name(app), today, baselineDay: usable?.day ?? null, storefront: app.aso.storefront ?? "us", current,
-      movers: usable && latest ? movers(usable.snap, latest.snap) : null,
+      movers: usable && latest ? movers(usable.snap, latest.snap) : null, analytics: this.analyticsLine(app),
     });
     store.setCursor(key, today);
     await this.deps.notifier.discord(text);
     return text;
+  }
+
+  /** The app's App Store week from Apple's analytics, or null without it. */
+  private analyticsLine(app: App): string | null {
+    try {
+      return this.deps.analytics?.weekLine(app.aso.appId) ?? null;
+    } catch (error) {
+      console.warn(`[aso] ${this.name(app)} analytics: ${(error as Error).message}`);
+      return null;
+    }
   }
 
   /** Whether an app's next listing research is due. */
@@ -707,6 +720,7 @@ export class AsoTrain {
       `Measured phrases (${cells.length} tracked in ${storefront}; up to 150 with the highest demand). phrase | rank | demand | difficulty | coverage:\n${table.join("\n") || "(none measured yet)"}`,
       previous ? `Your previous proposal (JSON; whether it's live shows in the current listing):\n${previous.slice(0, 4000)}` : "No previous proposal.",
       this.outcomes(app),
+      ((line) => line ? `How the App Store listing converts, from Apple's analytics (impressions and product page views are App Store visits; page → download is first-time downloads per product page view; the promotional text, screenshots and subtitle are what a visitor reads):\n${line.replace(/\*\*/g, "")}` : "")(this.analyticsLine(app)),
       "The app's repository (main branch) is the current directory, read-only.",
     ].filter(Boolean).join("\n\n");
     const repo = this.deps.repo(app.owner, app.repo);

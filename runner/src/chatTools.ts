@@ -8,6 +8,7 @@ import type { Card } from "./notify.js";
 import { Store, type Job } from "./store.js";
 import type { Upload } from "./discordApi.js";
 import { DISCORD_ACTIONS, executeDiscord, layout, prepareDiscord, type DiscordAction, type DiscordAdmin } from "./discordAdmin.js";
+import type { AnalyticsView, CheckInAnalytics } from "./analytics.js";
 
 /**
  * What isobot's staff chat can see and do. The chat model gets read-only tools plus one way to act:
@@ -61,6 +62,8 @@ export interface ChatToolDeps {
   asc?(args: string[], options: { readOnly: boolean }): Promise<{ ok: boolean; output: string }>;
   /** The Discord server, for reading its layout and (after 👍) creating channels and webhooks. */
   discord?: DiscordAdmin;
+  /** App Store Connect analytics the runner has downloaded (analytics.ts). */
+  analytics?: AnalyticsView;
 }
 
 /** Collected while one model turn runs, posted with the reply. */
@@ -117,6 +120,12 @@ export const CHAT_TOOLS = [
     "Add --help to any command to see its usage, or use [\"search\", \"what you want to do\"]. Prefer --output json.",
     `Allowed commands: ${[...ASC_READ].join(", ")}.`,
   ].join(" "), { args: { type: "array", items: { type: "string" } } }, ["args"]),
+  tool("app_analytics", [
+    "Apple's App Store Connect analytics for isobot's App Store apps, as the runner downloads them daily: impressions, product page views,",
+    "page-to-download conversion, first-time downloads, redownloads, installs and deletions, sessions, purchases and proceeds (USD),",
+    "subscription events (offer starts, conversions, renewals, churn) and subscriptions by state (paid, in trial).",
+    "Without app: every app's last 7 days. With app (repo, app name or App Store id): that app's daily numbers. Prefer this to raw `asc analytics`.",
+  ].join(" "), { app: { type: "string" }, days: NUM("Days to return for one app (default 14, max 120)") }),
   tool("list_discord_channels", "The Discord server's categories and channels: ids, names, kinds, categories, topics, and which are private (hidden from @everyone). Check it before proposing channel changes.", {}),
   tool("attach_text", "Attach a text file (logs, long output, a draft) to your reply in Discord.", { filename: { type: "string" }, content: { type: "string" } }, ["filename", "content"]),
   tool("attach_file", "Attach a file from a checkout or an upload (e.g. a screenshot in the repository) to your reply. 10 MB max.", { path: { type: "string" } }, ["path"]),
@@ -244,6 +253,10 @@ async function dispatch(name: string, args: Record<string, unknown>, deps: ChatT
       const result = await deps.asc(command, { readOnly: true });
       return `${result.ok ? "" : "asc failed:\n"}${redact(result.output) || "(no output)"}`;
     }
+    case "app_analytics": {
+      if (!deps.analytics) throw new ToolError("App Store analytics isn't available on this runner");
+      return json(deps.analytics.describe(typeof args.app === "string" && args.app.trim() ? args.app : null, Number(args.days) || 14));
+    }
     case "list_discord_channels": {
       if (!deps.discord) throw new ToolError("the Discord server isn't available to this chat");
       return json((await layout(deps.discord)).places);
@@ -324,7 +337,7 @@ export async function needsMe(deps: Pick<ChatToolDeps, "store" | "live" | "card"
 }
 
 /** The daily check-in: what needs the owner, without a model. Null when there's nothing to say. */
-export function formatCheckIn(n: NeedsMe, recent: Job[]): string | null {
+export function formatCheckIn(n: NeedsMe, recent: Job[], apps?: CheckInAnalytics): string | null {
   const lines: string[] = [];
   const pausedUntil = n.runner.usageLimitPauseUntil;
   if (n.runner.paused) lines.push("⏸ The runner is paused: say `resume` when you want builds again.");
@@ -338,9 +351,12 @@ export function formatCheckIn(n: NeedsMe, recent: Job[]): string | null {
   section("Proposals awaiting approval", n.proposals.map(p => `${p.repo}#${p.number}: ${p.title}`));
   const day = Date.now() - 86_400_000;
   const done = recent.filter(j => Date.parse(j.updatedAt) > day && ["merged", "released", "shipped"].includes(j.state));
-  if (!lines.length && !done.length) return null;
+  // App numbers ride along on a check-in; only a flag (a jump, a drop, data that stopped) posts one on its own.
+  const appFlags = apps?.flags ?? [];
+  if (!lines.length && !done.length && !appFlags.length) return null;
   const header = `☀️ **isobot check-in**${done.length ? `: ${done.length} job${done.length === 1 ? "" : "s"} landed in the last day (${done.slice(0, 5).map(j => j.id).join(", ")})` : ""}`;
-  return [header, ...(lines.length ? lines : ["Nothing needs you right now."]), "", "Mention me to talk about any of it."].join("\n");
+  const appLines = apps?.lines.length ? ["**App Store**", ...appFlags, ...apps.lines.map(l => `- ${l}`)] : appFlags.length ? ["**App Store**", ...appFlags] : [];
+  return [header, ...(lines.length ? lines : ["Nothing needs you right now."]), ...appLines, "", "Mention me to talk about any of it."].join("\n");
 }
 
 /** Validates a proposal and fills in what the confirmation needs (a PR's head commit, an issue's title). */
