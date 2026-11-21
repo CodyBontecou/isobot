@@ -28,9 +28,10 @@ lists them; `asc analytics request --app <id> --access-type ONGOING` creates one
 
 Every 6 hours, for each app, the runner lists the daily instances of the seven reports it reads (App Store
 Discovery and Engagement, App Downloads, Installation and Deletion, App Sessions, App Store Purchases, Subscription
-Event and Subscription State, all Standard) and downloads the ones it hasn't read, newest first, at most 60 per app
-and pass. A normal day costs about 14 requests per app. The first pass backfills `backfillDays` (35) of
-processing dates over a few passes. A 429 from App Store Connect ends the pass for every app, since the rate limit
+Event and Subscription State, all Standard) and downloads the ones it hasn't read, newest first, at most 20 per app
+and pass (about 135 requests a pass for five apps). A normal day costs about 14 requests per app. A first backfill
+of `backfillDays` (35) of processing dates, about 245 instances per app, takes about 3 days of passes, so it never
+crowds out releases and the ASO train on the shared API key. A 429 from App Store Connect ends the pass for every app, since the rate limit
 belongs to the API key that releases and the ASO train also use, and the next pass comes 65 minutes later instead of
 6 hours.
 
