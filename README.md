@@ -9,7 +9,8 @@ forums also become issues, and comments and issue state mirror both ways.
 
 The [runner](docs/runner.md) is isobot's always-on worker on a Mac: it triages
 Discord, GitHub and email into proposals, and builds approved issues with Claude
-Code through review, merge and release. See [architecture](docs/architecture.md).
+Code through review, merge and release. See [architecture](docs/architecture.md). The [board](docs/board.md) at
+bot.isolated.tech shows its queue, schedule, activity and GitHub work in one place.
 
 The ticket agent uses Cloudflare's [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi).
 `PiHarness` runs Pi Durable on SQLite-backed Durable Objects, with Workers AI

@@ -389,3 +389,14 @@ test("account service failures expose no stored or provider error details", asyn
   assert.equal(session.status, 503);
   assert.equal((await session.text()).includes("secret"), false);
 });
+
+test("AUTH_HOME \"/\" lands web sign-in on the board's root instead of the console", async () => {
+  const env = { AUTH_ORIGIN: "https://bot.isolated.tech", AUTH_HOME: "/", GITHUB_OAUTH_ALLOWED_IDS: "20440899",
+    AccountAuth: { getByName: () => { throw new Error("unused"); } } } as never;
+  const response = await handleAccountRequest(new Request("https://bot.isolated.tech/auth/github/login"), env);
+  assert.equal(response.status, 302);
+  assert.equal(response.headers.get("Location"), "/?authError=not_configured");
+  const console = await handleAccountRequest(new Request("https://pi.isolated.tech/auth/github/login"),
+    { ...(env as object), AUTH_ORIGIN: "https://pi.isolated.tech", AUTH_HOME: undefined } as never);
+  assert.equal(console.headers.get("Location"), "/console?authError=not_configured");
+});

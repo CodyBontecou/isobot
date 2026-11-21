@@ -54,6 +54,8 @@ export interface AccountEnvironment {
   GITHUB_OAUTH_CLIENT_ID?: string;
   GITHUB_OAUTH_CLIENT_SECRET?: string;
   GITHUB_OAUTH_ALLOWED_IDS?: string;
+  /** Where web sign-in lands: "/console" (Pi, the default) or "/" (the isobot board). */
+  AUTH_HOME?: string;
   AccountAuth: { getByName(name: string): AccountRpc };
 }
 
@@ -74,6 +76,10 @@ function fixedOrigin(env: AccountEnvironment): string | null {
     return url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash && url.pathname === "/"
       ? url.origin : null;
   } catch { return null; }
+}
+
+function home(env: AccountEnvironment): "/" | "/console" {
+  return env.AUTH_HOME === "/" ? "/" : "/console";
 }
 
 function allowedIds(env: AccountEnvironment): Set<string> | null {
@@ -131,8 +137,8 @@ function redirect(location: string, cookies: string[] = []): Response {
   return new Response(null, { status: 302, headers });
 }
 
-function failedLogin(code: "not_configured" | "invalid_state" | "denied" | "not_allowed" | "login_failed", native = false): Response {
-  return redirect(native ? `${NATIVE_CALLBACK}?error=${code}` : `/console?authError=${code}`,
+function failedLogin(code: "not_configured" | "invalid_state" | "denied" | "not_allowed" | "login_failed", native = false, landing = "/console"): Response {
+  return redirect(native ? `${NATIVE_CALLBACK}?error=${code}` : `${landing}?authError=${code}`,
     [cookie(FLOW_COOKIE, "", 0), cookie(FLOW_CLIENT_COOKIE, "", 0)]);
 }
 
@@ -251,7 +257,7 @@ function tokenView(token: TokenRecord) {
 }
 
 export async function handleAccountRequest(request: Request, env: AccountEnvironment, fetcher: typeof fetch = fetch): Promise<Response> {
-  const url = new URL(request.url), path = url.pathname;
+  const url = new URL(request.url), path = url.pathname, landing = home(env);
   if (path === "/auth/github/login" || path === "/auth/github/callback") {
     if (request.method !== "GET") return json({ error: "Use GET for GitHub sign in" }, 405, { Allow: "GET" });
     let native = path === "/auth/github/callback" && nativeErrorCallback(request);
@@ -268,7 +274,7 @@ export async function handleAccountRequest(request: Request, env: AccountEnviron
       native = client === "ios";
       nativeCodeChallenge = native ? challenge! : undefined;
     }
-    if (!oauthConfigured(env) || url.origin !== fixedOrigin(env)) return failedLogin("not_configured", native);
+    if (!oauthConfigured(env) || url.origin !== fixedOrigin(env)) return failedLogin("not_configured", native, landing);
     let phase: OAuthPhase = path === "/auth/github/login" ? "flow_create" : "flow_consume";
     try {
       const auth = env.AccountAuth.getByName("accounts");
@@ -278,7 +284,9 @@ export async function handleAccountRequest(request: Request, env: AccountEnviron
           return json({ error: "Invalid conversation" }, 400);
         }
         const state = randomCredential(), codeVerifier = randomCredential();
-        const returnTo = conversation === null ? "/console" : `/console?conversation=${encodeURIComponent(conversation)}`;
+        // The account store only accepts console paths. The board (landing "/") ignores the stored path and
+        // always lands on "/" (see the callback below), so it stores the plain console path.
+        const returnTo = conversation === null || landing === "/" ? "/console" : `/console?conversation=${encodeURIComponent(conversation)}`;
         if (native && !auth.createNativeCode) return failedLogin("not_configured", true);
         await auth.createFlow({ state, codeVerifier, returnTo, expiresAt: Date.now() + 600_000,
           ...(nativeCodeChallenge ? { nativeCodeChallenge } : {}) });
@@ -295,16 +303,16 @@ export async function handleAccountRequest(request: Request, env: AccountEnviron
       }
       const state = url.searchParams.get("state"), boundState = cookieValue(request, FLOW_COOKIE);
       if (!state || !RANDOM.test(state) || !boundState || url.searchParams.getAll("state").length !== 1 || !await equalSecret(state, boundState)) {
-        return failedLogin("invalid_state", native);
+        return failedLogin("invalid_state", native, landing);
       }
       const flow = await auth.consumeFlow({ state });
       if (flow) native = flow.nativeCodeChallenge !== undefined;
-      if (!flow || flow.expiresAt <= Date.now()) return failedLogin("invalid_state", native);
-      if (url.searchParams.has("error")) return failedLogin("denied", native);
+      if (!flow || flow.expiresAt <= Date.now()) return failedLogin("invalid_state", native, landing);
+      if (url.searchParams.has("error")) return failedLogin("denied", native, landing);
       const code = url.searchParams.get("code");
-      if (!code || code.length > 1024 || url.searchParams.getAll("code").length !== 1) return failedLogin("login_failed", native);
+      if (!code || code.length > 1024 || url.searchParams.getAll("code").length !== 1) return failedLogin("login_failed", native, landing);
       const identity = await githubIdentity(code, flow.codeVerifier, env, fetcher);
-      if (!allowedIds(env)!.has(identity.githubId)) return failedLogin("not_allowed", native);
+      if (!allowedIds(env)!.has(identity.githubId)) return failedLogin("not_allowed", native, landing);
       phase = "account_write";
       const account = await auth.upsertAccount(identity);
       if (native) {
@@ -319,13 +327,13 @@ export async function handleAccountRequest(request: Request, env: AccountEnviron
       phase = "session_write";
       await auth.createSession({ accountId: account.accountId, credential, csrfToken, expiresAt: Date.now() + SESSION_SECONDS * 1000 });
       // Return paths are generated at login and checked again before redirecting.
-      const returnTo = /^\/console(?:\?conversation=[A-Za-z0-9_-]{1,100})?$/.test(flow.returnTo) ? flow.returnTo : "/console";
+      const returnTo = landing === "/console" && /^\/console(?:\?conversation=[A-Za-z0-9_-]{1,100})?$/.test(flow.returnTo) ? flow.returnTo : landing;
       return redirect(returnTo, [cookie(FLOW_COOKIE, "", 0), cookie(FLOW_CLIENT_COOKIE, "", 0), cookie(SESSION_COOKIE, credential, SESSION_SECONDS)]);
     } catch (error) {
       console.warn(JSON.stringify({ event: "github_oauth_failed", phase: error instanceof OAuthFailure ? error.phase : phase,
         reason: error instanceof OAuthFailure ? error.reason : "internal_error",
         ...(error instanceof OAuthFailure && error.status !== undefined ? { status: error.status } : {}) }));
-      return failedLogin("login_failed", native);
+      return failedLogin("login_failed", native, landing);
     }
   }
   if (path === "/api/auth/native/exchange") {

@@ -1,4 +1,5 @@
 import { Octokit } from "@octokit/rest";
+import type { BoardItem } from "./dashboard.js";
 import type { PullDetails } from "./chatTools.js";
 import type { Labels } from "./config.js";
 import { RUNNER_MARKER } from "./notes.js";
@@ -246,6 +247,34 @@ export class GitHub implements GitHubApi {
       merged: data.merged, draft: Boolean(data.draft), headSha: data.head.sha, headRef: data.head.ref, baseRef: data.base.ref,
       author: data.user?.login ?? "unknown",
     };
+  }
+
+  /** For the board (dashboard.ts): open issues and PRs, plus those closed since `closedSince`. */
+  async boardItems(owner: string, repo: string, closedSince: string): Promise<BoardItem[]> {
+    const [open, closed] = await Promise.all([
+      this.octokit.paginate(this.octokit.issues.listForRepo, { owner, repo, state: "open", per_page: 100 }, (r, done) => {
+        // Enough for a board; a repo with hundreds of open items shows its newest 300.
+        if (r.data.length < 100 || r.data.length >= 300) done();
+        return r.data;
+      }),
+      this.octokit.issues.listForRepo({ owner, repo, state: "closed", since: closedSince, sort: "updated", direction: "desc", per_page: 100 }).then(r => r.data),
+    ]);
+    return [...open, ...closed.filter(item => item.closed_at && item.closed_at >= closedSince)].map(item => ({
+      repo: `${owner}/${repo}`,
+      number: item.number,
+      kind: item.pull_request ? "pr" as const : "issue" as const,
+      title: item.title,
+      url: item.html_url,
+      state: item.state === "closed" ? "closed" as const : "open" as const,
+      merged: Boolean(item.pull_request?.merged_at),
+      draft: Boolean((item as { draft?: boolean }).draft),
+      author: item.user?.login ?? "ghost",
+      labels: item.labels.map(label => typeof label === "string" ? label : label.name ?? "").filter(Boolean),
+      comments: item.comments,
+      createdAt: item.created_at,
+      updatedAt: item.updated_at,
+      closedAt: item.closed_at ?? null,
+    }));
   }
 
   async openPulls(owner: string, repo: string): Promise<{ number: number; title: string; headRef: string; author: string; draft: boolean }[]> {
