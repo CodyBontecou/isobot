@@ -234,3 +234,13 @@ nav a em, .tabs em, .column-head em, .day em { margin-left: auto; font-style: no
   .content > .table, .section > .table { display: block; overflow-x: auto; }
   .search { max-width: none; }
 }
+
+/* ---------- sources ---------- */
+.chip.source { gap: 4px; background: transparent; border: 1px solid var(--border); color: var(--text-2); text-decoration: none; }
+a.chip.source:hover { background: var(--bg-hover); color: var(--text); }
+.chip.source.discord, .chip.source.chat { color: var(--accent); }
+.chip.source.appstore { color: var(--warn); }
+.chip.source.vox, .chip.source.email { color: var(--info); }
+.card-source { margin-top: 6px; display: flex; }
+.select select { height: 30px; padding: 0 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; font-size: 13px; }
+.source-bar { height: 6px; border-radius: 3px; background: var(--accent); opacity: .5; margin-left: auto; margin-right: 10px; flex: none; }
