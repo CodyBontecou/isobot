@@ -131,6 +131,13 @@ export interface AsoAppConfig {
 }
 
 /** Runner-wide settings for the ASO train (aso.ts). */
+export interface AnalyticsLimits {
+  /** Processing dates read back from today; older ones are never fetched. Default 35. */
+  backfillDays?: number;
+  /** App Store app ids to follow; default every app in appStore.apps. */
+  apps?: string[];
+}
+
 export interface AsoLimits {
   /** The ASO Tracker CLI: an installed app's `Contents/Resources/aso`, or a checkout's `bin/aso.mjs`. */
   cli: string;
@@ -237,6 +244,8 @@ export interface RunnerConfig {
   content?: ContentLimits;
   /** The ASO train (aso.ts); per-app settings live in each repo's `aso`. */
   aso?: AsoLimits;
+  /** App Store Connect analytics (analytics.ts) for the apps in appStore.apps. Off without this block. */
+  analytics?: AnalyticsLimits;
   /** 💻 on isobot's Discord messages opens the conversation in the owner's local Herdr (handoff.ts). */
   handoff?: HandoffConfig;
   defaults: RepoPolicy;
@@ -370,6 +379,12 @@ export function validateConfig(config: RunnerConfig): void {
     }
     const countries = config.appStore.countries ?? [];
     if (countries.length === 0 || countries.some(c => !/^[a-z]{2}$/.test(c))) fail("appStore.countries must be lowercase two-letter country codes");
+  }
+  if (config.analytics) {
+    const a = config.analytics;
+    if (!config.appStore) fail("analytics needs appStore.apps (the apps it reads)");
+    if (a.backfillDays !== undefined && !(Number.isInteger(a.backfillDays) && a.backfillDays >= 1 && a.backfillDays <= 180)) fail("analytics.backfillDays must be 1-180");
+    for (const id of a.apps ?? []) if (!config.appStore?.apps?.[id]) fail(`analytics.apps: ${id} isn't in appStore.apps`);
   }
   if (config.handoff) {
     const h = config.handoff;

@@ -41,6 +41,7 @@
     "researchEveryDays": 7,
     "hours": [8, 22]
   },
+  "analytics": {},
   "labels": {
     "proposed": "isobot:proposed",
     "ready": "isobot:ready",

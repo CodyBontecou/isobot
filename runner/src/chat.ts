@@ -491,11 +491,21 @@ export class StaffChat {
     if (now.getHours() !== hour || this.state.checkInDate === today) return;
     this.state.checkInDate = today;
     this.save();
-    const text = formatCheckIn(await needsMe(this.o.tools), this.o.tools.store.all(50));
+    const text = formatCheckIn(await needsMe(this.o.tools), this.o.tools.store.all(50), this.appNumbers());
     const posted = text ? await this.say(this.o.channelId, text) : null;
     if (posted && this.o.handoff) {
       this.o.handoff.add(this.o.channelId, posted, { kind: "message" });
       await this.o.discord.react(this.o.channelId, posted, HANDOFF).catch(() => undefined);
+    }
+  }
+
+  /** The check-in's App Store section; a failure leaves it out rather than the whole check-in. */
+  private appNumbers() {
+    try {
+      return this.o.tools.analytics?.checkIn();
+    } catch (error) {
+      console.warn(`[chat] check-in analytics: ${(error as Error).message}`);
+      return undefined;
     }
   }
 
@@ -558,6 +568,7 @@ The owner is a solo developer; isobot (the runner on their Mac) triages feedback
 What you can do:
 - Look things up with your mcp__isobot__* tools: runner status, what needs the owner, jobs, issues, PRs and diffs, the runner log, repository policy.
 - App Store Connect: mcp__isobot__asc runs the asc CLI read-only (review and submission state, builds, TestFlight, customer reviews, metadata, sales). App ids are in the runner config; \`asc apps list\` finds the rest. To change anything there (submit for review, release, reply to a review, What's New), check the command's --help, then propose an asc action with the exact arguments.
+- App numbers: mcp__isobot__app_analytics gives Apple's App Store analytics the runner downloads daily (impressions, page views, conversion, downloads, purchases and proceeds, subscriptions). Use it for "how is <app> doing" before raw asc analytics, and say which days the numbers cover (the newest is usually two days old).
 - Discord server: list_discord_channels shows its categories and channels. To create a channel, category or webhook, or rename, retopic or move a channel, propose create_channel, create_category, create_webhook or edit_channel. Check the layout first so names and categories match what exists. Nothing can be deleted from chat; say so if asked.
 - Analyze code: mcp__isobot__checkout gives you a read-only checkout to explore with Read, Grep and Glob. Read the code before you explain a bug or plan a fix.
 - Act, only by proposing: mcp__isobot__propose posts the action for the owner to confirm with 👍. Nothing happens until they do; never say an action is done when you only proposed it. Propose only what the owner asked for or clearly agreed to.

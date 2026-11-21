@@ -203,7 +203,9 @@ Attach screenshots or logs and it reads them.
 
 - **Daily check-in:** at `chat.checkInHour` (local time; 9 by default, `null` for none) the
   channel gets a summary of what needs you: PRs to review, jobs ready to ship, failures this week,
-  proposals awaiting approval. Nothing is posted on a day with nothing to say.
+  proposals awaiting approval, and, with [App Store analytics](analytics.md) on, a line per app with
+  its latest day's numbers. Nothing is posted on a day with nothing to say; an analytics flag (downloads
+  jumping or dropping, a churn spike, reports that stopped arriving) counts as something to say.
 
 Who can talk to it: `ISOBOT_CHAT_USERS` (comma-separated Discord user ids), else
 `ISOBOT_ALLOWED_USERS`, else the bot application's owner. Everyone else is ignored, and only their
@@ -562,6 +564,12 @@ Each App Store app with an `aso` block gets a daily snapshot of its App Store se
 ASO Tracker, a weekly rank report in the staff channel, and a weekly listing proposal (name, subtitle, keywords,
 promotional text) that ASO Tracker has measured. Proposals go only to the staff channel, and nothing is written
 to App Store Connect. See [ASO train](aso.md).
+
+## App Store analytics
+
+With `"analytics": {}` in the runner config, the runner downloads Apple's App Store Connect analytics
+for every app in `appStore.apps` every 6 hours, read-only, and keeps a record per app and day. The daily check-in,
+the weekly ASO report and the staff chat's `app_analytics` tool read it. See [App Store analytics](analytics.md).
 
 ## Builder sandbox
 

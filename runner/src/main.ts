@@ -3,11 +3,13 @@ import { ImapFlow } from "imapflow";
 import { ReleaseTrain } from "./train.js";
 import { ContentTrain } from "./content.js";
 import { AsoTrain, type AsoClient } from "./aso.js";
+import { AppAnalytics } from "./analytics.js";
 import type { CheckReport } from "./policy.js";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
+import { gunzipSync } from "node:zlib";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { builderSettings, ClaudeCodeBuilder } from "./builder.js";
@@ -58,6 +60,7 @@ interface Runtime {
   train: ReleaseTrain;
   content: ContentTrain;
   aso: AsoTrain;
+  analytics: AppAnalytics;
   /** Runner secrets and state, for settings that keep agents out of them. */
   secrets: string[];
   /** Messages carrying a 💻 (Herdr handoff), when it's on. */
@@ -168,11 +171,26 @@ function runtime(): Runtime {
       return { ok: result.code === 0 && !result.timedOut, output: `${result.stdout}\n${result.stderr}` };
     },
   });
+  const analytics = new AppAnalytics({
+    config, store,
+    // Read-only: asc refuses anything that would change App Store Connect.
+    asc: async args => {
+      const result = await run("asc", args, { cwd: env.home, env: workerEnv({ ASC_READ_ONLY: "1" }), timeoutMs: 180_000, maxBytes: 8 * 1024 * 1024 });
+      return { ok: result.code === 0 && !result.timedOut, stdout: result.stdout, stderr: result.stderr };
+    },
+    fetchGz: async url => {
+      const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
+      if (!response.ok) throw new Error(`report download failed: HTTP ${response.status}`);
+      const data = Buffer.from(await response.arrayBuffer());
+      // Segments are gzip; a plain file is read as is.
+      return (data[0] === 0x1f && data[1] === 0x8b ? gunzipSync(data) : data).toString("utf8");
+    },
+  });
   const asoDiscord = env.discordBot ? new DiscordApi(env.discordBot.token) : null;
   let asoOwners: Promise<Set<string>> | null = null;
   const aso = new AsoTrain({
     config, store, github, notifier, repo: repoFor, tracker: asoClient(config, env.home),
-    agent: input => builder.agentJson(input),
+    agent: input => builder.agentJson(input), analytics,
     // Only the staff chat's allowlist may approve; a failed lookup is retried on the next poll.
     approvals: asoDiscord ? {
       reactors: (channelId, messageId, emoji) => asoDiscord.reactors(channelId, messageId, emoji),
@@ -183,7 +201,7 @@ function runtime(): Runtime {
       return { ok: result.code === 0 && !result.timedOut, stdout: result.stdout, stderr: result.stderr };
     },
   });
-  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, content, aso, secrets, handoff };
+  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, content, aso, analytics, secrets, handoff };
 }
 
 /** ASO Tracker's CLI: one JSON call per tool; it starts the tracker's daemon itself when it isn't running. */
@@ -251,6 +269,8 @@ function acquireLock(env: Environment): void {
 const CONTENT_EVERY_MS = 5 * 60_000;
 const ASO_EVERY_MS = 60 * 60_000;
 const ASO_POLL_MS = 5 * 60_000;
+/** How often analytics looks for new reports; it reads App Store Connect at most every 6 hours itself. */
+const ANALYTICS_EVERY_MS = 30 * 60_000;
 
 /** A cycle running longer than this (release steps included) counts as hung for the external heartbeat. */
 const HUNG_CYCLE_MS = 2 * 60 * 60_000;
@@ -289,6 +309,8 @@ async function loop(rt: Runtime): Promise<void> {
   let asoRunning = false;
   let lastAsoPoll = 0;
   let asoPolling = false;
+  let lastAnalytics = 0;
+  let analyticsRunning = false;
   let cycleStartedAt: number | null = null;
   if (rt.env.heartbeatUrl) {
     const url = rt.env.heartbeatUrl;
@@ -337,6 +359,13 @@ async function loop(rt: Runtime): Promise<void> {
           // Owners' ✅ on proposals, and approved listings waiting for an editable version.
           void rt.aso.poll().catch(error => console.warn(`[aso] poll failed: ${(error as Error).message}`))
             .finally(() => { asoPolling = false; });
+        }
+        if (!analyticsRunning && Date.now() - lastAnalytics > ANALYTICS_EVERY_MS && rt.analytics.apps().length) {
+          lastAnalytics = Date.now();
+          analyticsRunning = true;
+          // Downloads take a while on a first backfill: beside the cycle, one pass at a time.
+          void rt.analytics.tick().catch(error => console.warn(`[analytics] failed: ${(error as Error).message}`))
+            .finally(() => { analyticsRunning = false; });
         }
         if (!triageRunning && Date.now() - lastTriage > rt.config.triageMinutes * 60_000) {
           lastTriage = Date.now();
@@ -437,6 +466,7 @@ async function startChat(rt: Runtime, live: () => LiveStatus): Promise<StaffChat
       repoFor: (owner, repo) => new Repo(rt.env.home, owner, repo, rt.env.githubToken, undefined, path.join(chatDir, "checkouts")),
       setPaused: paused => paused ? writeFileSync(pausedFile(rt.env), new Date().toISOString()) : rmSync(pausedFile(rt.env), { force: true }),
       card: id => rt.notifier.card({ id }),
+      analytics: rt.analytics,
       ...(channel.guild_id ? { discord: { api: discord, guildId: channel.guild_id, webhookDir: path.join(rt.env.home, "webhooks") } } : {}),
       asc: async (args, { readOnly }) => {
         const result = await run("asc", args, {
@@ -608,7 +638,10 @@ const HELP = `isobot runner
                       or research a listing proposal now (--dry-run measures it but posts and records nothing)
   aso <repo> pending | approve | reject | apply
                       Show the latest proposal's apply state, approve or dismiss it (like ✅ / 🛑 in Discord),
-                      or write an approved one to App Store Connect now (e.g. right after creating a version)`;
+                      or write an approved one to App Store Connect now (e.g. right after creating a version)
+  analytics [sync | checkin | <app> [days]]
+                      Download new App Store analytics reports now, print the check-in's App Store section,
+                      or print an app's daily numbers (default: every app's last 7 days)`;
 
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "help";
@@ -785,6 +818,23 @@ async function main(): Promise<void> {
       }
       if (what === "report") console.log(await rt.content.report(site, true) ?? "(no report)");
       else console.log(JSON.stringify(await rt.content.maybeResearch(site, true, flag === "--dry-run"), null, 2));
+      return;
+    }
+    case "analytics": {
+      const [what, days] = process.argv.slice(3);
+      if (!rt.analytics.apps().length) {
+        console.error("App Store analytics is off: add \"analytics\": {} (and appStore.apps) to the runner config.");
+        process.exitCode = 2;
+        return;
+      }
+      if (what === "sync") {
+        for (const { appId, repo } of rt.analytics.apps()) console.log(`${repo}: ${await rt.analytics.sync(appId)} report instances read`);
+      } else if (what === "checkin") {
+        const { lines, flags } = rt.analytics.checkIn();
+        console.log([...flags, ...lines].join("\n") || "(no analytics yet: run `analytics sync`)");
+      } else {
+        console.log(JSON.stringify(rt.analytics.describe(what ?? null, Number(days) || 14), null, 2));
+      }
       return;
     }
     case "aso": {
