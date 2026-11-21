@@ -78,8 +78,9 @@ interface DayRecord { src: Partial<Record<ReportKey, string>>; m: DayMetrics }
 const SYNC_EVERY_MS = 6 * 3_600_000;
 /** After App Store Connect's rate limit, the next pass waits this long (Apple's window is an hour). */
 const RATE_LIMIT_RETRY_MS = 65 * 60_000;
-/** Instances read per app and pass (a request each), so a first backfill spreads over a few passes. */
-const INSTANCES_PER_PASS = 60;
+/** Instances read per app and pass (a request each). The API key is shared with releases and ASO, so a first
+ * backfill (about 245 instances per app) spreads over about 3 days of passes instead of crowding them out. */
+const INSTANCES_PER_PASS = 20;
 
 /** App Store Connect refused for its hourly rate limit. */
 export class RateLimited extends Error {}
