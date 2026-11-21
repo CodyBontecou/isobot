@@ -31,7 +31,8 @@ Discovery and Engagement, App Downloads, Installation and Deletion, App Sessions
 Event and Subscription State, all Standard) and downloads the ones it hasn't read, newest first, at most 60 per app
 and pass. A normal day costs about 14 requests per app. The first pass backfills `backfillDays` (35) of
 processing dates over a few passes. A 429 from App Store Connect ends the pass for every app, since the rate limit
-belongs to the API key that releases and the ASO train also use.
+belongs to the API key that releases and the ASO train also use, and the next pass comes 65 minutes later instead of
+6 hours.
 
 Apple restates recent days: the instance processed on day P has rows for P-1 back to P-3 (sessions: P-6). So each
 day keeps, per report, the numbers from the newest processing date that covered it. The newest complete day is

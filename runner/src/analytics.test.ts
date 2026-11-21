@@ -252,6 +252,10 @@ test("a failed pass keeps what it read, and a rate limit stops the pass for ever
   assert.equal(errors.length, 1, "the first app's rate limit ends the pass");
   assert.match(errors[0].detail ?? "", /rate limit/);
   assert.ok(asc.calls.length - calls <= 3);
+  // It tries again after Apple's hour, not at the next 6-hour pass.
+  asc.fail = null;
+  const synced = Date.parse(store.cursor("analytics:synced")!);
+  assert.equal(new Date("2026-11-20T09:00:00").getTime() - synced, 6 * 3_600_000 - 65 * 60_000);
 });
 
 test("tick runs every few hours, and describe answers the chat tool", async () => {
