@@ -284,7 +284,9 @@ export async function handleAccountRequest(request: Request, env: AccountEnviron
           return json({ error: "Invalid conversation" }, 400);
         }
         const state = randomCredential(), codeVerifier = randomCredential();
-        const returnTo = conversation === null || landing === "/" ? landing : `/console?conversation=${encodeURIComponent(conversation)}`;
+        // The account store only accepts console paths. The board (landing "/") ignores the stored path and
+        // always lands on "/" (see the callback below), so it stores the plain console path.
+        const returnTo = conversation === null || landing === "/" ? "/console" : `/console?conversation=${encodeURIComponent(conversation)}`;
         if (native && !auth.createNativeCode) return failedLogin("not_configured", true);
         await auth.createFlow({ state, codeVerifier, returnTo, expiresAt: Date.now() + 600_000,
           ...(nativeCodeChallenge ? { nativeCodeChallenge } : {}) });
