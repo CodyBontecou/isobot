@@ -20,3 +20,4 @@ xcuserdata/
 
 runner/dist/
 .env.runner
+board/public/assets/

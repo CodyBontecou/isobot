@@ -1,0 +1,27 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  // The isobot board (docs/board.md): a signed-in, read-only view of the runner and its GitHub work.
+  "name": "isobot-board",
+  "main": "src/index.ts",
+  "account_id": "e4265f322e6380ee832b83ad45e3e8c0",
+  "compatibility_date": "2026-10-29",
+  "routes": [{ "pattern": "bot.isolated.tech", "custom_domain": true }],
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {
+    "AUTH_ORIGIN": "https://bot.isolated.tech",
+    "GITHUB_OAUTH_ALLOWED_IDS": "20440899",
+  },
+  // INGEST_TOKEN: the runner's ISOBOT_BOARD_TOKEN. The OAuth pair belongs to the "isobot board" GitHub OAuth app.
+  "secrets": { "required": ["INGEST_TOKEN", "GITHUB_OAUTH_CLIENT_ID", "GITHUB_OAUTH_CLIENT_SECRET"] },
+  "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true },
+  "durable_objects": {
+    "bindings": [
+      { "name": "BOARD", "class_name": "BoardState" },
+      // Pi's account service: the same GitHub accounts, sessions and allowlist as pi.isolated.tech.
+      { "name": "AccountAuth", "class_name": "AccountAuth", "script_name": "isobot-pi" },
+    ],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BoardState"] }],
+  "observability": { "enabled": true },
+}

@@ -329,6 +329,8 @@ export interface Environment {
   runnerId: string;
   /** The isobot-sandbox Worker for cloud builds (`executor: "cloudflare"`), from ISOBOT_SANDBOX_URL and ISOBOT_SANDBOX_TOKEN. */
   sandbox?: { url: string; token: string };
+  /** The isobot board Worker (bot.isolated.tech), from ISOBOT_BOARD_URL and ISOBOT_BOARD_TOKEN. */
+  board?: { url: string; token: string };
 }
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -646,5 +648,15 @@ export function loadEnvironment(env: NodeJS.ProcessEnv = process.env): Environme
     heartbeatUrl,
     runnerId: (env.ISOBOT_RUNNER_ID?.trim() || hostname().split(".")[0] || "runner").replace(/[^\w.-]+/g, "-"),
     sandbox: sandboxEnv(env),
+    board: boardEnv(env),
   };
+}
+
+function boardEnv(env: NodeJS.ProcessEnv): Environment["board"] {
+  const url = env.ISOBOT_BOARD_URL?.trim().replace(/\/$/, "");
+  const token = env.ISOBOT_BOARD_TOKEN?.trim();
+  if (!url && !token) return undefined;
+  if (!url || !token) throw new Error("ISOBOT_BOARD_URL and ISOBOT_BOARD_TOKEN go together");
+  if (!/^https:\/\//.test(url) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(url)) throw new Error("ISOBOT_BOARD_URL must use HTTPS");
+  return { url, token };
 }

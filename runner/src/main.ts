@@ -26,6 +26,7 @@ import { Herdr } from "./herdr.js";
 import { HANDOFF, Notifier } from "./notify.js";
 import { Pipeline } from "./pipeline.js";
 import { runChecks } from "./checks.js";
+import { Dashboard, WEEKDAYS, every, nextDailyAt, nextWeeklyAt, type ScheduleItem } from "./dashboard.js";
 import { Awake, heartbeatAge, pingHeartbeat, readHeartbeat, rotateLog, writeHeartbeat } from "./ops.js";
 import { killAllChildren, run, setGitIdentity, sh, workerEnv } from "./proc.js";
 import { sandboxProfile } from "./sandbox.js";
@@ -326,6 +327,56 @@ async function loop(rt: Runtime): Promise<void> {
   process.once("exit", () => chat?.stop());
   const handoff = await startHandoff(rt).catch(error => { console.warn(`[handoff] not started: ${(error as Error).message}`); return null; });
   process.once("exit", () => handoff?.stop());
+  const startedAt = new Date().toISOString();
+  const schedule = (now: Date): ScheduleItem[] => {
+    const items: ScheduleItem[] = [
+      every("triage", "Triage", rt.config.triageMinutes * 60_000, lastTriage, triageRunning, `sources: ${rt.sources.map(s => s.name).join(", ")}`),
+    ];
+    const sites = contentRepos(rt.config);
+    if (sites.length) {
+      const limits = rt.config.content;
+      const [from, to] = limits?.hours ?? [6, 22];
+      const weekday = limits?.reportWeekday === undefined ? 1 : limits.reportWeekday;
+      items.push(every("content", "Content train", CONTENT_EVERY_MS, lastContent, contentRunning,
+        `${sites.map(s => s.repo).join(", ")}; research ${from}:00–${to}:00`));
+      if (weekday !== null) items.push({ id: "content-report", name: "Search report", cadence: `weekly, ${WEEKDAYS[weekday]}`,
+        lastAt: null, nextAt: nextWeeklyAt(now, weekday, from).toISOString(), running: false, detail: "Search Console report per site" });
+    }
+    const apps = asoApps(rt.config);
+    if (apps.length) {
+      const limits = rt.config.aso;
+      const weekday = limits?.reportWeekday === undefined ? 1 : limits.reportWeekday;
+      items.push(every("aso", "ASO train", ASO_EVERY_MS, lastAso, asoRunning, `${apps.map(a => a.repo).join(", ")}; daily ranks, weekly proposals`));
+      items.push(every("aso-poll", "ASO approvals", ASO_POLL_MS, lastAsoPoll, asoPolling, "✅ on proposals, listings waiting for a version"));
+      if (weekday !== null) items.push({ id: "aso-report", name: "ASO rank report", cadence: `weekly, ${WEEKDAYS[weekday]}`,
+        lastAt: null, nextAt: nextWeeklyAt(now, weekday, (limits?.hours ?? [8, 22])[0]).toISOString(), running: false });
+    }
+    if (rt.analytics.apps().length) items.push(every("analytics", "App Store analytics", ANALYTICS_EVERY_MS, lastAnalytics, analyticsRunning));
+    const checkInHour = rt.config.chat?.checkInHour;
+    if (chat && typeof checkInHour === "number") items.push({ id: "check-in", name: "Daily check-in", cadence: `daily at ${String(checkInHour).padStart(2, "0")}:00`,
+      lastAt: null, nextAt: nextDailyAt(now, checkInHour).toISOString(), running: false, detail: "staff channel" });
+    for (const key of Object.keys(rt.config.repos)) {
+      const train = policyFor(rt.config, key).train;
+      if (!train || policyFor(rt.config, key).autonomy === "off") continue;
+      const last = rt.store.cursor(`train:${key}:last`.toLowerCase());
+      const pending = rt.store.cursor(`train:${key}:pending`.toLowerCase());
+      items.push({ id: `train:${key}`, name: `Release train · ${key.split("/")[1]}`, cadence: `at most every ${train.everyHours} h`,
+        lastAt: last, nextAt: last ? new Date(Date.parse(last) + train.everyHours * 3_600_000).toISOString() : null,
+        running: Boolean(pending), detail: `${train.testflight ? "TestFlight" : "App Store"}${pending ? "; a train is under way" : "; leaves when merged work is waiting"}` });
+    }
+    return items;
+  };
+  const board = rt.env.board ? new Dashboard({
+    url: rt.env.board.url, token: rt.env.board.token, runnerId: rt.env.runnerId, store: rt.store, github: rt.github,
+    repos: () => Object.keys(rt.config.repos).map(name => {
+      const policy = policyFor(rt.config, name);
+      return { name, autonomy: policy.autonomy, ownerAutonomy: policy.ownerAutonomy ?? policy.autonomy,
+        train: Boolean(policy.train), content: Boolean(policy.content), aso: Boolean(policy.aso) };
+    }).filter(repo => repo.autonomy !== "off"),
+    schedule,
+    live: () => ({ startedAt, activeJobs: rt.pipeline.activeJobs, manuallyPaused: existsSync(pausedFile(rt.env)), lastTriageAt, lastCycleError }),
+    queued: () => rt.store.inState("queued").length,
+  }) : null;
   console.log(`[runner] started: ${configuredRepos(rt.config).map(r => `${r.owner}/${r.repo}`).join(", ")}; sources: ${rt.sources.map(s => s.name).join(", ")}`);
   await rt.notifier.discord("🟢 isobot runner started", [], { handoff: false });
   while (!stopping) {
@@ -399,6 +450,7 @@ async function loop(rt: Runtime): Promise<void> {
     } catch (error) {
       console.warn("[runner] heartbeat failed:", (error as Error).message);
     }
+    board?.tick();
     await sleep(rt.config.pollSeconds * 1000);
   }
 }
