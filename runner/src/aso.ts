@@ -3,6 +3,9 @@ import type { AgentJsonInput } from "./builder.js";
 import { localDay, type ContentRepoOps } from "./content.js";
 import type { GitHubApi } from "./github.js";
 import type { AnalyticsView } from "./analytics.js";
+import { PLAY_FIELDS, type PlayField, type PlayListing, type PlayPublisher } from "./google.js";
+import { parsePlayProposal, playChanged, playFieldName, playProposalMessage, playRules, PLAY_PROPOSAL_SCHEMA, type PlayProposal } from "./play.js";
+import type { PlayAnalytics } from "./playAnalytics.js";
 import type { Store } from "./store.js";
 
 /**
@@ -22,6 +25,12 @@ import type { Store } from "./store.js";
  *      the promotional text goes live at once (it needs no new version), and the name, subtitle and keyword
  *      field wait for the next App Store version in an editable state (Prepare for Submission, or rejected),
  *      then go onto it. 🛑 dismisses it; an unanswered proposal expires after two weeks
+ *
+ * Google Play: a repo's `aso.play` adds its Play app as a second app of the train (appId = package name). Ranks
+ * come from the same tracker (Play's web search, at most ~30 results deep, no demand estimate); research drafts the
+ * title, short description and full description (Play has no keyword field); applying commits an Android Publisher
+ * edit, which goes live after Google's review without a new release. Play Console's bulk reports (playAnalytics.ts)
+ * give the Play side its installs and orders.
  *
  * Only an owner's ✅ (or `aso <repo> approve`) writes to App Store Connect. Listing text, and above all the
  * keyword field, is private strategy, so it goes only to the staff channel, never to the public repositories.
@@ -57,17 +66,24 @@ export interface AsoDeps {
   repo(owner: string, repo: string): ContentRepoOps;
   agent(input: AgentJsonInput): Promise<{ output: unknown }>;
   /** Apple's App Store analytics (analytics.ts): the report's and research's conversion numbers. */
-  analytics?: Pick<AnalyticsView, "weekLine">;
+  analytics?: Pick<AnalyticsView, "weekLine"> & Partial<Pick<AnalyticsView, "changeLine">>;
+  /** Google Play listings (Android Publisher), for Play apps. */
+  play?: Pick<PlayPublisher, "listings" | "update">;
+  /** Play Console's numbers (playAnalytics.ts), for Play apps. */
+  playAnalytics?: Pick<PlayAnalytics, "weekLine" | "changeLine">;
   now?(): Date;
 }
 
-type App = { owner: string; repo: string; aso: AsoAppConfig };
+type App = { owner: string; repo: string; aso: AsoAppConfig; store?: "appstore" | "play" };
+const isPlay = (app: App) => app.store === "play";
 
 export interface Cell {
   text: string;
   storefront: string;
   /** Our app's position, 1-200; null when checked and outside the first 200. */
   rank: number | null;
+  /** How many results the search returned (Play: at most ~30), when the tracker says. */
+  depth?: number | null;
   /** The tracker's demand estimate (0-100), not Apple's search volume. */
   volume: number | null;
   difficulty: number | null;
@@ -88,7 +104,7 @@ export function boardCells(board: unknown): Cell[] {
   return concepts.flatMap(c => (c.cells ?? []).map(raw => {
     const x = raw as Record<string, unknown>;
     return {
-      text: String(x.text ?? ""), storefront: String(x.storefront ?? ""), rank: num(x.rank), volume: num(x.volume), difficulty: num(x.difficulty),
+      text: String(x.text ?? ""), storefront: String(x.storefront ?? ""), rank: num(x.rank), depth: num(x.depth), volume: num(x.volume), difficulty: num(x.difficulty),
       inListing: x.inListing === true, checkedAt: typeof x.checkedAt === "string" ? x.checkedAt : null, error: typeof x.error === "string" && x.error ? x.error : null,
     };
   })).filter(c => c.text && c.storefront);
@@ -154,9 +170,10 @@ const place = (rank: number | null) => rank === null ? "—" : `#${rank}`;
 const moveLine = (m: Move) => `\`${m.text}\`${m.storefront === "us" ? "" : ` (${m.storefront})`} ${place(m.from)} → ${place(m.to)}${m.volume !== null ? ` · demand ${Math.round(m.volume)}` : ""}`;
 
 /** The weekly report's Discord text for one app. */
-export function reportText(input: { app: string; today: string; baselineDay: string | null; movers: Movers | null; current: Cell[]; storefront: string; limit?: number; analytics?: string | null }): string {
+export function reportText(input: { app: string; today: string; baselineDay: string | null; movers: Movers | null; current: Cell[]; storefront: string; limit?: number; analytics?: string | null; store?: "appstore" | "play" }): string {
   const limit = input.limit ?? 8;
-  const head = `📊 **${input.app}** App Store search, week to ${input.today}`;
+  const play = input.store === "play";
+  const head = `📊 **${input.app}** ${play ? "Google Play" : "App Store"} search, week to ${input.today}`;
   const mine = input.current.filter(c => c.storefront === input.storefront && c.checkedAt && !c.error);
   const ranked = mine.filter(c => c.rank !== null);
   const summary = `${input.storefront.toUpperCase()}: ranked for ${ranked.length} of ${mine.length} tracked phrases · top 10: ${ranked.filter(c => c.rank! <= 10).length} · top 50: ${ranked.filter(c => c.rank! <= 50).length}`;
@@ -172,7 +189,8 @@ export function reportText(input: { app: string; today: string; baselineDay: str
     if (m.lost.length) lines.push(`**Down** (${m.lost.length})\n${m.lost.slice(0, limit).map(x => `• ${moveLine(x)}`).join("\n")}`);
     if (!m.gained.length && !m.lost.length) lines.push("No rank changes.");
   }
-  if (wasted.length) lines.push(`**In the listing but not in the top 200** (${input.storefront.toUpperCase()}): ${wasted.map(c => `\`${c.text}\``).join(", ")}`);
+  if (wasted.length && !play) lines.push(`**In the listing but not in the top 200** (${input.storefront.toUpperCase()}): ${wasted.map(c => `\`${c.text}\``).join(", ")}`);
+  if (play && mine.length) lines.push("Play's search page shows at most about 30 apps, so — is \"not among them\"; Play has no demand estimate.");
   return clip(lines.join("\n"), 1900);
 }
 
@@ -328,6 +346,31 @@ export interface PendingListing {
   lastError?: string;
 }
 
+/** A Play proposal on its way to Google Play: `aso:<package>:apply`. */
+export interface PlayPending {
+  at: string;
+  /** The Play listing language. */
+  locale: string;
+  ref: MessageRef | null;
+  base: PlayListing | null;
+  draft: PlayListing;
+  state: PendingListing["state"];
+  approvedBy?: string;
+  lastError?: string;
+}
+
+type AnyPending = PendingListing | PlayPending;
+
+/** One applied Play change: `aso:<package>:history`. `liveAt` is when it was committed (Google reviews it after). */
+export interface PlayApplied {
+  at: string;
+  fields: PlayField[];
+  draft: PlayListing;
+  liveAt: string;
+  /** Committed with changesNotSentForReview: it waits in Play Console to be sent for review. */
+  notSentForReview?: boolean;
+}
+
 /** One applied change: `aso:<appId>:history`. */
 export interface Applied {
   at: string;
@@ -367,7 +410,7 @@ export function editableAppInfo(json: unknown): string | null {
   return row?.id ? String(row.id) : null;
 }
 
-const DEFAULTS: Required<Omit<AsoLimits, "cli" | "appBinary" | "appPath" | "reportWeekday">> & { reportWeekday: number | null } = {
+const DEFAULTS: Required<Omit<AsoLimits, "cli" | "appBinary" | "appPath" | "reportWeekday" | "googleKey" | "playReportsBucket">> & { reportWeekday: number | null } = {
   reportWeekday: 1, researchEveryDays: 7, hours: [8, 22],
 };
 /** Snapshots older than this are dropped. */
@@ -379,7 +422,7 @@ export class AsoTrain {
   private get limits() { return { ...DEFAULTS, ...this.deps.config.aso }; }
   private now(): Date { return this.deps.now?.() ?? new Date(); }
   private key(app: App, what: string): string { return `aso:${app.aso.appId}:${what}`; }
-  private name(app: App): string { return app.repo; }
+  private name(app: App): string { return isPlay(app) ? `${app.repo} (Google Play)` : app.repo; }
   private inHours(): boolean {
     const hour = this.now().getHours();
     return hour >= this.limits.hours[0] && hour < this.limits.hours[1];
@@ -445,17 +488,17 @@ export class AsoTrain {
     const usable = latest && baseline && baseline.day < latest.day ? baseline : null;
     const text = reportText({
       app: this.name(app), today, baselineDay: usable?.day ?? null, storefront: app.aso.storefront ?? "us", current,
-      movers: usable && latest ? movers(usable.snap, latest.snap) : null, analytics: this.analyticsLine(app),
+      movers: usable && latest ? movers(usable.snap, latest.snap) : null, analytics: this.analyticsLine(app), store: app.store,
     });
     store.setCursor(key, today);
     await this.deps.notifier.discord(text);
     return text;
   }
 
-  /** The app's App Store week from Apple's analytics, or null without it. */
+  /** The app's store week from Apple's or Play Console's numbers, or null without them. */
   private analyticsLine(app: App): string | null {
     try {
-      return this.deps.analytics?.weekLine(app.aso.appId) ?? null;
+      return (isPlay(app) ? this.deps.playAnalytics : this.deps.analytics)?.weekLine(app.aso.appId) ?? null;
     } catch (error) {
       console.warn(`[aso] ${this.name(app)} analytics: ${(error as Error).message}`);
       return null;
@@ -482,10 +525,10 @@ export class AsoTrain {
     // Claude's usage limit pauses builds; research would only hit the same wall.
     if (!force && store.pausedUntil()) return null;
     if (!dryRun) store.setCursor(this.key(app, "research"), this.now().toISOString());
-    const result = await this.research(app);
-    if (dryRun) return result;
+    const result = isPlay(app) ? await this.researchPlay(app) : await this.research(app);
+    if (dryRun) return result as { proposal: Proposal; message: string; base: Listing };
     store.setCursor(this.key(app, "proposal"), JSON.stringify({ at: this.now().toISOString(), ...result.proposal }));
-    store.event(null, result.proposal.action === "skip" ? "aso_skip" : "aso_proposed", `${this.name(app)}: ${result.proposal.action === "skip" ? result.proposal.reason : result.proposal.name}`);
+    store.event(null, result.proposal.action === "skip" ? "aso_skip" : "aso_proposed", `${this.name(app)}: ${result.proposal.action === "skip" ? result.proposal.reason : "name" in result.proposal ? result.proposal.name : result.proposal.title}`);
     const auto = app.aso.autonomy === "apply";
     const parts = splitMessage(result.message);
     let ref: MessageRef | null = null;
@@ -497,18 +540,20 @@ export class AsoTrain {
     if (result.proposal.action === "propose") {
       const old = this.pending(app);
       if (old?.state === "open" || old?.state === "approved") this.savePending(app, { ...old, state: "superseded" });
+      const draft = "title" in result.proposal
+        ? { title: result.proposal.title, shortDescription: result.proposal.shortDescription, fullDescription: result.proposal.fullDescription }
+        : { name: result.proposal.name, subtitle: result.proposal.subtitle, keywords: result.proposal.keywords, promotionalText: result.proposal.promotionalText };
       this.savePending(app, {
         at: this.now().toISOString(), locale: app.aso.locale ?? "en-US", ref, base: result.base,
-        state: auto ? "approved" : "open", ...(auto ? { approvedBy: "auto" } : {}),
-        draft: { name: result.proposal.name, subtitle: result.proposal.subtitle, keywords: result.proposal.keywords, promotionalText: result.proposal.promotionalText },
-      });
+        state: auto ? "approved" : "open", ...(auto ? { approvedBy: "auto" } : {}), draft,
+      } as AnyPending);
       if (auto) {
         this.deps.store.event(null, "aso_approved", `${this.name(app)}: on its own`);
         // A failure is posted by apply and retried by poll.
         await this.apply(app).catch(() => undefined);
       }
     }
-    return result;
+    return result as { proposal: Proposal; message: string; base: Listing };
   }
 
   /** Listing changes isobot made, newest last: `aso:<appId>:history`. */
@@ -517,13 +562,19 @@ export class AsoTrain {
     return raw ? JSON.parse(raw) as Applied[] : [];
   }
 
-  private record(app: App, entry: Applied): void {
-    const list = this.history(app).filter(e => e.at !== entry.at);
+  private playHistory(app: App): PlayApplied[] {
+    return this.history(app) as unknown as PlayApplied[];
+  }
+
+  private record(app: App, entry: Applied | PlayApplied): void {
+    const list = (this.history(app) as (Applied | PlayApplied)[]).filter(e => e.at !== entry.at);
     this.deps.store.setCursor(this.key(app, "history"), JSON.stringify([...list, entry].slice(-10)));
   }
 
   /** Notes when versioned changes reach the App Store, so the next research can judge them by their ranks. */
   private async trackLive(app: App): Promise<void> {
+    // A Play change is live once Google's review passes, usually within hours of the commit; it's recorded then.
+    if (isPlay(app)) return;
     const waiting = this.history(app).filter(e => e.version && !e.liveAt);
     if (!waiting.length || !this.deps.asc) return;
     const r = await this.deps.asc(["versions", "list", "--app", app.aso.appId, "--platform", app.aso.platform ?? "IOS", "--limit", "20", "--output", "json"]);
@@ -539,6 +590,7 @@ export class AsoTrain {
 
   /** What the last changes did to ranks, for the research prompt. */
   private outcomes(app: App): string {
+    if (isPlay(app)) return this.playOutcomes(app);
     const lines = this.history(app).slice(-3).map(e => {
       const what = `${e.at.slice(0, 10)}: ${e.fields.join(", ")} → ${JSON.stringify(e.draft)}`;
       if (e.fields.every(f => f === "promotionalText")) return `- ${what} (promotional text only: not indexed, no rank effect)`;
@@ -548,9 +600,33 @@ export class AsoTrain {
       if (!before || !after || before.day >= after.day) return `- ${what} (live since ${e.liveAt.slice(0, 10)}; no rank data to compare yet)`;
       const m = movers(before.snap, after.snap, app.aso.storefront ?? "us");
       const top = (xs: Move[]) => xs.slice(0, 6).map(x => `${x.text} ${place(x.from)}→${place(x.to)}`).join("; ");
-      return `- ${what} (live since ${e.liveAt.slice(0, 10)}; ${before.day} → ${after.day}: ranked ${m.before.ranked}→${m.now.ranked}, top 10 ${m.before.top10}→${m.now.top10}, top 50 ${m.before.top50}→${m.now.top50}. Up: ${top(m.gained) || "none"}. Down: ${top(m.lost) || "none"})`;
+      return `- ${what} (live since ${e.liveAt.slice(0, 10)}; ${before.day} → ${after.day}: ranked ${m.before.ranked}→${m.now.ranked}, top 10 ${m.before.top10}→${m.now.top10}, top 50 ${m.before.top50}→${m.now.top50}. Up: ${top(m.gained) || "none"}. Down: ${top(m.lost) || "none"}${this.changeStats(app, e.liveAt)})`;
     });
-    return lines.length ? `Listing changes isobot made, and what ranks did since they went live (judge them: keep what worked, undo what lost ground):\n${lines.join("\n")}` : "";
+    return lines.length ? `Listing changes isobot made, and what ranks and store numbers did since they went live (judge them: keep what worked, undo what lost ground; installs and paid conversions matter more than rank):\n${lines.join("\n")}` : "";
+  }
+
+  /** "; store numbers: …" for a change that went live on `liveAt`, or "" without numbers. */
+  private changeStats(app: App, liveAt: string): string {
+    try {
+      const view = isPlay(app) ? this.deps.playAnalytics : this.deps.analytics;
+      const line = view?.changeLine?.(app.aso.appId, localDay(new Date(liveAt)));
+      return line ? `. Store numbers: ${line}` : "";
+    } catch {
+      return "";
+    }
+  }
+
+  private playOutcomes(app: App): string {
+    const lines = this.playHistory(app).slice(-3).map(e => {
+      const what = `${e.at.slice(0, 10)}: ${e.fields.map(playFieldName).join(", ")} → ${JSON.stringify({ title: e.draft.title, shortDescription: e.draft.shortDescription })}`;
+      const before = this.snapshotOnOrBefore(app, localDay(new Date(Date.parse(e.liveAt) - 86_400_000)));
+      const after = this.snapshotOnOrBefore(app, localDay(this.now()));
+      if (!before || !after || before.day >= after.day) return `- ${what} (sent ${e.liveAt.slice(0, 10)}${e.notSentForReview ? ", waiting in Play Console to be sent for review" : ""}; no rank data to compare yet${this.changeStats(app, e.liveAt)})`;
+      const m = movers(before.snap, after.snap, app.aso.storefront ?? "us");
+      const top = (xs: Move[]) => xs.slice(0, 6).map(x => `${x.text} ${place(x.from)}→${place(x.to)}`).join("; ");
+      return `- ${what} (sent ${e.liveAt.slice(0, 10)}; ${before.day} → ${after.day}: ranked ${m.before.ranked}→${m.now.ranked}, top 10 ${m.before.top10}→${m.now.top10}. Up: ${top(m.gained) || "none"}. Down: ${top(m.lost) || "none"}${this.changeStats(app, e.liveAt)})`;
+    });
+    return lines.length ? `Play listing changes isobot made, and what ranks and Play Console numbers did since (judge them: keep what worked, undo what lost ground; installs and orders matter more than rank):\n${lines.join("\n")}` : "";
   }
 
   pending(app: App): PendingListing | null {
@@ -558,7 +634,11 @@ export class AsoTrain {
     return raw ? JSON.parse(raw) as PendingListing : null;
   }
 
-  private savePending(app: App, p: PendingListing): void {
+  private playPending(app: App): PlayPending | null {
+    return this.pending(app) as unknown as PlayPending | null;
+  }
+
+  private savePending(app: App, p: AnyPending): void {
     this.deps.store.setCursor(this.key(app, "apply"), JSON.stringify(p));
   }
 
@@ -602,6 +682,7 @@ export class AsoTrain {
   /** An owner's approval (a Discord user id, or "cli"); applies what can be applied now. */
   async approve(app: App, by: string): Promise<string> {
     let p = this.pending(app);
+    if (!p && isPlay(app)) throw new Error(`${this.name(app)} has no proposal to approve`);
     if (!p) {
       // A proposal posted before approvals existed: its draft is in the proposal cursor, without a base.
       const raw = this.deps.store.cursor(this.key(app, "proposal"));
@@ -612,7 +693,8 @@ export class AsoTrain {
     }
     if (p.state !== "open") throw new Error(`${this.name(app)}'s latest proposal is ${p.state}, not open`);
     this.savePending(app, { ...p, state: "approved", approvedBy: by });
-    this.deps.store.event(null, "aso_approved", `${this.name(app)}: ${changedFields(p).join(", ")}`);
+    const fields = isPlay(app) ? playChanged((p as unknown as PlayPending).base, (p as unknown as PlayPending).draft) : changedFields(p);
+    this.deps.store.event(null, "aso_approved", `${this.name(app)}: ${fields.join(", ")}`);
     return this.apply(app, by);
   }
 
@@ -629,6 +711,7 @@ export class AsoTrain {
    * version (and an editable one), the rest on an editable version. Safe to call again; done parts are skipped.
    */
   async apply(app: App, by?: string): Promise<string> {
+    if (isPlay(app)) return this.applyPlay(app, by);
     const asc = this.deps.asc;
     let p = this.pending(app);
     if (!p || p.state !== "approved") throw new Error(`${this.name(app)} has no approved proposal`);
@@ -693,6 +776,154 @@ export class AsoTrain {
     const text = `${APPROVE} **${this.name(app)}** listing${who}: ${lines.join(" ")}`;
     await this.deps.notifier.discord(text);
     return text;
+  }
+
+  /**
+   * Commits an approved Play proposal: only the fields it changed, and only where the live listing still matches
+   * what the draft was based on (a field someone edited in Play Console since is left alone).
+   */
+  private async applyPlay(app: App, by?: string): Promise<string> {
+    const play = this.deps.play;
+    const p = this.playPending(app);
+    if (!p || p.state !== "approved") throw new Error(`${this.name(app)} has no approved proposal`);
+    if (!play) throw new Error("Google Play (a service account key) isn't available to the ASO train");
+    const pkg = app.aso.appId;
+    try {
+      const live = (await play.listings(pkg))[p.locale];
+      if (!live) throw new Error(`there's no ${p.locale} listing on Google Play`);
+      const wanted = playChanged(p.base, p.draft);
+      const conflicts = p.base ? wanted.filter(f => live[f] !== p.base![f] && live[f] !== p.draft[f]) : [];
+      const fields = wanted.filter(f => !conflicts.includes(f) && live[f] !== p.draft[f]);
+      const extra = conflicts.length ? ` Left alone, since they changed in Play Console after the draft: ${conflicts.map(playFieldName).join(", ").toLocaleLowerCase()}.` : "";
+      if (!fields.length) {
+        this.savePending(app, { ...p, state: "done", lastError: undefined });
+        const text = `${APPROVE} **${this.name(app)}** listing: nothing to send, the live listing already has it.${extra}`;
+        await this.deps.notifier.discord(text);
+        return text;
+      }
+      const result = await play.update(pkg, p.locale, Object.fromEntries(fields.map(f => [f, p.draft[f]])) as Partial<PlayListing>);
+      this.savePending(app, { ...p, state: "done", lastError: undefined });
+      this.deps.store.event(null, "aso_applied", `${this.name(app)}: ${fields.join(", ")}`);
+      this.record(app, { at: p.at, fields, draft: p.draft, liveAt: this.now().toISOString(), ...(result.notSentForReview ? { notSentForReview: true } : {}) });
+      const who = p.approvedBy === "auto" ? " (on its own)" : by && by !== "cli" ? ` (approved by <@${by}>)` : "";
+      const what = fields.map(playFieldName).join(", ").toLocaleLowerCase();
+      const text = result.notSentForReview
+        ? `${APPROVE} **${this.name(app)}** listing${who}: the new ${what} ${fields.length === 1 ? "is" : "are"} saved in Play Console but not sent for review, because managed publishing is on. Send it from Publishing overview.${extra}`
+        : `${APPROVE} **${this.name(app)}** listing${who}: the new ${what} went to Google's review and ${fields.length === 1 ? "goes" : "go"} live once approved.${extra}`;
+      await this.deps.notifier.discord(text);
+      return text;
+    } catch (error) {
+      const message = (error as Error).message.slice(0, 400);
+      const quiet = p.lastError === message;
+      this.savePending(app, { ...p, lastError: message });
+      this.deps.store.event(null, "aso_error", `${this.name(app)} apply: ${message}`);
+      if (!quiet) await this.deps.notifier.discord(`❌ **${this.name(app)}** listing update failed: ${message}\nIt's retried every few minutes.`);
+      throw error;
+    }
+  }
+
+  /**
+   * A Play app's first research has no tracked phrases yet: it starts from the App Store app's phrases with the
+   * most demand (the same people search both stores), measured on Play before the draft is written.
+   */
+  private async seedPlayPhrases(app: App): Promise<number> {
+    const sibling = asoApps(this.deps.config).find(a => a.store !== "play" && a.owner === app.owner && a.repo === app.repo);
+    if (!sibling) return 0;
+    const storefront = app.aso.storefront ?? "us";
+    // The App Store board can hold other languages' phrases for the same storefront; seed only the listing's script.
+    const script = /^en\b/i.test(app.aso.locale ?? "en-US") ? /^[\p{Script=Latin}\p{N} .'&+-]+$/u : /^[\p{L}\p{M}\p{N} .'&+-]+$/u;
+    const cells = boardCells(await this.deps.tracker.call("board_get", { appId: sibling.aso.appId }, { timeoutMs: 180_000 }))
+      .filter(c => c.storefront === storefront && c.checkedAt && !c.error && script.test(c.text))
+      .sort((a, b) => (b.volume ?? -1) - (a.volume ?? -1) || (a.rank ?? 999) - (b.rank ?? 999));
+    const seen = new Set<string>();
+    const texts = cells.map(c => c.text.toLocaleLowerCase()).filter(t => !seen.has(t) && seen.add(t)).slice(0, 40);
+    if (!texts.length) return 0;
+    try {
+      await this.deps.tracker.call("keywords_import", {
+        appId: app.aso.appId, measure: true,
+        concepts: [{ label: "From the App Store", tier: "secondary", phrases: texts.map(text => ({ storefront, text })) }],
+      }, { wait: true, timeoutMs: 30 * 60_000 });
+    } catch (error) {
+      // Measurement failures show on the board; the phrases are tracked either way.
+      console.warn(`[aso] ${this.name(app)} seed: ${(error as Error).message}`);
+    }
+    return texts.length;
+  }
+
+  private async researchPlay(app: App): Promise<{ proposal: PlayProposal; message: string; base: PlayListing }> {
+    const { tracker, github } = this.deps;
+    if (!this.deps.play) throw new Error("Google Play (a service account key) isn't available to the ASO train");
+    const pkg = app.aso.appId;
+    const language = app.aso.locale ?? "en-US";
+    const storefront = app.aso.storefront ?? "us";
+    const listings = await this.deps.play.listings(pkg);
+    const current = listings[language];
+    if (!current) throw new Error(`${pkg} has no ${language} listing on Google Play (it has ${Object.keys(listings).join(", ") || "none"})`);
+    const read = async () => boardCells(await tracker.call("board_get", { appId: pkg }, { timeoutMs: 180_000 }))
+      .filter(c => c.storefront === storefront && !c.error && c.checkedAt);
+    let cells = await read();
+    let seeded = 0;
+    if (!cells.length) {
+      seeded = await this.seedPlayPhrases(app);
+      if (seeded) cells = await read();
+    }
+    // The App Store's demand for the same phrases is the only demand signal Play has.
+    const sibling = asoApps(this.deps.config).find(a => a.store !== "play" && a.owner === app.owner && a.repo === app.repo);
+    const demand = new Map<string, number>();
+    if (sibling) {
+      try {
+        for (const c of boardCells(await tracker.call("board_get", { appId: sibling.aso.appId }, { timeoutMs: 180_000 }))) {
+          if (c.storefront === storefront && c.volume !== null) demand.set(c.text.toLocaleLowerCase(), c.volume);
+        }
+      } catch { /* demand is a hint */ }
+    }
+    const table = [...cells].sort((a, b) => (a.rank ?? 999) - (b.rank ?? 999)).slice(0, 150)
+      .map(c => `${c.text} | ${place(c.rank)} | ${c.depth ?? "?"} | ${demand.get(c.text.toLocaleLowerCase()) ?? "?"}`);
+    const previous = this.deps.store.cursor(this.key(app, "proposal"));
+    const prompt = [
+      `App: ${this.name(app)} (Google Play package ${pkg})`, `Listing language: ${language} · search country: ${storefront}`, `Today: ${localDay(this.now())}`,
+      `Current Google Play listing (JSON):\n${JSON.stringify(current, null, 1)}`,
+      `Other languages on Play: ${Object.keys(listings).filter(l => l !== language).join(", ") || "none"} (not part of this draft)`,
+      `Measured phrases on Google Play (${cells.length} tracked in ${storefront}${seeded ? `; ${seeded} were just seeded from the App Store app's phrases with the most demand` : ""}). phrase | Play rank | results shown | App Store demand:\n${table.join("\n") || "(none measured yet)"}`,
+      previous ? `Your previous Play proposal (JSON; whether it's live shows in the current listing):\n${previous.slice(0, 6000)}` : "No previous Play proposal.",
+      this.outcomes(app),
+      ((line) => line ? `How the Play listing converts, from Play Console (listing visitors → installs from the listing; "from search" is Google Play search):\n${line.replace(/\*\*/g, "")}` : "")(this.analyticsLine(app)),
+      "The app's repository (main branch) is the current directory, read-only.",
+    ].filter(Boolean).join("\n\n");
+    const repo = this.deps.repo(app.owner, app.repo);
+    const name = `aso__play-research-${Date.now()}`;
+    const dir = await repo.checkoutAt(await repo.sync(await github.defaultBranch(app.owner, app.repo)), name);
+    let output: unknown;
+    try {
+      ({ output } = await this.deps.agent({
+        cwd: dir, prompt, system: playRules(app.repo, app.aso.notes), schema: PLAY_PROPOSAL_SCHEMA,
+        tools: "Read,Grep,Glob", allowedTools: ["Read", "Grep", "Glob"], timeoutMs: 30 * 60_000,
+      }));
+    } finally {
+      await repo.removeWorkspace(name).catch(() => undefined);
+    }
+    const proposal = parsePlayProposal(output, current);
+    const tracked = new Set(cells.map(c => c.text.toLocaleLowerCase()));
+    const fresh = proposal.newPhrases.filter(p => !tracked.has(p.text));
+    let importNote = "";
+    if (fresh.length) {
+      try {
+        await tracker.call("keywords_import", {
+          appId: pkg, measure: true,
+          concepts: groupByConcept(fresh).map(([label, texts]) => ({ label, tier: "secondary", phrases: texts.map(text => ({ storefront, text })) })),
+        }, { wait: true, timeoutMs: 30 * 60_000 });
+      } catch (error) {
+        importNote = `⚠️ Not every new phrase was measured: ${(error as Error).message.slice(0, 200)}`;
+      }
+    }
+    const measured = fresh.length
+      ? (await read()).filter(c => fresh.some(p => p.text === c.text.toLocaleLowerCase())).sort((a, b) => (a.rank ?? 999) - (b.rank ?? 999))
+        .map(c => ({ text: c.text, rank: c.rank, depth: c.depth ?? null }))
+      : [];
+    if (proposal.action === "skip") {
+      return { proposal, base: current, message: `🔎 **${this.name(app)}** listing research (${language}): no change proposed. ${proposal.reason}${measured.length ? `\n${measured.length} new phrases are now tracked on Play.` : ""}` };
+    }
+    return { proposal, base: current, message: playProposalMessage({ app: this.name(app), language, current, proposal, measured, notes: importNote, auto: app.aso.autonomy === "apply" }) };
   }
 
   private async research(app: App): Promise<{ proposal: Proposal; message: string; base: Listing }> {

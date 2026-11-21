@@ -326,6 +326,20 @@ export function weekText(thisWeek: AppDay[], lastWeek: AppDay[]): string | null 
   return `**App Store analytics** (${span}${b ? ", vs the 7 days before" : ""}): ${parts.join(" · ")}`;
 }
 
+/**
+ * Before and after one listing change: daily averages over up to `window` days either side of `liveDay`.
+ * Fewer than 14 days after it, or fewer than 30 installs a side, is called inconclusive: weekly swings at these
+ * volumes are bigger than most listing effects.
+ */
+export function beforeAfterText(before: { visits: number; installs: number; paid: number; days: number }, after: { visits: number; installs: number; paid: number; days: number }): string {
+  if (!before.days || !after.days) return "no store numbers around it yet";
+  const per = (x: number, d: number) => Math.round((x / d) * 10) / 10;
+  const conv = (s: typeof before) => s.visits ? `${Math.round((s.installs / s.visits) * 1000) / 10}%` : "?";
+  const text = `per day ${per(before.installs, before.days)} → ${per(after.installs, after.days)} installs, ${per(before.visits, before.days)} → ${per(after.visits, after.days)} page visits, conversion ${conv(before)} → ${conv(after)}, paid ${per(before.paid, before.days)} → ${per(after.paid, after.days)} (${before.days} days before, ${after.days} after)`;
+  const thin = after.days < 14 || before.installs < 30 || after.installs < 30;
+  return thin ? `${text}; inconclusive (too few days or installs to tell from noise)` : text;
+}
+
 export interface CheckInAnalytics {
   /** One line per app with data. */
   lines: string[];
@@ -337,6 +351,8 @@ export interface CheckInAnalytics {
 export interface AnalyticsView {
   checkIn(): CheckInAnalytics;
   weekLine(appId: string): string | null;
+  /** A listing change's before/after (installs, page views, conversion, paid), around the day it went live. */
+  changeLine(appId: string, liveDay: string, window?: number): string | null;
   /** The app_analytics chat tool: one app's days, or every app's latest week when `app` is omitted. */
   describe(app: string | null, days: number): unknown;
 }
@@ -508,6 +524,16 @@ export class AppAnalytics implements AnalyticsView {
     const day = this.latest(appId);
     if (!day) return null;
     return weekText(this.days(appId, addDays(day.day, -6), day.day), this.days(appId, addDays(day.day, -13), addDays(day.day, -7)));
+  }
+
+  changeLine(appId: string, liveDay: string, window = 28): string | null {
+    if (!this.latest(appId)) return null;
+    const side = (days: AppDay[]) => {
+      const usable = days.filter(d => d.m.pageViews !== undefined && d.m.firstDownloads !== undefined);
+      const s = sumDays(usable);
+      return { visits: s.pageViews ?? 0, installs: s.firstDownloads ?? 0, paid: paidSubscriptions(s) ?? s.purchases ?? 0, days: usable.length };
+    };
+    return beforeAfterText(side(this.days(appId, addDays(liveDay, -Math.min(window, 28)), addDays(liveDay, -1))), side(this.days(appId, addDays(liveDay, 1), addDays(liveDay, window))));
   }
 
   describe(app: string | null, days: number): unknown {

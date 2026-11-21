@@ -4,6 +4,8 @@ import { ReleaseTrain } from "./train.js";
 import { ContentTrain } from "./content.js";
 import { AsoTrain, type AsoClient } from "./aso.js";
 import { AppAnalytics } from "./analytics.js";
+import { GoogleAuth, PlayPublisher } from "./google.js";
+import { PlayAnalytics } from "./playAnalytics.js";
 import type { CheckReport } from "./policy.js";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -61,6 +63,8 @@ interface Runtime {
   content: ContentTrain;
   aso: AsoTrain;
   analytics: AppAnalytics;
+  /** Play Console's bulk reports for the Play apps of the ASO train; null without aso.playReportsBucket. */
+  playAnalytics: PlayAnalytics | null;
   /** Runner secrets and state, for settings that keep agents out of them. */
   secrets: string[];
   /** Messages carrying a 💻 (Herdr handoff), when it's on. */
@@ -186,11 +190,19 @@ function runtime(): Runtime {
       return (data[0] === 0x1f && data[1] === 0x8b ? gunzipSync(data) : data).toString("utf8");
     },
   });
+  // One Google service account for Play listings and Play Console's reports; its key file stays where it is.
+  const googleAuth = config.aso ? new GoogleAuth((config.aso.googleKey ?? "~/.config/isobot/play-isobot-aso.json").replace(/^~(?=\/)/, homedir())) : null;
+  const playPackages = () => asoApps(config).filter(a => a.store === "play").map(a => a.aso.appId);
+  const playAnalytics = googleAuth && config.aso?.playReportsBucket
+    ? new PlayAnalytics({ store, auth: googleAuth, bucket: config.aso.playReportsBucket, packages: playPackages })
+    : null;
   const asoDiscord = env.discordBot ? new DiscordApi(env.discordBot.token) : null;
   let asoOwners: Promise<Set<string>> | null = null;
   const aso = new AsoTrain({
     config, store, github, notifier, repo: repoFor, tracker: asoClient(config, env.home),
     agent: input => builder.agentJson(input), analytics,
+    play: googleAuth && playPackages().length ? new PlayPublisher(googleAuth) : undefined,
+    playAnalytics: playAnalytics ?? undefined,
     // Only the staff chat's allowlist may approve; a failed lookup is retried on the next poll.
     approvals: asoDiscord ? {
       reactors: (channelId, messageId, emoji) => asoDiscord.reactors(channelId, messageId, emoji),
@@ -201,7 +213,7 @@ function runtime(): Runtime {
       return { ok: result.code === 0 && !result.timedOut, stdout: result.stdout, stderr: result.stderr };
     },
   });
-  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, content, aso, analytics, secrets, handoff };
+  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, content, aso, analytics, playAnalytics, secrets, handoff };
 }
 
 /** ASO Tracker's CLI: one JSON call per tool; it starts the tracker's daemon itself when it isn't running. */
@@ -360,12 +372,15 @@ async function loop(rt: Runtime): Promise<void> {
           void rt.aso.poll().catch(error => console.warn(`[aso] poll failed: ${(error as Error).message}`))
             .finally(() => { asoPolling = false; });
         }
-        if (!analyticsRunning && Date.now() - lastAnalytics > ANALYTICS_EVERY_MS && rt.analytics.apps().length) {
+        if (!analyticsRunning && Date.now() - lastAnalytics > ANALYTICS_EVERY_MS && (rt.analytics.apps().length || rt.playAnalytics)) {
           lastAnalytics = Date.now();
           analyticsRunning = true;
           // Downloads take a while on a first backfill: beside the cycle, one pass at a time.
-          void rt.analytics.tick().catch(error => console.warn(`[analytics] failed: ${(error as Error).message}`))
-            .finally(() => { analyticsRunning = false; });
+          // Each reads its store at most every 6 hours itself; Play's failures (a 403) are kept, not thrown.
+          void (async () => {
+            if (rt.analytics.apps().length) await rt.analytics.tick().catch(error => console.warn(`[analytics] failed: ${(error as Error).message}`));
+            if (rt.playAnalytics) await rt.playAnalytics.tick().catch(error => console.warn(`[play-analytics] failed: ${(error as Error).message}`));
+          })().finally(() => { analyticsRunning = false; });
         }
         if (!triageRunning && Date.now() - lastTriage > rt.config.triageMinutes * 60_000) {
           lastTriage = Date.now();
@@ -633,12 +648,16 @@ const HELP = `isobot runner
   content <repo> research [--dry-run] | report
                       Run a site's content research now (files an issue; --dry-run prints the brief instead)
                       or its weekly search report
-  aso <repo> snapshot | report | research [--dry-run]
+  aso <repo | package> snapshot | report | research [--dry-run]
                       Read an app's ASO Tracker board into today's snapshot, post its weekly rank report,
                       or research a listing proposal now (--dry-run measures it but posts and records nothing)
   aso <repo> pending | approve | reject | apply
                       Show the latest proposal's apply state, approve or dismiss it (like ✅ / 🛑 in Discord),
-                      or write an approved one to App Store Connect now (e.g. right after creating a version)
+                      or write an approved one to App Store Connect now (e.g. right after creating a version).
+                      A repo's Google Play app is named by its package (e.g. aso md.vox.android research)
+  analytics play [sync]
+                      Read Play Console's bulk reports now (sync), or print each Play app's week and the
+                      reports' status
   analytics [sync | checkin | <app> [days]]
                       Download new App Store analytics reports now, print the check-in's App Store section,
                       or print an app's daily numbers (default: every app's last 7 days)`;
@@ -822,6 +841,20 @@ async function main(): Promise<void> {
     }
     case "analytics": {
       const [what, days] = process.argv.slice(3);
+      if (what === "play") {
+        if (!rt.playAnalytics) {
+          console.error("Play analytics is off: set aso.playReportsBucket (and a Play app's aso.play) in the runner config.");
+          process.exitCode = 2;
+          return;
+        }
+        if (days === "sync") await rt.playAnalytics.tick(true);
+        const status = rt.playAnalytics.status();
+        if (status) console.log(`Not readable: ${status}`);
+        for (const pkg of asoApps(rt.config).filter(a => a.store === "play").map(a => a.aso.appId)) {
+          console.log(`${pkg}: ${rt.playAnalytics.weekLine(pkg) ?? `(no week yet; latest day ${rt.playAnalytics.latest(pkg) ?? "none"})`}`);
+        }
+        return;
+      }
       if (!rt.analytics.apps().length) {
         console.error("App Store analytics is off: add \"analytics\": {} (and appStore.apps) to the runner config.");
         process.exitCode = 2;
