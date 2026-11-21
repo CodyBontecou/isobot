@@ -2,10 +2,10 @@ import { createRoot } from 'react-dom/client';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   Activity, AlertTriangle, CalendarClock, CircleDot, CircleCheck, CircleX, ExternalLink, GitMerge, GitPullRequest,
-  GitPullRequestClosed, GitPullRequestDraft, Hammer, Inbox, KanbanSquare, LayoutDashboard, ListChecks, LogOut, Pause,
-  RefreshCw, Search, X,
+  GitPullRequestClosed, GitPullRequestDraft, Hammer, Inbox, KanbanSquare, LayoutDashboard, ListChecks, LogOut, Mail,
+  MessageSquare, Bot, Mic, Newspaper, Pause, RefreshCw, Rocket, Search, Star, X,
 } from 'lucide-react';
-import type { Board, BoardEvent, BoardItem, Job, RunnerState, Session, View } from './types';
+import type { Board, BoardEvent, BoardItem, Job, RunnerState, Session, SourceKind, View } from './types';
 import './styles.css';
 
 // ---------- URL state (like vercel/board: every filter is a link) ----------
@@ -20,12 +20,12 @@ const VIEWS: { id: View; label: string; icon: typeof Activity }[] = [
   { id: 'jobs', label: 'Jobs', icon: ListChecks },
 ];
 
-type Params = { view: View; repo: string; q: string; state: string; job: string };
+type Params = { view: View; repo: string; q: string; state: string; job: string; source: string };
 
 function readParams(): Params {
   const p = new URLSearchParams(location.search);
   const view = (p.get('view') ?? 'overview') as View;
-  return { view: VIEWS.some(v => v.id === view) ? view : 'overview', repo: p.get('repo') ?? '', q: p.get('q') ?? '', state: p.get('state') ?? '', job: p.get('job') ?? '' };
+  return { view: VIEWS.some(v => v.id === view) ? view : 'overview', repo: p.get('repo') ?? '', q: p.get('q') ?? '', state: p.get('state') ?? '', job: p.get('job') ?? '', source: p.get('source') ?? '' };
 }
 
 function useParams(): [Params, (next: Partial<Params>, push?: boolean) => void] {
@@ -165,7 +165,7 @@ function App() {
         <nav>
           {VIEWS.map(({ id, label, icon: Icon }) => (
             <a key={id} href={`?view=${id}`} className={params.view === id ? 'active' : ''}
-              onClick={e => { e.preventDefault(); setParams({ view: id, state: '', q: '' }); }}>
+              onClick={e => { e.preventDefault(); setParams({ view: id, state: '', q: '', source: '' }); }}>
               <Icon size={15} /> <span>{label}</span>{counts[id] ? <em>{counts[id]}</em> : null}
             </a>
           ))}
@@ -197,12 +197,12 @@ function App() {
         {!board ? <div className="center"><span className="spinner" /></div>
           : !runner ? <Empty title="No runner has reported yet" body="Set ISOBOT_BOARD_URL and ISOBOT_BOARD_TOKEN in runner.env and restart the runner." />
           : <div className="content">
-              {params.view === 'overview' && <Overview runner={runner} items={items} jobs={jobs} events={repoEvents} now={now} open={job => setParams({ job })} go={view => setParams({ view })} />}
+              {params.view === 'overview' && <Overview runner={runner} items={items} jobs={jobs} events={repoEvents} now={now} open={job => setParams({ job })} go={view => setParams({ view })} goSource={source => setParams({ view: 'issues', state: 'open', source, q: '' })} />}
               {params.view === 'tasks' && <Tasks items={items} jobs={jobs} now={now} open={job => setParams({ job })} />}
               {params.view === 'activity' && <ActivityView events={repoEvents} source={params.state} setSource={state => setParams({ state })} q={params.q} setQ={q => setParams({ q }, false)} open={job => setParams({ job })} />}
               {params.view === 'schedule' && <Schedule runner={runner} now={now} open={job => setParams({ job })} />}
-              {params.view === 'prs' && <Items kind="pr" items={items} state={params.state || 'open'} setState={state => setParams({ state })} q={params.q} setQ={q => setParams({ q }, false)} now={now} githubAt={board.github?.at} />}
-              {params.view === 'issues' && <Items kind="issue" items={items} state={params.state || 'open'} setState={state => setParams({ state })} q={params.q} setQ={q => setParams({ q }, false)} now={now} githubAt={board.github?.at} />}
+              {params.view === 'prs' && <Items kind="pr" items={items} source={params.source} setSource={source => setParams({ source })} state={params.state || 'open'} setState={state => setParams({ state })} q={params.q} setQ={q => setParams({ q }, false)} now={now} githubAt={board.github?.at} />}
+              {params.view === 'issues' && <Items kind="issue" items={items} source={params.source} setSource={source => setParams({ source })} state={params.state || 'open'} setState={state => setParams({ state })} q={params.q} setQ={q => setParams({ q }, false)} now={now} githubAt={board.github?.at} />}
               {params.view === 'jobs' && <Jobs jobs={jobs} q={params.q} setQ={q => setParams({ q }, false)} now={now} open={job => setParams({ job })} />}
             </div>}
       </main>
@@ -265,6 +265,29 @@ function labelTone(label: string): string {
   return { 'isobot:failed': 'bad', 'isobot:review': 'accent', 'isobot:building': 'info', 'isobot:ready': 'ok', 'isobot:proposed': 'warn', 'isobot:ship': 'warn', 'isobot:stop': 'bad' }[label] ?? 'muted';
 }
 
+const SOURCES: Record<SourceKind, { label: string; icon: typeof Activity; hint: string }> = {
+  github: { label: 'GitHub', icon: CircleDot, hint: 'Filed on GitHub' },
+  discord: { label: 'Discord', icon: MessageSquare, hint: 'A Discord message, via triage' },
+  email: { label: 'Email', icon: Mail, hint: 'An email, via triage' },
+  vox: { label: 'Vox note', icon: Mic, hint: 'Your Vox.md voice note' },
+  appstore: { label: 'App Store review', icon: Star, hint: 'An App Store review, via triage' },
+  chat: { label: 'isobot chat', icon: Bot, hint: 'Asked for in the isobot staff chat' },
+  content: { label: 'Content train', icon: Newspaper, hint: 'Researched by the content train' },
+  release: { label: 'Release train', icon: Rocket, hint: 'Opened by the release train' },
+};
+const sourceOf = (item: BoardItem): SourceKind => item.source && item.source.kind in SOURCES ? item.source.kind : 'github';
+
+/** Where the work came from. With `link`, it opens the original message or review when there is one (not inside another link). */
+function SourceChip({ item, link = false }: { item: BoardItem; link?: boolean }) {
+  const kind = sourceOf(item);
+  const { label, icon: Icon, hint } = SOURCES[kind];
+  const body = <><Icon size={11} />{label}</>;
+  const title = item.kind === 'pr' && item.closes ? `${hint} (from #${item.closes})` : hint;
+  return link && item.source?.url && /^https:\/\//.test(item.source.url)
+    ? <a className={`chip source ${kind}`} href={item.source.url} target="_blank" rel="noreferrer" title={`${title}: open the original`} onClick={e => e.stopPropagation()}>{body}<ExternalLink size={10} /></a>
+    : <span className={`chip source ${kind}`} title={title}>{body}</span>;
+}
+
 function ItemIcon({ item }: { item: BoardItem }) {
   if (item.kind === 'pr') {
     if (item.merged) return <GitMerge size={15} className="tone-merged" />;
@@ -283,7 +306,7 @@ function ItemRow({ item, now }: { item: BoardItem; now: number }) {
         <span className="row-title">{item.title}</span>
         <span className="row-sub">{short(item.repo)}#{item.number} · {item.author} · {item.state === 'open' ? `opened ${rel(item.createdAt, now)}` : `${item.merged ? 'merged' : 'closed'} ${rel(item.closedAt, now)}`}</span>
       </span>
-      <span className="row-chips"><Labels labels={item.labels} /></span>
+      <span className="row-chips"><SourceChip item={item} /><Labels labels={item.labels} /></span>
       <span className="row-time" title={full(item.updatedAt)}>{rel(item.updatedAt, now)}</span>
     </a>
   );
@@ -291,13 +314,16 @@ function ItemRow({ item, now }: { item: BoardItem; now: number }) {
 
 // ---------- overview ----------
 
-function Overview({ runner, items, jobs, events, now, open, go }: { runner: RunnerState; items: BoardItem[]; jobs: Job[]; events: BoardEvent[]; now: number; open: (id: string) => void; go: (v: View) => void }) {
+function Overview({ runner, items, jobs, events, now, open, go, goSource }: { runner: RunnerState; items: BoardItem[]; jobs: Job[]; events: BoardEvent[]; now: number; open: (id: string) => void; go: (v: View) => void; goSource: (kind: SourceKind) => void }) {
   const needs = items.filter(i => i.state === 'open' && i.labels.some(l => ['isobot:review', 'isobot:failed', 'isobot:proposed'].includes(l)));
   const shipping = jobs.filter(j => j.state === 'awaiting_ship');
   const active = runner.runner.activeJobs.map(id => jobs.find(j => j.id === id) ?? runner.jobs.find(j => j.id === id)).filter(Boolean) as Job[];
   const today = new Date().toDateString();
   const todays = events.filter(e => new Date(e.at).toDateString() === today);
   const mergedToday = jobs.filter(j => ['merged', 'released', 'shipped'].includes(j.state) && new Date(j.updatedAt).toDateString() === today).length;
+  const openIssues = items.filter(i => i.kind === 'issue' && i.state === 'open');
+  const bySource = (Object.keys(SOURCES) as SourceKind[]).map(kind => ({ kind, count: openIssues.filter(i => sourceOf(i) === kind).length })).filter(s => s.count)
+    .sort((a, b) => b.count - a.count);
   const upcoming = [...runner.schedule].filter(s => s.nextAt || s.running)
     .sort((a, b) => (a.running ? 0 : Date.parse(a.nextAt!)) - (b.running ? 0 : Date.parse(b.nextAt!))).slice(0, 6);
 
@@ -337,6 +363,15 @@ function Overview({ runner, items, jobs, events, now, open, go }: { runner: Runn
           </div>
         </Section>
 
+        <Section title="Open issues by source" action={<button className="link" onClick={() => go('issues')}>Issues →</button>}>
+          {bySource.length === 0 ? <Empty title="No open issues" /> : <div className="list">
+            {bySource.map(({ kind, count }) => {
+              const { label, icon: Icon, hint } = SOURCES[kind];
+              return <button key={kind} className="row" onClick={() => goSource(kind)}><Icon size={15} className="tone-muted" /><span className="row-main"><span className="row-title">{label}</span><span className="row-sub">{hint}</span></span><span className="source-bar" style={{ width: `${Math.max(4, Math.round(count / openIssues.length * 80))}px` }} /><span className="row-time">{count}</span></button>;
+            })}
+          </div>}
+        </Section>
+
         <Section title="Today" action={<button className="link" onClick={() => go('activity')}>Activity →</button>}>
           {todays.length === 0 ? <Empty title="No activity yet today" /> : <Timeline events={todays.slice(0, 14)} open={open} compact />}
         </Section>
@@ -372,6 +407,7 @@ function Tasks({ items, jobs, now, open }: { items: BoardItem[]; jobs: Job[]; no
                     <span>{short(i.repo)}#{i.number}</span>
                     <span title={full(i.updatedAt)}>{rel(i.updatedAt, now)}</span>
                   </div>
+                  <div className="card-source"><SourceChip item={i} link /></div>
                   {job ? <button className="card-job" onClick={() => open(job.id)}><Chip tone={STATE_TONE[job.state]}>{job.state.replace('_', ' ')}</Chip> timeline →</button> : null}
                 </div>
               );
@@ -474,20 +510,28 @@ function Schedule({ runner, now, open }: { runner: RunnerState; now: number; ope
 
 // ---------- PRs and issues ----------
 
-function Items({ kind, items, state, setState, q, setQ, now, githubAt }: { kind: 'pr' | 'issue'; items: BoardItem[]; state: string; setState: (s: string) => void; q: string; setQ: (q: string) => void; now: number; githubAt?: string }) {
+function Items({ kind, items, source, setSource, state, setState, q, setQ, now, githubAt }: { kind: 'pr' | 'issue'; items: BoardItem[]; source: string; setSource: (s: string) => void; state: string; setState: (s: string) => void; q: string; setQ: (q: string) => void; now: number; githubAt?: string }) {
   const own = items.filter(i => i.kind === kind);
   const tabs = kind === 'pr'
     ? [{ id: 'open', label: 'Open', test: (i: BoardItem) => i.state === 'open' }, { id: 'merged', label: 'Merged', test: (i: BoardItem) => i.merged }, { id: 'closed', label: 'Closed', test: (i: BoardItem) => i.state === 'closed' && !i.merged }]
     : [{ id: 'open', label: 'Open', test: (i: BoardItem) => i.state === 'open' }, { id: 'closed', label: 'Closed', test: (i: BoardItem) => i.state === 'closed' }];
   const tab = tabs.find(t => t.id === state) ?? tabs[0];
   const needle = q.toLowerCase();
-  const shown = own.filter(tab.test).filter(i => !needle || `${i.repo}#${i.number} ${i.title} ${i.author} ${i.labels.join(' ')}`.toLowerCase().includes(needle))
+  const inTab = own.filter(tab.test);
+  const kinds = (Object.keys(SOURCES) as SourceKind[]).map(k => ({ kind: k, count: inTab.filter(i => sourceOf(i) === k).length })).filter(k => k.count || k.kind === source);
+  const shown = inTab.filter(i => !source || sourceOf(i) === source).filter(i => !needle || `${i.repo}#${i.number} ${i.title} ${i.author} ${i.labels.join(' ')} ${SOURCES[sourceOf(i)].label}`.toLowerCase().includes(needle))
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   return (
     <>
       <div className="toolbar">
         <div className="tabs">{tabs.map(t => <button key={t.id} className={t.id === tab.id ? 'active' : ''} onClick={() => setState(t.id)}>{t.label} <em>{own.filter(t.test).length}</em></button>)}</div>
-        <SearchBox q={q} setQ={setQ} placeholder="Filter by title, label, author…" />
+        <label className="select" title="Where the work came from">
+          <select value={source} onChange={e => setSource(e.target.value)} aria-label="Source">
+            <option value="">All sources ({inTab.length})</option>
+            {kinds.map(k => <option key={k.kind} value={k.kind}>{SOURCES[k.kind].label} ({k.count})</option>)}
+          </select>
+        </label>
+        <SearchBox q={q} setQ={setQ} placeholder="Filter by title, label, author, source…" />
         <span className="meta" title={full(githubAt)}>GitHub {rel(githubAt, now)}{tab.id !== 'open' ? ' · last 14 days' : ''}</span>
       </div>
       {shown.length ? <div className="list boxed">{shown.map(i => <ItemRow key={`${i.repo}#${i.number}`} item={i} now={now} />)}</div> : <Empty title={`No ${tab.label.toLowerCase()} ${kind === 'pr' ? 'pull requests' : 'issues'}`} />}
@@ -558,7 +602,7 @@ function JobPane({ id, runner, items, now, close }: { id: string; runner: Runner
           <a className="button" href={`https://github.com/${repo}/issues/${number}`} target="_blank" rel="noreferrer">Issue <ExternalLink size={12} /></a>
           {job?.prNumber ? <a className="button" href={`https://github.com/${repo}/pull/${job.prNumber}`} target="_blank" rel="noreferrer">PR #{job.prNumber} <ExternalLink size={12} /></a> : null}
         </div>
-        {issue ? <div className="pane-labels"><Labels labels={issue.labels} /></div> : null}
+        {issue ? <div className="pane-labels"><SourceChip item={issue} link /><Labels labels={issue.labels} /></div> : null}
         {job?.lastError ? <div className="banner bad"><CircleX size={14} /> {job.lastError}</div> : null}
         {followUps.map(f => <div key={f.kind} className="banner info"><CalendarClock size={14} /> {f.text} · next check {rel(f.dueAt, now)}</div>)}
         <h3>Timeline</h3>
