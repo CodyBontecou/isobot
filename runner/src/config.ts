@@ -128,6 +128,19 @@ export interface AsoAppConfig {
   autonomy?: "off" | "report" | "propose" | "apply";
   /** The App Store platform an approved proposal is written to. Default IOS. */
   platform?: "IOS" | "MAC_OS";
+  /** The same app on Google Play: its ranks, weekly report and listing proposals run alongside the App Store's. */
+  play?: AsoPlayConfig;
+}
+
+export interface AsoPlayConfig {
+  /** The Play package name (applicationId); the app must already be in ASO Tracker as a Play app. */
+  packageName: string;
+  /** The Play listing language proposals are written for. Default en-US. */
+  language?: string;
+  /** Play-specific notes for the listing; the App Store notes apply when absent. */
+  notes?: string;
+  /** As for the App Store; default the App Store's autonomy. */
+  autonomy?: "off" | "report" | "propose" | "apply";
 }
 
 /** Runner-wide settings for the ASO train (aso.ts). */
@@ -151,6 +164,10 @@ export interface AsoLimits {
   researchEveryDays?: number;
   /** Local hours [from, to) research and reports run in. Default [8, 22]. */
   hours?: [number, number];
+  /** Google service account key (JSON) for Play listings and Play Console reports. Default ~/.config/isobot/play-isobot-aso.json. */
+  googleKey?: string;
+  /** Play Console's bulk report bucket (pubsite_prod_<developer id>), for Play analytics; off without it. */
+  playReportsBucket?: string;
 }
 
 /** Runner-wide limits for the content train. */
@@ -482,6 +499,11 @@ export function validateConfig(config: RunnerConfig): void {
       if (a.autonomy !== undefined && !["off", "report", "propose", "apply"].includes(a.autonomy)) fail(`${name}: unknown aso.autonomy "${a.autonomy}"`);
       if (a.platform !== undefined && !["IOS", "MAC_OS"].includes(a.platform)) fail(`${name}: aso.platform must be IOS or MAC_OS`);
       if (!config.aso) fail(`${name}: aso needs the runner-wide aso.cli`);
+      if (a.play) {
+        if (!/^[a-zA-Z][\w]*(\.[a-zA-Z][\w]*)+$/.test(a.play.packageName ?? "")) fail(`${name}: aso.play.packageName must be a Play package name like com.example.app`);
+        if (a.play.language !== undefined && !/^[a-z]{2,3}(-[A-Za-z0-9]{2,4})?$/.test(a.play.language)) fail(`${name}: aso.play.language must be a Play language like en-US`);
+        if (a.play.autonomy !== undefined && !["off", "report", "propose", "apply"].includes(a.play.autonomy)) fail(`${name}: unknown aso.play.autonomy "${a.play.autonomy}"`);
+      }
     }
     if (!(policy.minReviewConfidence > 0 && policy.minReviewConfidence <= 1)) fail(`${name}: minReviewConfidence must be in (0, 1]`);
     void partial;
@@ -603,14 +625,24 @@ function sandboxEnv(env: NodeJS.ProcessEnv): Environment["sandbox"] {
   return { url: url.replace(/\/$/, ""), token };
 }
 
-/** Apps the ASO train follows. */
-export function asoApps(config: RunnerConfig): { owner: string; repo: string; aso: AsoAppConfig }[] {
+/**
+ * Apps the ASO train follows: each repo's App Store app, then its Play app. A Play app's `aso` is its own:
+ * the package name as `appId` and the listing language as `locale`.
+ */
+export function asoApps(config: RunnerConfig): { owner: string; repo: string; aso: AsoAppConfig; store: "appstore" | "play" }[] {
   if (!config.aso) return [];
   return Object.keys(config.repos).flatMap(key => {
     const aso = policyFor(config, key).aso;
-    if (!aso || (aso.autonomy ?? "propose") === "off") return [];
+    if (!aso) return [];
     const [owner, repo] = key.split("/");
-    return [{ owner, repo, aso }];
+    const out: { owner: string; repo: string; aso: AsoAppConfig; store: "appstore" | "play" }[] = [];
+    if ((aso.autonomy ?? "propose") !== "off") out.push({ owner, repo, aso, store: "appstore" });
+    const play = aso.play;
+    const autonomy = play?.autonomy ?? aso.autonomy ?? "propose";
+    if (play && autonomy !== "off") {
+      out.push({ owner, repo, store: "play", aso: { appId: play.packageName, locale: play.language ?? "en-US", storefront: "us", notes: play.notes ?? aso.notes, autonomy } });
+    }
+    return out;
   });
 }
 

@@ -64,3 +64,22 @@ npm run runner -- analytics checkin       # print the check-in's App Store secti
 npm run runner -- analytics vox.md 30     # an app's last 30 days as JSON
 npm run runner -- analytics               # every app's last 7 days
 ```
+
+## Google Play
+
+`runner/src/playAnalytics.ts` reads Play Console's monthly bulk reports from Cloud Storage
+(`aso.playReportsBucket`, `gs://pubsite_prod_<developer id>`) with the ASO train's service account, every 6 hours,
+for every Play app of the [ASO train](aso.md): store listing visitors and installs from the listing by traffic source
+(`stats/store_performance/…_traffic_source.csv`), daily user installs (`stats/installs/…_overview.csv`), and orders
+from the account's sales report (`sales/salesreport_<month>.zip`: first orders, renewals by their `..N` order
+number, refunds, and charged amounts by buyer currency, since Play doesn't convert them). Files are UTF-16 CSV and
+read by column name; only files whose generation changed are downloaded again.
+
+It feeds the weekly ASO report's Google Play section and the Play listing research. A 403 (Play shares the bucket
+with a newly invited account within about a day) is kept in `playstats:error`, shown in the report instead of the
+numbers, and retried each pass. State: `playstats:<package>:day:<date>` (kept 400 days) and `playstats:gen:<file>`.
+
+```sh
+npm run runner -- analytics play sync   # read Play Console's reports now
+npm run runner -- analytics play        # each Play app's week, or why the reports can't be read
+```

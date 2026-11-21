@@ -89,6 +89,47 @@ npm run runner -- aso GitSync.md reject              # same as 🛑
 npm run runner -- aso GitSync.md apply               # write an approved proposal now, e.g. right after creating a version
 ```
 
+## Google Play
+
+A repo's `aso.play` adds its Play app to the train as a second app, named by its package (`aso md.vox.android …`).
+It goes through the same steps, with Play's differences:
+
+- **Ranks**: ASO Tracker checks Play's web search daily (its Play support, aso-tracker#1). Play shows at most about
+  30 apps per search, so a dash means "not among them", and Play publishes no demand estimate. The weekly report
+  gets a separate Google Play section per app.
+- **Phrases**: the first research finds no tracked Play phrases and seeds up to 40 from the App Store app's phrases
+  with the most demand (same storefront, the listing's script only), measures them on Play, then drafts. Each run's
+  `newPhrases` (up to 40) are added the same way. The App Store's demand for a phrase is shown as a hint.
+- **Proposal**: title (30 characters), short description (80) and full description (4000) for one language
+  (`language`, default `en-US`). Play has no keyword field. A field falls back to the live text when it's over the
+  limit, drops the brand, adds another company's name (title and short description), uses words Play's metadata
+  policy forbids there (#1, best, top, free, sale, calls to action, emoji, all caps), or repeats a word enough to read
+  as keyword stuffing.
+- **Apply**: an Android Publisher edit that patches only the changed fields and commits. It goes to Google's review
+  and is live once approved (usually hours); no release is needed. A field changed in Play Console since the draft
+  is left alone. Under managed publishing the commit is saved with `changesNotSentForReview` and the staff channel
+  is told to send it from Publishing overview. A failed commit (e.g. while a release is in review) is posted once and
+  retried every few minutes. Applied changes go into `aso:<package>:history`, and the next research sees their
+  rank movement and Play Console numbers.
+- **Credentials**: a Google service account (`aso.googleKey`, default `~/.config/isobot/play-isobot-aso.json`)
+  invited in Play Console with store presence, app information and bulk
+  reports, financial data, release and review-reply permissions. The key file never goes into a repo or a sandbox.
+
+```jsonc
+"aso": { …, "googleKey": "~/.config/isobot/play-isobot-aso.json", "playReportsBucket": "pubsite_prod_8478281120215349264" },
+"repos": { "codybontecou/vox.md": { "aso": { "appId": "6758967337", "play": { "packageName": "md.vox.android" } } } }
+```
+
+`play` takes `packageName`, `language`, `notes` (default: the App Store notes) and `autonomy` (default: the App
+Store's).
+
+## Store numbers in research
+
+Each applied change in the research prompt carries its before/after store numbers: daily installs, page visits,
+conversion and paid conversions over up to 28 days either side of the day it went live (App Store analytics, see
+[analytics](analytics.md), or Play Console's reports). Fewer than 14 days after it, or fewer than 30 installs a side,
+is labeled inconclusive.
+
 ## Apple endpoints, and running on Cloudflare
 
 Ranks come from the App Store app's own search endpoint (`search.itunes.apple.com/WebObjects/MZStore.woa/wa/search`)
