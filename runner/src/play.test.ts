@@ -59,18 +59,21 @@ test("promotional words, emoji, shouting and keyword stuffing are caught", () =>
 });
 
 test("config: a Play app is a second app of the train, named by its package", () => {
+  assert.equal(asoApps(testConfig()).filter(a => a.store === "play").length, 4, "the runner config follows the four Play apps");
   const config = testConfig();
   const key = Object.keys(config.repos).find(k => config.repos[k].aso)!;
-  config.repos[key].aso!.play = { packageName: "md.vox.android" };
+  const playOf = () => asoApps(config).find(a => a.store === "play" && `${a.owner}/${a.repo}` === key);
+  config.repos[key].aso!.play = { packageName: "com.example.notes" };
   validateConfig(config);
-  const play = asoApps(config).find(a => a.store === "play")!;
-  assert.equal(play.aso.appId, "md.vox.android");
+  const play = playOf()!;
+  assert.equal(play.aso.appId, "com.example.notes");
   assert.equal(play.aso.locale, "en-US");
   assert.equal(play.aso.autonomy, config.repos[key].aso!.autonomy ?? "propose");
   config.repos[key].aso!.play = { packageName: "not a package" };
   assert.throws(() => validateConfig(config), /aso.play.packageName must be a Play package name/);
-  config.repos[key].aso!.play = { packageName: "md.vox.android", autonomy: "off" };
-  assert.equal(asoApps(config).filter(a => a.store === "play").length, 0);
+  config.repos[key].aso!.play = { packageName: "com.example.notes", autonomy: "off" };
+  assert.equal(playOf(), undefined, "a Play app can be off on its own");
+  assert.ok(asoApps(config).some(a => a.store === "appstore" && `${a.owner}/${a.repo}` === key), "its App Store app stays");
 });
 
 /** Google's APIs as fetch sees them: a token endpoint, Android Publisher edits, and a Cloud Storage bucket. */
