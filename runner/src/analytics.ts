@@ -76,6 +76,8 @@ const FIELDS: Record<ReportKey, (keyof DayMetrics)[]> = {
 interface DayRecord { src: Partial<Record<ReportKey, string>>; m: DayMetrics }
 
 const SYNC_EVERY_MS = 6 * 3_600_000;
+/** After App Store Connect's rate limit, the next pass waits this long (Apple's window is an hour). */
+const RATE_LIMIT_RETRY_MS = 65 * 60_000;
 /** Instances read per app and pass (a request each), so a first backfill spreads over a few passes. */
 const INSTANCES_PER_PASS = 60;
 
@@ -374,8 +376,12 @@ export class AppAnalytics implements AnalyticsView {
       } catch (error) {
         console.warn(`[analytics] ${app.repo}: ${(error as Error).message}`);
         store.event(null, "analytics_error", `${app.repo}: ${(error as Error).message.slice(0, 300)}`);
-        // The rate limit is the API key's, shared with releases and ASO: stop here and leave them room.
-        if (error instanceof RateLimited) break;
+        // The rate limit is the API key's, shared with releases and ASO: stop here and leave them room,
+        // and try again in an hour rather than at the next 6-hour pass.
+        if (error instanceof RateLimited) {
+          store.setCursor("analytics:synced", new Date(this.now().getTime() - SYNC_EVERY_MS + RATE_LIMIT_RETRY_MS).toISOString());
+          break;
+        }
       }
     }
   }
