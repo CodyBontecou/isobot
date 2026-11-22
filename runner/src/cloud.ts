@@ -290,6 +290,18 @@ export class CloudRepo implements RepoOps {
     await this.api.destroy(this.name(name));
   }
 
+  async mergeMain(dir: string, sha: string): Promise<string[]> {
+    const name = sandboxFor(dir);
+    if ((await this.git(name, ["cat-file", "-e", `${sha}^{commit}`], dir, true)).code !== 0) {
+      await this.gitFromGitHub(name, ["fetch", "--quiet", "origin", sha], dir);
+    }
+    const merged = await this.git(name, ["merge", "--quiet", "--no-edit", "--no-verify", "-m", "Merge main", sha], dir, true);
+    if (merged.code === 0 && !merged.timedOut) return [];
+    const conflicts = (await this.git(name, ["diff", "--name-only", "--diff-filter=U"], dir)).stdout.split("\n").filter(Boolean);
+    if (!conflicts.length) throw new Error(`git merge failed in the build sandbox: ${tail((merged.stderr || merged.stdout).trim(), 1500)}`);
+    return conflicts;
+  }
+
   async commitPending(dir: string, message: string): Promise<void> {
     const name = sandboxFor(dir);
     const status = await this.git(name, ["status", "--porcelain"], dir);

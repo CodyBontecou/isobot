@@ -204,6 +204,9 @@ export class FakeRepo implements RepoOps {
   async push(sha: string, branch: string): Promise<void> { this.calls.push(`push ${sha} ${branch}`); }
   async fetchBranch(branch: string): Promise<string> { this.calls.push(`fetch ${branch}`); return `pr-head-${branch}`; }
   async mergeBase(a: string, b: string): Promise<string> { this.calls.push(`merge-base ${a} ${b}`); return "base"; }
+  /** Files `mergeMain` reports as conflicting (none: a clean merge). */
+  mainConflicts: string[] = [];
+  async mergeMain(_dir: string, sha: string): Promise<string[]> { this.calls.push(`merge-main ${sha}`); return this.mainConflicts; }
   async purge(number: number): Promise<string[]> { this.calls.push(`purge ${number}`); return []; }
   async checkoutAt(sha: string, name: string): Promise<string> { this.calls.push(`checkout ${sha} ${name}`); return "/tmp/release"; }
   published: { prefix: string; names: string[] }[] = [];

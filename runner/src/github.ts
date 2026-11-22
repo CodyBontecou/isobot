@@ -23,6 +23,8 @@ export interface PullRequest {
   merged: boolean;
   headSha: string;
   mergeCommitSha: string | null;
+  /** False when it conflicts with its base; null while GitHub is still working it out (or unknown). */
+  mergeable?: boolean | null;
 }
 
 export type CiState = "success" | "pending" | "failure" | "none";
@@ -223,7 +225,7 @@ export class GitHub implements GitHubApi {
     const { data } = await this.octokit.pulls.get({ owner, repo, pull_number: number });
     return {
       number: data.number, url: data.html_url, state: data.state as "open" | "closed", merged: data.merged,
-      headSha: data.head.sha, mergeCommitSha: data.merged ? data.merge_commit_sha : null,
+      headSha: data.head.sha, mergeCommitSha: data.merged ? data.merge_commit_sha : null, mergeable: data.mergeable,
     };
   }
 

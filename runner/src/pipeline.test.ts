@@ -561,7 +561,7 @@ test("a note on an open PR revises that PR from its head, resuming the builder s
   assert.equal(implementCalls(builder), 1, "no fresh implementation");
   assert.match(builder.reviseFeedback.at(-1)!, /Also export the date column/);
   assert.equal(builder.reviseSessions.at(-1), "session-1");
-  assert.deepEqual(repo.calls.slice(0, 4), ["sync", "fetch isobot/41-add-csv-export", "merge-base base pr-head-isobot/41-add-csv-export", "workspace isobot/41-add-csv-export"]);
+  assert.deepEqual(repo.calls.slice(0, 4), ["sync", "fetch isobot/41-add-csv-export", "workspace isobot/41-add-csv-export", "merge-main base"]);
   assert.equal(github.pulls.size, 1, "the same PR is updated");
   assert.deepEqual(github.get(OWNER, NAME, 41).labels, ["isobot:review"]);
   assert.ok(github.commentsFor(OWNER, NAME, 41).some(c => /revising PR #100 with your note/.test(c)));
@@ -1265,4 +1265,43 @@ test("jobs merged before the effect ledger existed are never released again", as
   t.store.update(`${REPO}#65`, { state: "merged" });
   await t.pipeline.followUp();
   assert.equal(releases(t, 65), 0);
+});
+
+test("a PR that conflicts with main gets main merged in and builds again instead of counting as missing CI", async () => {
+  const { github, pipeline, repo, builder, store } = setup(config => {
+    config.repos[REPO] = { autonomy: "merge", checks: ["make test"] };
+  });
+  github.ci = "none";
+  github.add(OWNER, NAME, 60, "Change", ["isobot:ready"]);
+  const original = github.pull.bind(github);
+  let conflicting = true;
+  github.pull = async (owner, repo, number) => ({ ...(await original(owner, repo, number)), mergeable: !conflicting });
+  await cycle(pipeline);
+  assert.equal(github.merged.length, 0);
+  assert.equal(store.get(`${REPO}#60`)!.state, "queued");
+  assert.equal(store.get(`${REPO}#60`)!.revising, true);
+  assert.doesNotMatch(github.commentsFor(OWNER, NAME, 60).join("\n"), /no GitHub CI reported/);
+
+  conflicting = false;
+  github.ci = "success";
+  repo.mainConflicts = ["marketing/public/sitemap.xml"];
+  await cycle(pipeline);
+  assert.ok(repo.calls.some(c => c.startsWith("merge-main ")), "the revision merges main in first");
+  assert.match(builder.reviseFeedback[0], /conflicts in:[\s\S]*sitemap\.xml[\s\S]*Leave no conflict markers/);
+  assert.match(github.commentsFor(OWNER, NAME, 60).join("\n"), /up to date with main/);
+  assert.equal(github.merged.length, 1);
+});
+
+test("a PR that keeps conflicting with main stops being sent back after two rounds", async () => {
+  const { github, pipeline, store } = setup(config => {
+    config.repos[REPO] = { autonomy: "merge", checks: ["make test"] };
+  });
+  github.ci = "none";
+  github.add(OWNER, NAME, 61, "Change", ["isobot:ready"]);
+  const original = github.pull.bind(github);
+  github.pull = async (owner, repo, number) => ({ ...(await original(owner, repo, number)), mergeable: false });
+  for (let i = 0; i < 4; i++) await cycle(pipeline);
+  assert.equal(store.events(`${REPO}#61`, 500).filter(e => e.kind === "behind_main").length, 2);
+  assert.equal(github.merged.length, 0);
+  assert.match(github.commentsFor(OWNER, NAME, 61).at(-1)!, /no GitHub CI reported/);
 });

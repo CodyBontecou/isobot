@@ -129,7 +129,13 @@ itself, or `npm run runner -- say time.md#12 "use the system font"`.
   review round, at most five per build. The task the reviewer sees includes your notes.
 - **On an open PR**, a note queues a revision: the runner checks out the PR branch, resumes the
   builder's session with your note, re-runs checks and review, and updates the same PR. If the
-  repo merges automatically, a note that hasn't been applied yet blocks the merge.
+  repo merges automatically, a note that hasn't been applied yet blocks the merge. Every
+  revision first merges the newest main into the branch; on a conflict the builder resolves it
+  (regenerating built files such as sitemaps) before the usual checks and review.
+- **Left behind by main**: when another PR merges first and this one now conflicts, GitHub runs no
+  CI on it and refuses the merge. Instead of counting that as missing CI, the runner queues a
+  revision to merge main in, up to twice per job (`MAX_MAIN_ROUNDS`); after that the gate decides
+  as usual.
 - **After it's merged, closed or failed**, a note that starts with `retry`, "try again", "rebuild"
   or "build it again" builds the issue again: the runner adds `isobot:ready` itself and every note
   since the first approval goes to the builder ("try again, and use the system font" works; a bare
