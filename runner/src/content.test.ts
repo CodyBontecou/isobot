@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { validateConfig, type ContentConfig, type RunnerConfig } from "./config.js";
-import { ContentTrain, contentEvidenceKey, CONTENT_BUILD_RULES, parseResearch, publishedUrls, researchDue, type ContentDeps } from "./content.js";
+import { ContentTrain, contentEvidenceKey, CONTENT_BUILD_RULES, parseResearch, parseSearchTotals, publishedUrls, researchDue, type ContentDeps } from "./content.js";
 import type { AgentJsonInput } from "./builder.js";
 import { Notifier } from "./notify.js";
 import { Pipeline, type PipelineDeps } from "./pipeline.js";
@@ -386,4 +386,20 @@ test("builder.contentTimeoutMinutes is validated", () => {
   assert.throws(() => validateConfig(config), /builder\.contentTimeoutMinutes must be 1-240/);
   config.builder.contentTimeoutMinutes = 120;
   assert.doesNotThrow(() => validateConfig(config));
+});
+
+test("the weekly report keeps Search Console totals for the board, and skips ones it didn't get", async () => {
+  const { config, store, github } = setup();
+  const t = train(config, store, github);
+  const site = { owner: OWNER, repo: NAME, content: config.repos[REPO].content! };
+  t.outputs.push({ digest: "Clicks up.", last7: { clicks: 40, impressions: 2000, ctr: 2, position: 18.5 }, previous7: null });
+  assert.equal(await t.content.report(site, true), "Clicks up.");
+  assert.deepEqual(JSON.parse(store.cursor("content:codybontecou/time.md:search:2026-11-18")!),
+    { last7: { clicks: 40, impressions: 2000, ctr: 0.02, position: 18.5 }, previous7: null });
+  assert.match(t.posted[0], /weekly search report/);
+  store.deleteCursor("content:codybontecou/time.md:search:2026-11-18");
+  t.outputs.push({ digest: "Search Console wasn't reachable.", last7: null, previous7: null });
+  await t.content.report(site, true);
+  assert.equal(store.cursor("content:codybontecou/time.md:search:2026-11-18"), null);
+  assert.equal(parseSearchTotals({ clicks: -1, impressions: 1, ctr: 0, position: 1 }), null);
 });
