@@ -164,6 +164,20 @@ test("a Play pass files the biggest groups as proposals, once, capped per pass",
   assert.equal((await t.audit.tick(true)).filed.length, 0);
 });
 
+test("autoApprove queues crash fixes to build without waiting", async () => {
+  const t = setup();
+  t.config.crashes = { autoApprove: true, issuesPerPass: 1 };
+  t.google.issues.set(t.play.pkg, ISSUES);
+  await t.audit.tick(true);
+  const filed = [...t.github.issues.values()][0];
+  assert.deepEqual(filed.labels, [t.config.labels.ready, t.config.labels.auto, "bug"]);
+  assert.match(filed.body, /approved automatically .*isobot:stop/);
+  assert.equal(t.posted.length, 1);
+  assert.match(t.posted[0], /queued to fix, merge and ship/);
+  // The shipped config has it on.
+  assert.equal(testConfig().crashes?.autoApprove, true);
+});
+
 test("an open issue that already names the crashing method counts as filed", async () => {
   const t = setup();
   t.config.crashes = { minUsers: 6 };
@@ -245,6 +259,8 @@ test("config validates the crashes block", () => {
   assert.throws(() => validateConfig(config), /crashes\.minUsers/);
   config.crashes = { issuesPerPass: 50 };
   assert.throws(() => validateConfig(config), /crashes\.issuesPerPass/);
-  config.crashes = { minUsers: 3, issuesPerPass: 2, fileIssues: false };
+  config.crashes = { autoApprove: "yes" as unknown as boolean };
+  assert.throws(() => validateConfig(config), /crashes\.autoApprove/);
+  config.crashes = { minUsers: 3, issuesPerPass: 2, fileIssues: false, autoApprove: true };
   validateConfig(config);
 });

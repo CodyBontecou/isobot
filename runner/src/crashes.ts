@@ -202,7 +202,20 @@ export class CrashAudit {
   constructor(private deps: CrashDeps) {}
 
   private now(): Date { return this.deps.now?.() ?? new Date(); }
-  private get limits() { return { minUsers: 2, issuesPerPass: 3, fileIssues: true, ...this.deps.config.crashes }; }
+  private get limits() { return { minUsers: 2, issuesPerPass: 3, fileIssues: true, autoApprove: false, ...this.deps.config.crashes }; }
+
+  /** The labels a new crash issue gets: queued to build straight away with autoApprove, else a proposal. */
+  private issueLabels(): string[] {
+    const l = this.deps.config.labels;
+    return this.limits.autoApprove ? [l.ready, l.auto, "bug"] : [l.proposed, "bug"];
+  }
+
+  private footer(): string {
+    const l = this.deps.config.labels;
+    return this.limits.autoApprove
+      ? `<sub>Opened by isobot's crash audit and approved automatically (crashes.autoApprove); add \`${l.stop}\` to cancel. A fix should reproduce the crash in a test first.</sub>`
+      : `<sub>Opened by isobot's crash audit. Add \`${l.ready}\` to approve a fix; a fix should reproduce the crash in a test first.</sub>`;
+  }
   enabled(): boolean { return Boolean(this.deps.config.crashes) && (this.iosApps().length > 0 || this.playApps().length > 0); }
 
   iosApps(): { appId: string; repo: string }[] {
@@ -242,7 +255,9 @@ export class CrashAudit {
       });
       if (stop) break;
     }
-    if (filed.length) {
+    if (filed.length && this.limits.autoApprove) {
+      await this.deps.notify(`💥 **Crash audit**: opened ${plural(filed.length, "issue")} for crashes users are hitting, queued to fix, merge and ship 🏗:\n${filed.map(f => `• ${f}`).join("\n")}\nAdd \`${this.deps.config.labels.stop}\` to one to cancel it.`).catch(() => undefined);
+    } else if (filed.length) {
       // One message per issue: the bridge acts on ✅ only on a message that links exactly one issue.
       await this.deps.notify(`💥 **Crash audit**: opened ${plural(filed.length, "issue")} for crashes users are hitting. React ${CONTROLS.start} on one to have isobot fix it, or ${CONTROLS.cleanup} to dismiss it (or add \`${this.deps.config.labels.ready}\` on GitHub).`).catch(() => undefined);
       for (const f of filed) await this.deps.notify(`🗳 ${f}`, PROPOSAL_CONTROLS).catch(() => undefined);
@@ -393,10 +408,10 @@ export class CrashAudit {
         "**Source:** Google Play Android vitals, via isobot's crash audit",
         "",
         "---",
-        `<sub>Opened by isobot's crash audit. Add \`${this.deps.config.labels.ready}\` to approve a fix; a fix should reproduce the crash in a test first.</sub>`,
+        this.footer(),
         `${CRASH_MARKER}play:${pkg}:${g.key.replace(/[^\w.|-]+/g, "_")} -->`,
       ].join("\n");
-      const issue = await this.deps.github.createIssue(owner, name, title, body, [this.deps.config.labels.proposed, "bug"]);
+      const issue = await this.deps.github.createIssue(owner, name, title, body, this.issueLabels());
       store.setCursor(`crashes:filed:${pkg}:${g.key}`, issue.url);
       store.event(null, "crash_issue", `${repo}: ${title} ${issue.url}`);
       filed.push(`${this.name(repo)} (Android): ${title} <${issue.url}>`);
@@ -510,10 +525,10 @@ export class CrashAudit {
           "**Source:** TestFlight crash feedback, via isobot's crash audit",
           "",
           "---",
-          `<sub>Opened by isobot's crash audit. Add \`${this.deps.config.labels.ready}\` to approve a fix.</sub>`,
+          this.footer(),
           `${CRASH_MARKER}testflight:${appId}:${s.id} -->`,
         ].join("\n");
-        const issue = await this.deps.github.createIssue(owner, name, title, body, [this.deps.config.labels.proposed, "bug"]);
+        const issue = await this.deps.github.createIssue(owner, name, title, body, this.issueLabels());
         store.setCursor(sk, issue.url);
         store.event(null, "crash_issue", `${repo}: ${title} ${issue.url}`);
         filed.push(`${this.name(repo, appId)} (TestFlight): ${title} <${issue.url}>`);

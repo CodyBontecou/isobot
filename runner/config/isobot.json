@@ -44,7 +44,7 @@
     "playReportsBucket": "pubsite_prod_8478281120215349264"
   },
   "analytics": {},
-  "crashes": {},
+  "crashes": { "autoApprove": true },
   "labels": {
     "proposed": "isobot:proposed",
     "ready": "isobot:ready",

@@ -17,14 +17,17 @@ Play apps are the repos with `aso.play`; App Store apps are `appStore.apps`.
   groups them: ANRs by the frame they block in, out-of-memory crashes by class (the frame is only where the last
   allocation failed), obfuscated frames into one pool, everything else by frame and exception.
 - **Issues.** Each group with at least `minUsers` affected users (default 2) becomes one GitHub issue in the app's
-  repo, labelled `isobot:proposed` and `bug`, with the reports, users, version codes, a shortened sample stack and
+  repo, labelled `bug`, with the reports, users, version codes, a shortened sample stack and
   links to Play Console. At most `issuesPerPass` (default 3) per app and pass, biggest first; the rest follow on
   later passes. An open issue that already names the crashing method counts as filed. Each TestFlight crash
   signature (the first app frame of the crashed thread) is one issue too; the first pass files only the last
   7 days' submissions. Obfuscated groups are never filed: upload the R8 mapping file to Play to make them readable.
-  Nothing is built until you approve: the staff channel gets a 💥 summary and one 🗳 message per issue with
-  ✅ (build it) and 🧹 (dismiss) reactions, or add `isobot:ready` on GitHub. Crash issues never skip approval,
-  whatever `autoApprove` says, since a crash fix touches code users already depend on.
+  With `autoApprove: true` (isobot's config has it on) each issue is opened approved (`isobot:ready` +
+  `isobot:auto`, as triage does for small work), so isobot builds, reviews, merges and ships the fix under the
+  repo's `ownerAutonomy` without waiting; the staff channel gets a 💥 message listing them, and `isobot:stop`
+  on an issue cancels it. Without it, issues are `isobot:proposed` and wait: the staff channel gets a 💥 summary
+  and one 🗳 message per issue with ✅ (build it) and 🧹 (dismiss) reactions, or add `isobot:ready` on GitHub.
+  Triage's `autoApprove` doesn't apply to crash issues; only `crashes.autoApprove` does.
 - **Check-in.** The daily check-in gets a **Crashes** section: per app, the last 7 days on Play (reports, users,
   ANRs, the top group) and Apple's latest App Crashes period. A flag posts a check-in on its own: reports doubling
   week over week, a new crash group only in the newest version code (what the last release brought), a 28-day
@@ -44,7 +47,7 @@ user data.
 ## Settings
 
 ```json
-"crashes": { "minUsers": 2, "issuesPerPass": 3, "fileIssues": true }
+"crashes": { "minUsers": 2, "issuesPerPass": 3, "fileIssues": true, "autoApprove": false }
 ```
 
 `fileIssues: false` keeps the check-in and Discord lines but never opens issues.

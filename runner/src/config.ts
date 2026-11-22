@@ -164,6 +164,9 @@ export interface CrashLimits {
   issuesPerPass?: number;
   /** False: report in the check-in and Discord only, never open issues. Default true. */
   fileIssues?: boolean;
+  /** True: crash issues are approved as they're opened (isobot:ready + isobot:auto), so isobot builds, merges and
+   * ships the fix under the repo's ownerAutonomy without waiting. Default false (isobot:proposed). */
+  autoApprove?: boolean;
 }
 
 export interface AsoLimits {
@@ -427,6 +430,7 @@ export function validateConfig(config: RunnerConfig): void {
     if (c.minUsers !== undefined && !(Number.isInteger(c.minUsers) && c.minUsers >= 1)) fail("crashes.minUsers must be a whole number of at least 1");
     if (c.issuesPerPass !== undefined && !(Number.isInteger(c.issuesPerPass) && c.issuesPerPass >= 0 && c.issuesPerPass <= 20)) fail("crashes.issuesPerPass must be 0-20");
     if (c.fileIssues !== undefined && typeof c.fileIssues !== "boolean") fail("crashes.fileIssues must be true or false");
+    if (c.autoApprove !== undefined && typeof c.autoApprove !== "boolean") fail("crashes.autoApprove must be true or false");
   }
   if (config.handoff) {
     const h = config.handoff;
