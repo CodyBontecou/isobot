@@ -37,6 +37,11 @@ export interface RepoOps {
   purge(number: number): Promise<string[]>;
   fetchBranch(branch: string): Promise<string>;
   mergeBase(a: string, b: string): Promise<string>;
+  /**
+   * Merges `sha` (the newest main) into the workspace's branch. A clean merge is committed; on a conflict the
+   * merge is left in progress, with markers in the files it returns, for the builder to resolve.
+   */
+  mergeMain(dir: string, sha: string): Promise<string[]>;
   /** Publishes screenshots/recordings and returns a URL per file name (git.ts). */
   publishMedia(prefix: string, files: { file: string; name: string }[], message: string): Promise<Record<string, string>>;
 }
@@ -95,6 +100,8 @@ const MAX_ATTEMPTS = 5;
 const MAX_NOTE_ROUNDS = 5;
 /** Rounds a content builder gets to take back files outside the site's allowed paths before review. */
 const MAX_PATH_ROUNDS = 2;
+/** How many times a PR left behind by main is sent back to merge it in, before the gate decides as usual. */
+const MAX_MAIN_ROUNDS = 2;
 const CI_WAIT_MS = 90 * 60_000;
 /** How long a new PR may go without any CI reporting before "no CI" is final. */
 const CI_GRACE_MS = 5 * 60_000;
@@ -550,16 +557,23 @@ export class Pipeline {
         store.event(job.id, "resumed", run.summary);
       } else if (revising) {
         const head = await repo.fetchBranch(branch);
-        baseSha = await repo.mergeBase(mainSha, head);
         workspace = await repo.createWorkspace(branch, head);
+        // Other PRs may have merged since this one was built. Bring the newest main in first, so the revision
+        // is judged (and merges) against what is live now; GitHub runs no CI on a PR that conflicts.
+        const conflicts = await repo.mergeMain(workspace, mainSha);
+        baseSha = mainSha;
+        if (conflicts.length) store.event(job.id, "main_conflict", conflicts.join(", "));
         await github.removeLabel(job.owner, job.repo, job.number, this.labels.review);
         await github.addLabels(job.owner, job.repo, job.number, [this.labels.building]);
-        await github.comment(job.owner, job.repo, job.number, `🔁 isobot is revising PR #${job.prNumber} with your note. Add \`${this.labels.stop}\` to stop.`);
-        await this.feed(job, { phase: "revising", notes: this.noteCount(job, notes.fresh.length) }, this.ackNotes(notes.fresh));
-        noteRounds++;
+        await github.comment(job.owner, job.repo, job.number, notes.fresh.length
+          ? `🔁 isobot is revising PR #${job.prNumber} with your note. Add \`${this.labels.stop}\` to stop.`
+          : `🔁 isobot is bringing PR #${job.prNumber} up to date with ${base}. Add \`${this.labels.stop}\` to stop.`);
+        await this.feed(job, { phase: "revising", notes: this.noteCount(job, notes.fresh.length) }, notes.fresh.length ? this.ackNotes(notes.fresh) : undefined);
+        if (notes.fresh.length) noteRounds++;
+        const asked = notes.fresh.length ? noteFeedback(notes.fresh) : "Re-read the task and the owner's follow-up notes, and make sure this branch satisfies all of them.";
         run = await builderStep(ids => builder.revise({
           cwd: workspace!, ...ids, task, devices, media: builderMedia, timeoutMinutes,
-          feedback: notes.fresh.length ? noteFeedback(notes.fresh) : "Re-read the task and the owner's follow-up notes, and make sure this branch satisfies all of them.",
+          feedback: conflicts.length ? `${conflictFeedback(conflicts, base)}\n\n${asked}` : asked,
         }), job.sessionId);
         store.event(job.id, "revised", run.summary, { type: "builder", v: 1, round: "revise PR", ok: run.ok });
       } else {
@@ -775,7 +789,8 @@ export class Pipeline {
     } catch (error) {
       // Stopping: whether GitHub merged is unknown; the next start checks the PR (build() and here).
       if (this.shuttingDown) throw error;
-      // Usually a conflict with a newer main: the PR is still good, so hand it to the owner.
+      // Usually a conflict with a newer main: merge main in and build again; past that, hand it to the owner.
+      if (await this.conflictsWithMain(job, context).catch(() => false)) return;
       await github.addLabels(job.owner, job.repo, job.number, [this.labels.review]);
       store.update(job.id, { state: "pr_open", lastError: (error as Error).message });
       await github.comment(job.owner, job.repo, job.number, `🔍 Every gate passed but GitHub refused the merge (${(error as Error).message}). ${prUrl} is ready for you.`);
@@ -857,6 +872,9 @@ export class Pipeline {
     else if (state === "none" && waited > CI_GRACE_MS) outcome = "none";
     else if (waited > CI_WAIT_MS) outcome = "still pending after 90 minutes";
     if (!outcome) return store.snooze(job.id, "ci", new Date(this.now().getTime() + CI_POLL_MS));
+    // GitHub runs no CI on a PR that conflicts with main (something else merged meanwhile): bring main in and
+    // build again, rather than count it as missing CI.
+    if (outcome === "none" && await this.conflictsWithMain(job, context)) return;
     store.event(job.id, "ci", outcome, { type: "ci", v: 1, state: outcome, waitedMinutes: Math.round(waited / 60_000) });
     const policy = this.policyOf(job.owner, job.repo, job.kind);
     // The merge and release run beside the cycle, like a build, so a long release doesn't hold up claiming.
@@ -872,6 +890,24 @@ export class Pipeline {
       }
     })().finally(() => this.background.delete(job.id));
     this.background.set(job.id, work);
+  }
+
+  /**
+   * Whether the PR conflicts with main. If it does and it hasn't been brought up to date too often, the job is
+   * queued to revise: the next build merges main in (build()) and the builder resolves the conflicts.
+   */
+  private async conflictsWithMain(job: Job, context: MergeContext): Promise<boolean> {
+    const { store, github } = this.deps;
+    const pr = await github.pull(job.owner, job.repo, context.prNumber);
+    if (pr.mergeable !== false) return false;
+    const rounds = store.events(job.id, 500).filter(e => e.kind === "behind_main").length;
+    if (rounds >= MAX_MAIN_ROUNDS) return false;
+    store.event(job.id, "behind_main", `round ${rounds + 1}`);
+    store.clearFollowUp(job.id, "ci");
+    store.update(job.id, { state: "queued", revising: true, attempts: 0 });
+    await this.feed(job, { phase: "queued", detail: "Bringing the PR up to date with main" },
+      `🔀 ${context.prUrl} conflicts with main (something else merged first), so GitHub won't run CI on it. isobot will merge main in and build it again.`);
+    return true;
   }
 
   /** A claimed job waiting on other issues ("Blocked by #12"). It builds once they are all closed. */
@@ -1376,6 +1412,17 @@ function prBody(input: { issue: Issue; run: string; rounds?: { label: string; su
 function needsYou(review: Review): string {
   const blockers = review.blockers ?? [];
   return blockers.length ? `\n\n**Needs you** (code can't settle these):\n${blockers.map(b => `- ${b}`).join("\n")}` : "";
+}
+
+function conflictFeedback(conflicts: string[], base: string): string {
+  return [
+    `Other changes merged into ${base} since this branch was built, and merging ${base} in conflicts in:`,
+    conflicts.slice(0, 30).map(f => `- ${f}`).join("\n"),
+    "The merge is in progress in your workspace. Resolve every conflict keeping both sides: the other pages, links and " +
+      `entries from ${base} stay, and this branch's additions go on top. Where a file is generated by the site's build ` +
+      "(a sitemap, an index, a rendered page), resolve its source and rebuild it instead of hand-merging the output. " +
+      "Leave no conflict markers, rerun the checks, and commit.",
+  ].join("\n\n");
 }
 
 function pathFeedback(stray: { protected: string[]; outside: string[] }, allowed: string[]): string {

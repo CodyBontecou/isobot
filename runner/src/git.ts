@@ -157,6 +157,17 @@ export class Repo {
     });
   }
 
+  async mergeMain(dir: string, sha: string): Promise<string[]> {
+    try {
+      await this.git(["merge", "--quiet", "--no-edit", "--no-verify", "-m", "Merge main", sha], dir);
+      return [];
+    } catch (error) {
+      const conflicts = (await this.git(["diff", "--name-only", "--diff-filter=U"], dir)).stdout.split("\n").filter(Boolean);
+      if (!conflicts.length) throw error;
+      return conflicts;
+    }
+  }
+
   /** Commits anything left uncommitted in a workspace (no hooks run). */
   async commitPending(dir: string, message: string): Promise<void> {
     const status = await this.git(["status", "--porcelain"], dir);

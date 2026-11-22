@@ -140,3 +140,34 @@ test("diff stats report test-skipping markers the change adds", async () => {
   const stat = await repo.diffStat(base, await repo.capture(dir, "isobot/3-skip"));
   assert.deepEqual(stat.skipMarkers, [{ path: "ci/deploy.yml", marker: "-skip-testing" }]);
 });
+
+test("mergeMain merges a newer main cleanly, or leaves the conflict for the builder", async () => {
+  const { root, origin, repo } = fixture();
+  const base = await repo.sync("main");
+  const dir = await repo.createWorkspace("isobot/2-page", base);
+  writeFileSync(path.join(dir, "README.md"), "hello\nfrom the branch\n");
+  writeFileSync(path.join(dir, "page.html"), "page\n");
+  await repo.commitPending(dir, "branch work");
+
+  // Another PR merges first, touching the same line.
+  const other = path.join(root, "other");
+  execFileSync("git", ["clone", "-q", origin, other]);
+  writeFileSync(path.join(other, "README.md"), "hello\nfrom main\n");
+  writeFileSync(path.join(other, "other.html"), "other\n");
+  git(other, "commit", "-qam", "main moved");
+  git(other, "add", "-A");
+  git(other, "commit", "-q", "-m", "other page");
+  git(other, "push", "-q", "origin", "HEAD:main");
+  const main = await repo.sync("main");
+
+  assert.deepEqual(await repo.mergeMain(dir, main), ["README.md"]);
+  assert.match(readFileSync(path.join(dir, "README.md"), "utf8"), /<<<<<<<[\s\S]*>>>>>>>/);
+  writeFileSync(path.join(dir, "README.md"), "hello\nfrom main\nfrom the branch\n");
+  await repo.commitPending(dir, "resolve");
+  const sha = await repo.capture(dir, "isobot/2-page");
+  assert.equal(await repo.mergeBase(main, sha), main, "main is now in the branch");
+  assert.deepEqual((await repo.diffStat(main, sha)).files.map(f => f.path).sort(), ["README.md", "page.html"]);
+
+  // Already up to date: a clean no-op.
+  assert.deepEqual(await repo.mergeMain(dir, main), []);
+});
