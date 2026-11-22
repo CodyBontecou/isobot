@@ -77,6 +77,8 @@ export interface GitHubApi {
   pull(owner: string, repo: string, number: number): Promise<PullRequest>;
   createPull(owner: string, repo: string, input: { head: string; base: string; title: string; body: string }): Promise<PullRequest>;
   updatePull(owner: string, repo: string, number: number, body: string): Promise<void>;
+  /** Closes a PR without merging it. */
+  closePull(owner: string, repo: string, number: number): Promise<void>;
   ciState(owner: string, repo: string, sha: string): Promise<CiState>;
   merge(owner: string, repo: string, number: number, sha: string, title: string): Promise<string>;
   ensureLabels(owner: string, repo: string, labels: Labels): Promise<void>;
@@ -295,6 +297,10 @@ export class GitHub implements GitHubApi {
 
   async updatePull(owner: string, repo: string, number: number, body: string): Promise<void> {
     await this.octokit.pulls.update({ owner, repo, pull_number: number, body: body.slice(0, 65_000) });
+  }
+
+  async closePull(owner: string, repo: string, number: number): Promise<void> {
+    await this.octokit.pulls.update({ owner, repo, pull_number: number, state: "closed" });
   }
 
   async ciState(owner: string, repo: string, sha: string): Promise<CiState> {

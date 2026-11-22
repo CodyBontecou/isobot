@@ -1,4 +1,6 @@
 # isobot's build sandbox: what a content-train (or other Linux-only) build needs, plus Claude Code.
+# Chromium (headless screenshots of built pages) and xmllint (XML, GPX and KML output) let a content builder
+# check its own pages, since no person reviews them before they go live.
 # The donor image ships the shim that @cloudflare/sandbox's Files API runs in the Container.
 # Keep its tag equal to the installed @cloudflare/sandbox version.
 ARG SANDBOX_TOOLS_IMAGE=docker.io/cloudflare/sandbox:1.0.3
@@ -7,6 +9,7 @@ FROM ${SANDBOX_TOOLS_IMAGE} AS sandbox-tools
 FROM node:26-bookworm-slim
 RUN apt-get update \
   && apt-get install -y --no-install-recommends bash ca-certificates git ripgrep python3 util-linux procps \
+     chromium fonts-noto-core libxml2-utils \
   && rm -rf /var/lib/apt/lists/*
 # The postinstall script copies the native binary into place, so don't skip scripts.
 RUN npm install --global @anthropic-ai/claude-code@2.1.318

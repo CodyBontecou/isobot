@@ -91,6 +91,12 @@ export interface ContentConfig {
   requireCi?: boolean;
   /** Protected paths for content jobs, besides the always-protected ones (CI, secrets, agent config). */
   protectedPaths?: string[];
+  /**
+   * The review confidence content needs to merge, in place of the repo's minReviewConfidence. Defaults to
+   * CONTENT_MIN_REVIEW_CONFIDENCE: content is reviewed as an editor would (builder.ts CONTENT_REVIEW_RULES),
+   * a page is cheap to fix after it's live, and the checks and path gates still hold.
+   */
+  minReviewConfidence?: number;
   /** Command run in a checkout of main after the site is live, with the new URLs as arguments (IndexNow). */
   indexNow?: string;
   /**
@@ -484,6 +490,7 @@ export function validateConfig(config: RunnerConfig): void {
       if (!/^[\w-]{8,}$/.test(c.openseoProjectId ?? "")) fail(`${name}: content.openseoProjectId must be an OpenSEO project id`);
       if (!(Number.isInteger(c.perDay) && c.perDay >= 1 && c.perDay <= 12)) fail(`${name}: content.perDay must be 1-12`);
       if (!Array.isArray(c.allowedPaths) || c.allowedPaths.length === 0) fail(`${name}: content.allowedPaths must list the site's files`);
+      if (c.minReviewConfidence !== undefined && !(c.minReviewConfidence > 0 && c.minReviewConfidence <= 1)) fail(`${name}: content.minReviewConfidence must be in (0, 1]`);
       if (c.autonomy !== undefined && !["off", "pr", "merge"].includes(c.autonomy)) fail(`${name}: unknown content.autonomy "${c.autonomy}"`);
       if ((c.autonomy ?? "merge") === "merge" && !(c.checks?.length)) fail(`${name}: content.checks must build the site before content merges automatically`);
       if (!c.notes?.trim()) fail(`${name}: content.notes must tell the builder how this site's content works`);
@@ -540,6 +547,9 @@ export const CONTENT_PROTECTED_PATHS = [
   ".gitmodules", "**/.githooks/**", "**/.husky/**", "**/package.json", "**/package-lock.json",
 ];
 
+/** The review confidence content merges at unless the site sets its own (ContentConfig.minReviewConfidence). */
+export const CONTENT_MIN_REVIEW_CONFIDENCE = 0.75;
+
 /** The policy a content-train job builds and merges under (see ContentConfig). */
 export function contentPolicy(policy: RepoPolicy): RepoPolicy {
   const content = policy.content;
@@ -552,6 +562,7 @@ export function contentPolicy(policy: RepoPolicy): RepoPolicy {
     checks: content.checks,
     protectedPaths: [...CONTENT_PROTECTED_PATHS, ...(content.protectedPaths ?? [])],
     allowedPaths: content.allowedPaths,
+    minReviewConfidence: content.minReviewConfidence ?? CONTENT_MIN_REVIEW_CONFIDENCE,
     requireCi: content.requireCi ?? false,
     release: { onMerge: [], onShip: [] },
     notes: content.notes,

@@ -25,6 +25,8 @@ local.
   to tracing a walkthrough through the source instead of running it on a simulator (the
   content rules already say so). This is also where most of a content job's RAM went on the Mac.
 - **No screenshots or recordings.** The builder can't write to the Mac's `$ISOBOT_MEDIA`.
+  It can still check its own pages: the image has headless Chromium (screenshots it reads back
+  itself) and `xmllint`. Changing the image means redeploying the sandbox Worker.
 - **Checks run in the Container.** They have to work on Linux with Node 26, Python 3 and git.
   All the content sites' checks do.
 - **The builder can't push.** git reads the job's own repository through the Worker, which adds

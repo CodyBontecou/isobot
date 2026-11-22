@@ -13,6 +13,8 @@ export type EventData =
   | { type: "ci"; v: 1; state: string; waitedMinutes: number }
   | { type: "gate"; v: 1; merge: boolean; reasons: string[] }
   | { type: "blocked"; v: 1; on: string[] }
+  // Content the gates refused, closed instead of left for the owner (Pipeline.drop).
+  | { type: "dropped"; v: 1; reasons: string[] }
   | { type: "claim"; v: 1; runner: string; outcome: "won" | "lost" | "held_elsewhere"; holder?: string };
 
 export type EventType = EventData["type"];
@@ -29,6 +31,7 @@ export function describeEvent(kind: string, detail: string | null, data: EventDa
     case "ci": return `CI ${data.state} after ${data.waitedMinutes} min`;
     case "gate": return data.merge ? "gate: merge" : `gate: left to you (${data.reasons.join("; ")})`;
     case "blocked": return `waiting on ${data.on.join(", ")}`;
+    case "dropped": return `dropped: ${data.reasons.join("; ")}`;
     case "claim": return `claim ${data.outcome.replace("_", " ")} by ${data.runner}${data.holder ? ` (held by ${data.holder})` : ""}`;
   }
 }

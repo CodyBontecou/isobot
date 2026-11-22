@@ -218,7 +218,13 @@
           "apps/website/assets/blog/**",
           "apps/website/assets/guides/**",
           "apps/website/scripts/build-blog.mjs",
-          "apps/website/sitemap.xml"
+          "apps/website/sitemap.xml",
+          "apps/website/llms.txt",
+          "apps/website/test/*.test.mjs",
+          "apps/website/apple-health-export/index.html",
+          "apps/website/apple-health-to-csv/index.html",
+          "apps/website/health-connect-export/index.html",
+          "apps/website/health-data-for-ai/index.html"
         ],
         "checks": [
           "cd apps/website && npm ci --no-audit --no-fund && npm --prefix docs-src ci --no-audit --no-fund",
@@ -276,7 +282,9 @@
           "site/sitemap.xml",
           "site/llms.txt",
           "site/agent-instructions.md",
-          "site/index.html"
+          "site/index.html",
+          "scripts/tests/*.test.mjs",
+          "scripts/tests/test_site_*.py"
         ],
         "checks": [
           "python3 -m unittest discover -s .github/scripts -p 'test_*.py'",
@@ -340,6 +348,7 @@
           "marketing/scripts/build_site.py",
           "marketing/scripts/*.test.mjs",
           "marketing/scripts/test_*.py",
+          "marketing/scripts/build_docs.py",
           "marketing/public/blog/**",
           "marketing/public/compare/**",
           "marketing/public/tools/**",
@@ -419,7 +428,30 @@
           "website/*/sitemap.xml",
           "website/llms.txt",
           "website/screenshots/**",
-          "website/assets/**"
+          "website/assets/**",
+          "website/index.html",
+          "website/ar/index.html",
+          "website/bn/index.html",
+          "website/de/index.html",
+          "website/es/index.html",
+          "website/fr/index.html",
+          "website/hi/index.html",
+          "website/id/index.html",
+          "website/it/index.html",
+          "website/ja/index.html",
+          "website/ko/index.html",
+          "website/nl/index.html",
+          "website/pl/index.html",
+          "website/pt-br/index.html",
+          "website/ru/index.html",
+          "website/ta/index.html",
+          "website/th/index.html",
+          "website/tr/index.html",
+          "website/uk/index.html",
+          "website/ur/index.html",
+          "website/vi/index.html",
+          "website/zh-hans/index.html",
+          "website/zh-hant/index.html"
         ],
         "checks": [
           "python3 -m unittest discover -s .github/scripts -p 'test_*.py'",

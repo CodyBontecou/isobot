@@ -130,6 +130,7 @@ export class FakeGitHub implements GitHubApi {
     return pull;
   }
   async updatePull(_owner: string, _repo: string, number: number, body: string): Promise<void> { this.pulls.get(number)!.body = body; }
+  async closePull(_owner: string, _repo: string, number: number): Promise<void> { this.pulls.get(number)!.state = "closed"; }
   async ciState(): Promise<CiState> { return this.ci; }
   async merge(_owner: string, _repo: string, number: number): Promise<string> {
     const pull = this.pulls.get(number)!;
@@ -258,8 +259,11 @@ export class FakeBuilder implements Builder {
     this.reviseSessions.push(input.sessionId);
     return { ok: true, sessionId: "session-1", summary: "Fixed." };
   }
-  async review(input: { task: string; media?: string[]; previous?: PreviousReview }): Promise<Review> {
+  /** Whether each review was asked to judge content (ReviewInput.content). */
+  reviewContent: boolean[] = [];
+  async review(input: { task: string; media?: string[]; previous?: PreviousReview; content?: boolean }): Promise<Review> {
     this.reviewTasks.push(input.task);
+    this.reviewContent.push(Boolean(input.content));
     this.reviewPrevious.push(input.previous);
     this.reviewMedia.push(input.media);
     return this.reviews.shift() ?? { verdict: "approve", confidence: 0.95, risk: "low", summary: "Looks right.", concerns: [] };

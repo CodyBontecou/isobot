@@ -59,14 +59,87 @@ test("a content issue builds with the site's checks on the app's devices, and me
   assert.ok(builder.reviewTasks[0].includes(CONTENT_BUILD_RULES));
 });
 
-test("content that strays outside the site's paths is left for a human", async () => {
-  const { github, pipeline, store, repo } = setup();
+test("content that strays outside the site's paths is sent back to take the files out, and merges once it has", async () => {
+  const { github, pipeline, store, repo, builder } = setup();
+  const clean = repo.diff_;
+  repo.diff_ = { files: [{ path: "website/blog/a.md", added: 10, removed: 0, binary: false }, { path: "Sources/App.swift", added: 1, removed: 0, binary: false }], changedLines: 11 };
+  const revise = builder.revise.bind(builder);
+  builder.revise = async input => { repo.diff_ = clean; return revise(input); };
+  github.add(OWNER, NAME, 6, "A post", ["isobot:content", "isobot:ready", "isobot:auto"]);
+  await pipeline.discover();
+  await Promise.all(pipeline.startQueued());
+  assert.match(builder.reviseFeedback[0], /Outside the site's content paths:\n- Sources\/App\.swift/);
+  assert.match(builder.reviseFeedback[0], /- website\/\*\*/);
+  assert.equal(builder.reviewTasks.length, 1, "review waits until the paths are clean");
+  assert.equal(store.get("codybontecou/time.md#6")!.state, "merged");
+});
+
+test("content that still strays after its path rounds is dropped, not left for a human", async () => {
+  const { github, pipeline, store, repo, builder } = setup();
   repo.diff_ = { files: [{ path: "website/blog/a.md", added: 10, removed: 0, binary: false }, { path: "Sources/App.swift", added: 1, removed: 0, binary: false }], changedLines: 11 };
   github.add(OWNER, NAME, 6, "A post", ["isobot:content", "isobot:ready", "isobot:auto"]);
   await pipeline.discover();
   await Promise.all(pipeline.startQueued());
-  assert.equal(store.get("codybontecou/time.md#6")!.state, "pr_open");
-  assert.match(github.commentsFor(OWNER, NAME, 6).at(-1)!, /outside the allowed paths: Sources\/App\.swift/);
+  assert.equal(builder.reviseFeedback.length, 2);
+  const job = store.get("codybontecou/time.md#6")!;
+  assert.equal(job.state, "closed");
+  assert.match(job.lastError!, /^dropped: changes files outside the allowed paths: Sources\/App\.swift/);
+  assert.equal(github.get(OWNER, NAME, 6).state, "closed");
+  assert.equal(github.closedAs.get("codybontecou/time.md#6"), "not_planned");
+  assert.ok(!github.get(OWNER, NAME, 6).labels.includes("isobot:review"));
+  assert.ok(!github.get(OWNER, NAME, 6).labels.includes("isobot:ready"));
+  assert.equal((await github.pull(OWNER, NAME, job.prNumber!)).state, "closed");
+  assert.match(github.commentsFor(OWNER, NAME, 6).at(-1)!, /dropped this piece[\s\S]*nothing waits on you/);
+});
+
+test("content is reviewed as content and merges at the content bar, below the repo's", async () => {
+  const { github, pipeline, store, builder } = setup();
+  builder.reviews.push({ verdict: "approve", confidence: 0.8, risk: "low", summary: "Good guide.", concerns: [] });
+  github.add(OWNER, NAME, 8, "A post", ["isobot:content", "isobot:ready", "isobot:auto"]);
+  await pipeline.discover();
+  await Promise.all(pipeline.startQueued());
+  assert.deepEqual(builder.reviewContent, [true]);
+  assert.equal(store.get("codybontecou/time.md#8")!.state, "merged");
+  assert.match(builder.reviewTasks[0], /## Files this content may change[\s\S]*- `website\/\*\*`/);
+});
+
+test("ordinary issues are reviewed as code", async () => {
+  const { github, pipeline, builder } = setup();
+  github.add(OWNER, NAME, 7, "Fix export", ["isobot:ready"]);
+  await pipeline.discover();
+  await Promise.all(pipeline.startQueued());
+  assert.deepEqual(builder.reviewContent, [false]);
+});
+
+test("content whose remaining doubts only a person could settle is dropped with them", async () => {
+  const { github, pipeline, store, builder } = setup();
+  builder.reviews.push({ verdict: "approve", confidence: 0.6, risk: "low", summary: "Unclear.", concerns: [], blockers: ["A new medical claim needs the owner"] });
+  github.add(OWNER, NAME, 9, "A post", ["isobot:content", "isobot:ready", "isobot:auto"]);
+  await pipeline.discover();
+  await Promise.all(pipeline.startQueued());
+  const job = store.get("codybontecou/time.md#9")!;
+  assert.equal(job.state, "closed");
+  assert.match(job.lastError!, /confidence 0\.60 is below 0\.75/);
+  assert.match(github.commentsFor(OWNER, NAME, 9).at(-1)!, /A new medical claim needs the owner/);
+});
+
+test("content on a site set to pr autonomy still waits for its owner", async () => {
+  const { github, pipeline, store } = setup({ autonomy: "pr" });
+  github.add(OWNER, NAME, 10, "A post", ["isobot:content", "isobot:ready", "isobot:auto"]);
+  await pipeline.discover();
+  await Promise.all(pipeline.startQueued());
+  assert.equal(store.get("codybontecou/time.md#10")!.state, "pr_open");
+  assert.equal(github.get(OWNER, NAME, 10).state, "open");
+});
+
+test("research hears why earlier pieces were dropped", async () => {
+  const { config, store, github } = setup();
+  store.enqueue(OWNER, NAME, 3, "Old guide", "content");
+  store.update("codybontecou/time.md#3", { state: "closed", lastError: "dropped: reviewer confidence 0.60 is below 0.75" });
+  const t = train(config, store, github);
+  t.outputs.push({ action: "skip", kind: "post", title: "", brief: "", targetQueries: [], targetUrl: "", privateEvidence: "", reason: "nothing", creditsStart: null, creditsEnd: null });
+  await t.content.tick();
+  assert.match(t.agentCalls[0].prompt, /#3 \[dropped: reviewer confidence 0\.60 is below 0\.75\] Old guide/);
 });
 
 test("ordinary issues in a repo with a site keep the app's policy", async () => {
@@ -242,6 +315,8 @@ test("content configuration is validated", () => {
   assert.throws(() => validateConfig(config), /content\.perDay must be 1-12/);
   config.repos[REPO] = { content: { ...SITE, allowedPaths: [] } };
   assert.throws(() => validateConfig(config), /content\.allowedPaths/);
+  config.repos[REPO] = { content: { ...SITE, minReviewConfidence: 1.5 } };
+  assert.throws(() => validateConfig(config), /content\.minReviewConfidence must be in \(0, 1\]/);
   config.repos[REPO] = { content: { ...SITE, deploy: { workflow: "a.yml", environment: "Production" } as never } };
   assert.throws(() => validateConfig(config), /content\.deploy must be/);
   config.repos[REPO] = { content: SITE };

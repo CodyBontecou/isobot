@@ -13,7 +13,7 @@ import type { DiffStat } from "./git.js";
 import type { GitHubApi, Issue, IssueComment, PullRequest } from "./github.js";
 import { asksToRetry, maxCommentId, noteFeedback, ownerNotes, quoteNote, withNotes, type OwnerNote } from "./notes.js";
 import type { CardUpdate, Notifier } from "./notify.js";
-import { evaluateGate, matchesGlob, reviewShortfalls, reviewStopReason, type CheckReport, type GateDecision } from "./policy.js";
+import { evaluateGate, matchesGlob, reviewShortfalls, reviewStopReason, strayPaths, type CheckReport, type GateDecision } from "./policy.js";
 import type { FollowUp, Job, JobKind, Store } from "./store.js";
 
 /** The git operations the pipeline needs; `Repo` implements it, tests fake it. */
@@ -93,6 +93,8 @@ const RETRY_DELAYS_MS = [5 * 60_000, 15 * 60_000, 45 * 60_000, 2 * 60 * 60_000];
 const MAX_ATTEMPTS = 5;
 /** Owner notes applied within one build before the rest wait for the PR revision. */
 const MAX_NOTE_ROUNDS = 5;
+/** Rounds a content builder gets to take back files outside the site's allowed paths before review. */
+const MAX_PATH_ROUNDS = 2;
 const CI_WAIT_MS = 90 * 60_000;
 /** How long a new PR may go without any CI reporting before "no CI" is final. */
 const CI_GRACE_MS = 5 * 60_000;
@@ -447,7 +449,8 @@ export class Pipeline {
     if (kind === "content") {
       // The research's private evidence (Search Console figures) never goes on the public issue.
       const evidence = this.deps.store.cursor(contentEvidenceKey(issue.owner, issue.repo, issue.number));
-      task = [task, CONTENT_BUILD_RULES, ...(evidence ? ["## Private research evidence (keep out of the repository, commits and PR)", evidence] : [])].join("\n\n");
+      const paths = `## Files this content may change\nAnything else keeps it from publishing:\n${(policy.allowedPaths ?? []).map(glob => `- \`${glob}\``).join("\n")}`;
+      task = [task, CONTENT_BUILD_RULES, paths, ...(evidence ? ["## Private research evidence (keep out of the repository, commits and PR)", evidence] : [])].join("\n\n");
     }
     const fingerprint = createHash("sha256").update(`${issue.title}\n${issue.body}\n${proposal?.body ?? ""}`).digest("hex");
     // A stranger's issue that isobot's own proposal replaced, and that isobot itself approved as small,
@@ -589,6 +592,7 @@ export class Pipeline {
       let review: Review | undefined;
       let fixRounds = 0;
       let reviewRounds = 0;
+      let pathRounds = 0;
       // Each review sees the last one and the builder's answer, so rounds converge instead of starting over.
       let previous: PreviousReview | undefined;
       const confidences: number[] = [];
@@ -618,11 +622,25 @@ export class Pipeline {
           checks = await runChecks(run.summary);
           continue;
         }
+        // Content can't merge with files outside the site's paths, and no one will merge it by hand: the builder takes them back first.
+        if (job.kind === "content" && pathRounds < MAX_PATH_ROUNDS) {
+          const stray = strayPaths(policy, await repo.diffStat(baseSha, sha));
+          if (stray.protected.length || stray.outside.length) {
+            pathRounds++;
+            await this.feed(job, { phase: "fixing" }, `↩️ Taking back files content can't change: ${[...stray.protected, ...stray.outside].slice(0, 8).join(", ")}`);
+            run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback: pathFeedback(stray, policy.allowedPaths ?? []), devices, media: builderMedia, timeoutMinutes }));
+            laterRounds.push({ label: `Path fix ${pathRounds}`, summary: run.summary });
+            this.builderEvent(job, laterRounds.at(-1)!.label, run);
+            sha = await commit(`Keep #${issue.number} to the site's files`);
+            checks = await runChecks(run.summary);
+            continue;
+          }
+        }
         // The reviewer sees exactly the commit the runner captured, diffed in the runner's own clone.
         await this.feed(job, { phase: "reviewing" });
         review = await builder.review({
           cwd: workspace, task, diff: await repo.diff(baseSha, sha), checks: formatChecks(checks),
-          media: collectMedia(mediaDir).files.map(f => f.file), previous,
+          media: collectMedia(mediaDir).files.map(f => f.file), previous, content: job.kind === "content",
         });
         confidences.push(review.confidence);
         store.event(job.id, "review", `${review.verdict} ${review.confidence} ${review.risk}: ${review.summary}`, {
@@ -716,11 +734,13 @@ export class Pipeline {
     if (!owner && policy.autonomy !== "merge" && policy.ownerAutonomy === "merge") {
       decision.reasons.push(`it isn't marked as yours; when you add \`${this.labels.auto}\` yourself, isobot merges once every gate passes`);
     }
+    const before = decision.reasons.length;
     if (!context.trusted) decision.reasons.push(`the issue was written by @${context.author}, who isn't trusted to merge without you`);
     if ((await this.taskFor(current)).fingerprint !== context.fingerprint) decision.reasons.push("the issue text changed while isobot was building");
     if (current.state === "closed") decision.reasons.push("the issue was closed");
     if ((await this.readNotes(job)).fresh.length) decision.reasons.push("you sent a note isobot hasn't applied yet; it will revise the PR with it next");
-    return { merge: decision.reasons.length === 0, reasons: decision.reasons };
+    const ownerHold = decision.reasons.length > before || hasLabel(current, this.labels.stop) || (!owner && policy.autonomy !== "merge");
+    return { merge: decision.reasons.length === 0, reasons: decision.reasons, ownerHold };
   }
 
   /** Merges the reviewed commit when the gate allows, then releases; otherwise leaves the PR to the owner. */
@@ -730,6 +750,7 @@ export class Pipeline {
     store.event(job.id, "gate", gate.merge ? "merge" : gate.reasons.join("; "), { type: "gate", v: 1, merge: gate.merge, reasons: gate.reasons });
     await github.removeLabel(job.owner, job.repo, job.number, this.labels.building);
 
+    if (!gate.merge && job.kind === "content" && policy.autonomy === "merge" && !gate.ownerHold) return this.drop(job, context, gate);
     if (!gate.merge) {
       await github.addLabels(job.owner, job.repo, job.number, [this.labels.review]);
       store.update(job.id, { state: "pr_open" });
@@ -765,6 +786,25 @@ export class Pipeline {
     await github.comment(job.owner, job.repo, job.number, `✅ isobot merged ${prUrl} after checks, review (confidence ${context.review.confidence.toFixed(2)}) and policy gates passed.`);
     await this.feed(job, { phase: "merged" }, `✅ Merged ${prUrl}`, `✅ **${job.owner}/${job.repo}#${job.number}** ${title}: merged <${prUrl}>`);
     await this.afterMerge(store.get(job.id)!, mergeSha, policy);
+  }
+
+  /**
+   * Content the gates refused, after every round the builder had. The content train runs without the owner, so
+   * nothing waits on them: the PR and issue close, and the reason goes to the next research run (ContentTrain.research).
+   */
+  private async drop(job: Job, context: MergeContext, gate: GateDecision): Promise<void> {
+    const { github, store } = this.deps;
+    const reasons = gate.reasons.map(r => `- ${r}`).join("\n") + needsYou(context.review);
+    await github.comment(job.owner, job.repo, job.number,
+      `🗑️ isobot dropped this piece: after every round it got, it still didn't pass the content gates, and the content train doesn't wait for a person.\n${reasons}\n\n` +
+      `${context.prUrl} is closed and nothing waits on you. The next research run sees why. To build it again, reopen this issue and comment \`retry\`.`);
+    await github.closePull(job.owner, job.repo, context.prNumber);
+    await github.removeLabel(job.owner, job.repo, job.number, this.labels.ready);
+    await github.closeIssue(job.owner, job.repo, job.number, "not_planned");
+    store.update(job.id, { state: "closed", lastError: `dropped: ${gate.reasons.join("; ")}`.slice(0, 1000) });
+    store.event(job.id, "content_dropped", gate.reasons.join("; "), { type: "dropped", v: 1, reasons: gate.reasons });
+    await this.feed(job, { phase: "closed", detail: `Dropped: ${gate.reasons.join("; ")}` }, `🗑️ Dropped (no one has to review it):\n${reasons}`,
+      `🗑️ **${job.owner}/${job.repo}#${job.number}** ${context.title}: dropped, ${gate.reasons[0] ?? "gates refused"}`);
   }
 
   /**
@@ -1336,6 +1376,19 @@ function prBody(input: { issue: Issue; run: string; rounds?: { label: string; su
 function needsYou(review: Review): string {
   const blockers = review.blockers ?? [];
   return blockers.length ? `\n\n**Needs you** (code can't settle these):\n${blockers.map(b => `- ${b}`).join("\n")}` : "";
+}
+
+function pathFeedback(stray: { protected: string[]; outside: string[] }, allowed: string[]): string {
+  const list = (files: string[]) => files.slice(0, 20).map(f => `- ${f}`).join("\n");
+  return [
+    "This content can't publish: it changes files the content train may not touch.",
+    ...(stray.protected.length ? [`Protected (CI, headers, workers, manifests, agent config):\n${list(stray.protected)}`] : []),
+    ...(stray.outside.length ? [`Outside the site's content paths:\n${list(stray.outside)}`] : []),
+    `Content may only change:\n${allowed.map(g => `- ${g}`).join("\n")}`,
+    "Put each of these files back as it was before your first commit on this branch (or delete it if you added it), " +
+      "then make the content work without them: drop the part that needed them, or do it within the allowed files. " +
+      "If a file is regenerated by the site's build, change the source so the build no longer touches it. Rebuild, rerun the checks and commit.",
+  ].join("\n\n");
 }
 
 function reviewFeedback(review: Review, shortfalls: string[]): string {
