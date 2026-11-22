@@ -510,16 +510,29 @@ content train (`runner/src/content.ts`). Health.md (healthmd.app), GitSync.md (g
    and 📝 goes to the staff channel. The repos are public, so the brief has no Search Console numbers:
    those stay in the runner's store and reach the builder through the task.
 3. **Build and merge.** The usual build, checks, review and gates, under the site's content policy
-   (`contentPolicy` in config.ts) instead of the app's:
+   (`contentPolicy` in config.ts) instead of the app's. Content runs end to end with no person in the
+   loop, so nothing it builds waits for one:
    - checks are `content.checks` (the site's build and tests); the repo's simulators and emulators are
      still booted, so walkthroughs are checked and screenshotted in the real app;
-   - every changed file must match `content.allowedPaths`, or the merge is left to you;
+   - every changed file must match `content.allowedPaths`. The builder sees the list in its task, and
+     before review it gets up to two rounds to take back any file outside it or protected;
    - protected paths are CI, deploy and secret configuration, agent instructions and package manifests,
      not the app's list (whose `**/*premium*` and the like match ordinary post slugs);
    - `requireCi` is `content.requireCi` (default off), and there are no release or ship steps;
    - the builder and reviewer get the content standard: claims about the app checked against its
      source, primary sources for other products, no duplicate pages, links both ways, the site's
-     conventions (`content.notes`), and a `Published URLs:` line at the end of the summary.
+     conventions (`content.notes`), and a `Published URLs:` line at the end of the summary. What
+     can't be verified is left out instead of flagged. In cloud builds the builder screenshots its
+     pages in headless Chromium at 390 and 1280 px and validates XML output with `xmllint`;
+   - the reviewer judges it as an editor (`CONTENT_REVIEW_RULES` in builder.ts), with WebFetch and
+     WebSearch to open the cited sources. An unsupported claim is a concern the builder must source or
+     cut. "Needs a real browser", machine translations the site marks for later review, and shared
+     boilerplate are not held against it. Blockers are only for what the owner alone can decide;
+   - the merge bar is `content.minReviewConfidence` (default 0.75), not the repo's `minReviewConfidence`;
+   - **a piece that still fails a gate after its rounds is dropped**, not left for you: the PR closes,
+     the issue closes as not planned with the reasons, and the next research run sees why (the recent
+     jobs list shows `dropped: …`) so it doesn't propose the same thing. The weekly report counts drops.
+     Holds that are yours stay yours: `isobot:stop`, a note isobot hasn't applied, an edited or closed issue.
    Content merges with `content.autonomy` (default `merge`) and never rides the release train.
    At most `content.maxConcurrentJobs` (default 1) content builds run at once, so app work isn't held up.
 4. **Publish.** Once the site's newest successful production deploy contains the merge commit
@@ -541,7 +554,8 @@ a fixed list of tools. None of them can delete anything or change OpenSEO schedu
 
 Run one now with `npm run runner -- content <repo> research` (files an issue; add `--dry-run` to print the brief and file nothing) or
 `npm run runner -- content <repo> report`. To stop a site, set its `content.autonomy` to `off`
-(or `pr` to review every post yourself). To stop one post, add `isobot:stop` to its issue.
+(or `pr` to review every post yourself; nothing is dropped then). To stop one post, add `isobot:stop`
+to its issue. To build a dropped piece again, reopen its issue and comment `retry`.
 
 ```json
 "content": {

@@ -3,7 +3,8 @@ import { test } from "node:test";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { agentSettings, builderSettings, ClaudeCodeBuilder, defaultDenyPaths, parseResult, parseReview, parseTriage, previousReview, RESUME_PROMPT, revisePrompt } from "./builder.js";
+import { agentSettings, builderSettings, ClaudeCodeBuilder, CONTENT_REVIEW_RULES, defaultDenyPaths, parseResult, parseReview, parseTriage, previousReview, RESUME_PROMPT, revisePrompt } from "./builder.js";
+import { testConfig } from "./testing.js";
 
 test("parses the CLI's JSON result, including after stray diagnostics", () => {
   const payload = { type: "result", subtype: "success", is_error: false, session_id: "s1", result: "done", structured_output: { a: 1 } };
@@ -119,4 +120,26 @@ test("previousReview shows the reviewer the last round and the builder's claim",
   assert.match(text, /Concerns:\n- Empty list crashes/);
   assert.match(text, /Blockers:\n\(none\)/);
   assert.match(text, /verify it against the diff[\s\S]*Guarded the empty list/);
+});
+
+test("content reviews get the content rubric and the web; code reviews stay offline", async () => {
+  const calls: string[][] = [];
+  const verdict = { verdict: "approve", confidence: 0.9, risk: "low", summary: "ok", concerns: [], blockers: [] };
+  const builder = new ClaudeCodeBuilder(testConfig().builder, { secrets: [], noWrite: [] }, "claude", undefined, undefined, {
+    settings: {},
+    exec: async (_command, args) => {
+      calls.push(args);
+      return { code: 0, stdout: JSON.stringify({ type: "result", subtype: "success", result: "", structured_output: verdict }), stderr: "", timedOut: false };
+    },
+  });
+  const input = { cwd: "/workspace/job", task: "Write it", diff: "", checks: "passed" };
+  await builder.review({ ...input, content: true });
+  await builder.review(input);
+  const flag = (args: string[], name: string) => args[args.indexOf(name) + 1];
+  assert.equal(flag(calls[0], "--tools"), "Read,Grep,Glob,WebFetch,WebSearch");
+  assert.equal(flag(calls[0], "--allowedTools"), "WebFetch,WebSearch");
+  assert.ok(flag(calls[0], "--append-system-prompt").includes(CONTENT_REVIEW_RULES));
+  assert.equal(flag(calls[1], "--tools"), "Read,Grep,Glob");
+  assert.ok(!calls[1].includes("--allowedTools"));
+  assert.ok(!flag(calls[1], "--append-system-prompt").includes(CONTENT_REVIEW_RULES));
 });
