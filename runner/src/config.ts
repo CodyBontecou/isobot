@@ -157,6 +157,15 @@ export interface AnalyticsLimits {
   apps?: string[];
 }
 
+export interface CrashLimits {
+  /** A crash group is filed as a GitHub issue once it reaches this many affected users (Play) or reports. Default 2. */
+  minUsers?: number;
+  /** New GitHub issues per app and pass, biggest groups first; the rest wait for the next pass. Default 3. */
+  issuesPerPass?: number;
+  /** False: report in the check-in and Discord only, never open issues. Default true. */
+  fileIssues?: boolean;
+}
+
 export interface AsoLimits {
   /** The ASO Tracker CLI: an installed app's `Contents/Resources/aso`, or a checkout's `bin/aso.mjs`. */
   cli: string;
@@ -269,6 +278,8 @@ export interface RunnerConfig {
   aso?: AsoLimits;
   /** App Store Connect analytics (analytics.ts) for the apps in appStore.apps. Off without this block. */
   analytics?: AnalyticsLimits;
+  /** The crash audit (crashes.ts): App Store, TestFlight and Google Play crashes. Off without this block. */
+  crashes?: CrashLimits;
   /** 💻 on isobot's Discord messages opens the conversation in the owner's local Herdr (handoff.ts). */
   handoff?: HandoffConfig;
   defaults: RepoPolicy;
@@ -410,6 +421,12 @@ export function validateConfig(config: RunnerConfig): void {
     if (!config.appStore) fail("analytics needs appStore.apps (the apps it reads)");
     if (a.backfillDays !== undefined && !(Number.isInteger(a.backfillDays) && a.backfillDays >= 1 && a.backfillDays <= 180)) fail("analytics.backfillDays must be 1-180");
     for (const id of a.apps ?? []) if (!config.appStore?.apps?.[id]) fail(`analytics.apps: ${id} isn't in appStore.apps`);
+  }
+  if (config.crashes) {
+    const c = config.crashes;
+    if (c.minUsers !== undefined && !(Number.isInteger(c.minUsers) && c.minUsers >= 1)) fail("crashes.minUsers must be a whole number of at least 1");
+    if (c.issuesPerPass !== undefined && !(Number.isInteger(c.issuesPerPass) && c.issuesPerPass >= 0 && c.issuesPerPass <= 20)) fail("crashes.issuesPerPass must be 0-20");
+    if (c.fileIssues !== undefined && typeof c.fileIssues !== "boolean") fail("crashes.fileIssues must be true or false");
   }
   if (config.handoff) {
     const h = config.handoff;

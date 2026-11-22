@@ -54,11 +54,12 @@ Every issue and PR shows where its work came from, read from what isobot already
 | Discord, email, App Store review, Vox note | Triage's `<!-- isobot:triage:<source>:… -->` marker; the **Source:** link opens the Discord message or review (email links never leave the runner) |
 | Vox note | The `from-vox` label from the Vox inbox pipeline |
 | isobot chat | `<!-- isobot:chat -->` on issues the staff chat opens |
+| Crash report | `<!-- isobot:crash:… -->` on issues the [crash audit](crashes.md) opens |
 | Content train, release train | Their issue wording |
 | GitHub | Everything else |
 
 PRs take the source of the issue they close (`Closes #n`). Filter by source on the Issues and Pull requests views
-(`?source=discord`); Overview counts open issues by source. A new source (e.g. crash reports) needs a marker
+(`?source=discord`); Overview counts open issues by source. A new source needs a marker
 written where its issues are opened, plus a case in `itemSource()` in `runner/src/dashboard.ts`.
 
 ## Setup

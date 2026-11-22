@@ -244,6 +244,7 @@ nav a em, .tabs em, .column-head em, .day em { margin-left: auto; font-style: no
 a.chip.source:hover { background: var(--bg-hover); color: var(--text); }
 .chip.source.discord, .chip.source.chat { color: var(--accent); }
 .chip.source.appstore { color: var(--warn); }
+.chip.source.crash { color: var(--bad); }
 .chip.source.vox, .chip.source.email { color: var(--info); }
 .card-source { margin-top: 6px; display: flex; }
 .select select { height: 30px; padding: 0 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; font-size: 13px; }

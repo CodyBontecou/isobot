@@ -85,7 +85,7 @@ const INSTANCES_PER_PASS = 20;
 /** App Store Connect refused for its hourly rate limit. */
 export class RateLimited extends Error {}
 
-function failure(what: string, r: { stdout: string; stderr: string }): Error {
+export function failure(what: string, r: { stdout: string; stderr: string }): Error {
   const text = (r.stderr || r.stdout).trim().slice(-300);
   return /\b429\b|rate limit/i.test(text) ? new RateLimited(`${what}: App Store Connect rate limit (${text.slice(-120)})`) : new Error(`${what}: ${text}`);
 }

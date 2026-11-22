@@ -6,6 +6,7 @@ import { AsoTrain, type AsoClient } from "./aso.js";
 import { AppAnalytics } from "./analytics.js";
 import { GoogleAuth, PlayPublisher } from "./google.js";
 import { PlayAnalytics } from "./playAnalytics.js";
+import { CrashAudit } from "./crashes.js";
 import type { CheckReport } from "./policy.js";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -67,6 +68,8 @@ interface Runtime {
   analytics: AppAnalytics;
   /** Play Console's bulk reports for the Play apps of the ASO train; null without aso.playReportsBucket. */
   playAnalytics: PlayAnalytics | null;
+  /** Crashes from Google Play, the App Store and TestFlight (crashes.ts); off without config.crashes. */
+  crashes: CrashAudit;
   /** Runner secrets and state, for settings that keep agents out of them. */
   secrets: string[];
   /** Messages carrying a 💻 (Herdr handoff), when it's on. */
@@ -177,27 +180,33 @@ function runtime(): Runtime {
       return { ok: result.code === 0 && !result.timedOut, output: `${result.stdout}\n${result.stderr}` };
     },
   });
-  const analytics = new AppAnalytics({
-    config, store,
-    // Read-only: asc refuses anything that would change App Store Connect.
-    asc: async args => {
-      const result = await run("asc", args, { cwd: env.home, env: workerEnv({ ASC_READ_ONLY: "1" }), timeoutMs: 180_000, maxBytes: 8 * 1024 * 1024 });
-      return { ok: result.code === 0 && !result.timedOut, stdout: result.stdout, stderr: result.stderr };
-    },
-    fetchGz: async url => {
-      const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
-      if (!response.ok) throw new Error(`report download failed: HTTP ${response.status}`);
-      const data = Buffer.from(await response.arrayBuffer());
-      // Segments are gzip; a plain file is read as is.
-      return (data[0] === 0x1f && data[1] === 0x8b ? gunzipSync(data) : data).toString("utf8");
-    },
-  });
+  // Read-only: asc refuses anything that would change App Store Connect.
+  const analyticsAsc = async (args: string[]) => {
+    const result = await run("asc", args, { cwd: env.home, env: workerEnv({ ASC_READ_ONLY: "1" }), timeoutMs: 180_000, maxBytes: 8 * 1024 * 1024 });
+    return { ok: result.code === 0 && !result.timedOut, stdout: result.stdout, stderr: result.stderr };
+  };
+  const analyticsFetch = async (url: string) => {
+    const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
+    if (!response.ok) throw new Error(`report download failed: HTTP ${response.status}`);
+    const data = Buffer.from(await response.arrayBuffer());
+    // Segments are gzip; a plain file is read as is.
+    return (data[0] === 0x1f && data[1] === 0x8b ? gunzipSync(data) : data).toString("utf8");
+  };
+  const analytics = new AppAnalytics({ config, store, asc: analyticsAsc, fetchGz: analyticsFetch });
   // One Google service account for Play listings and Play Console's reports; its key file stays where it is.
   const googleAuth = config.aso ? new GoogleAuth((config.aso.googleKey ?? "~/.config/isobot/play-isobot-aso.json").replace(/^~(?=\/)/, homedir())) : null;
   const playPackages = () => asoApps(config).filter(a => a.store === "play").map(a => a.aso.appId);
   const playAnalytics = googleAuth && config.aso?.playReportsBucket
     ? new PlayAnalytics({ store, auth: googleAuth, bucket: config.aso.playReportsBucket, packages: playPackages })
     : null;
+  const crashes = new CrashAudit({
+    config, store, github,
+    asc: analyticsAsc,
+    fetchGz: analyticsFetch,
+    requestId: appId => analytics.requestId(appId),
+    google: googleAuth,
+    notify: text => notifier.discord(text),
+  });
   const asoDiscord = env.discordBot ? new DiscordApi(env.discordBot.token) : null;
   let asoOwners: Promise<Set<string>> | null = null;
   const aso = new AsoTrain({
@@ -215,7 +224,7 @@ function runtime(): Runtime {
       return { ok: result.code === 0 && !result.timedOut, stdout: result.stdout, stderr: result.stderr };
     },
   });
-  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, content, aso, analytics, playAnalytics, secrets, handoff };
+  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, content, aso, analytics, playAnalytics, crashes, secrets, handoff };
 }
 
 /** ASO Tracker's CLI: one JSON call per tool; it starts the tracker's daemon itself when it isn't running. */
@@ -285,6 +294,8 @@ const ASO_EVERY_MS = 60 * 60_000;
 const ASO_POLL_MS = 5 * 60_000;
 /** How often analytics looks for new reports; it reads App Store Connect at most every 6 hours itself. */
 const ANALYTICS_EVERY_MS = 30 * 60_000;
+/** How often the crash audit looks; it reads the stores at most every 6 hours itself. */
+const CRASHES_EVERY_MS = 30 * 60_000;
 
 /** A cycle running longer than this (release steps included) counts as hung for the external heartbeat. */
 const HUNG_CYCLE_MS = 2 * 60 * 60_000;
@@ -325,6 +336,8 @@ async function loop(rt: Runtime): Promise<void> {
   let asoPolling = false;
   let lastAnalytics = 0;
   let analyticsRunning = false;
+  let lastCrashes = 0;
+  let crashesRunning = false;
   let cycleStartedAt: number | null = null;
   if (rt.env.heartbeatUrl) {
     const url = rt.env.heartbeatUrl;
@@ -365,6 +378,8 @@ async function loop(rt: Runtime): Promise<void> {
         lastAt: null, nextAt: nextWeeklyAt(now, weekday, (limits?.hours ?? [8, 22])[0]).toISOString(), running: false });
     }
     if (rt.analytics.apps().length) items.push(every("analytics", "App Store analytics", ANALYTICS_EVERY_MS, lastAnalytics, analyticsRunning));
+    if (rt.crashes.enabled()) items.push(every("crashes", "Crash audit", CRASHES_EVERY_MS, lastCrashes, crashesRunning,
+      `${rt.crashes.playApps().length} Play, ${rt.crashes.iosApps().length} App Store apps; stores read every 6 h`));
     const checkInHour = rt.config.chat?.checkInHour;
     if (chat && typeof checkInHour === "number") items.push({ id: "check-in", name: "Daily check-in", cadence: `daily at ${String(checkInHour).padStart(2, "0")}:00`,
       lastAt: null, nextAt: nextDailyAt(now, checkInHour).toISOString(), running: false, detail: "staff channel" });
@@ -434,6 +449,14 @@ async function loop(rt: Runtime): Promise<void> {
             if (rt.analytics.apps().length) await rt.analytics.tick().catch(error => console.warn(`[analytics] failed: ${(error as Error).message}`));
             if (rt.playAnalytics) await rt.playAnalytics.tick().catch(error => console.warn(`[play-analytics] failed: ${(error as Error).message}`));
           })().finally(() => { analyticsRunning = false; });
+        }
+        if (!crashesRunning && Date.now() - lastCrashes > CRASHES_EVERY_MS && rt.crashes.enabled()) {
+          lastCrashes = Date.now();
+          crashesRunning = true;
+          // Beside the cycle, one pass at a time; a source's failure is kept for the check-in, not thrown.
+          void rt.crashes.tick().then(({ filed }) => { if (filed.length) console.log(`[crashes] opened ${filed.length} issue(s)`); })
+            .catch(error => console.warn(`[crashes] failed: ${(error as Error).message}`))
+            .finally(() => { crashesRunning = false; });
         }
         if (!triageRunning && Date.now() - lastTriage > rt.config.triageMinutes * 60_000) {
           lastTriage = Date.now();
@@ -536,6 +559,7 @@ async function startChat(rt: Runtime, live: () => LiveStatus): Promise<StaffChat
       setPaused: paused => paused ? writeFileSync(pausedFile(rt.env), new Date().toISOString()) : rmSync(pausedFile(rt.env), { force: true }),
       card: id => rt.notifier.card({ id }),
       analytics: rt.analytics,
+      crashes: rt.crashes.enabled() ? rt.crashes : undefined,
       ...(channel.guild_id ? { discord: { api: discord, guildId: channel.guild_id, webhookDir: path.join(rt.env.home, "webhooks") } } : {}),
       asc: async (args, { readOnly }) => {
         const result = await run("asc", args, {
@@ -714,7 +738,10 @@ const HELP = `isobot runner
                       reports' status
   analytics [sync | checkin | <app> [days]]
                       Download new App Store analytics reports now, print the check-in's App Store section,
-                      or print an app's daily numbers (default: every app's last 7 days)`;
+                      or print an app's daily numbers (default: every app's last 7 days)
+  crashes [sync | checkin]
+                      Read Google Play, App Store and TestFlight crashes now and open issues for new ones (sync),
+                      or print the check-in's crash section (checkin, the default)`;
 
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "help";
@@ -891,6 +918,21 @@ async function main(): Promise<void> {
       }
       if (what === "report") console.log(await rt.content.report(site, true) ?? "(no report)");
       else console.log(JSON.stringify(await rt.content.maybeResearch(site, true, flag === "--dry-run"), null, 2));
+      return;
+    }
+    case "crashes": {
+      const what = process.argv[3] ?? "checkin";
+      if (!rt.crashes.enabled()) {
+        console.error("The crash audit is off: add \"crashes\": {} (and appStore.apps or a Play app's aso.play) to the runner config.");
+        process.exitCode = 2;
+        return;
+      }
+      if (what === "sync") {
+        const { filed } = await rt.crashes.tick(true);
+        console.log(filed.length ? `Opened:\n${filed.join("\n")}` : "No new issues opened.");
+      }
+      const { lines, flags } = rt.crashes.checkIn();
+      console.log([...flags, ...lines].join("\n") || "(no crashes recorded: run `crashes sync`)");
       return;
     }
     case "analytics": {

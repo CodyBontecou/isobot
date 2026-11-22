@@ -1,7 +1,7 @@
 import { createRoot } from 'react-dom/client';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
-  Activity, AlertTriangle, CalendarClock, CircleDot, CircleCheck, CircleX, ExternalLink, GitMerge, GitPullRequest,
+  Activity, AlertTriangle, Bug, CalendarClock, CircleDot, CircleCheck, CircleX, ExternalLink, GitMerge, GitPullRequest,
   GitPullRequestClosed, GitPullRequestDraft, Hammer, Inbox, KanbanSquare, LayoutDashboard, ListChecks, LogOut, Mail,
   MessageSquare, Bot, Mic, Newspaper, Pause, RefreshCw, Rocket, Search, Star, TrendingUp, X,
 } from 'lucide-react';
@@ -278,6 +278,7 @@ const SOURCES: Record<SourceKind, { label: string; icon: typeof Activity; hint: 
   chat: { label: 'isobot chat', icon: Bot, hint: 'Asked for in the isobot staff chat' },
   content: { label: 'Content train', icon: Newspaper, hint: 'Researched by the content train' },
   release: { label: 'Release train', icon: Rocket, hint: 'Opened by the release train' },
+  crash: { label: 'Crash report', icon: Bug, hint: 'A Play, App Store or TestFlight crash, via the crash audit' },
 };
 const sourceOf = (item: BoardItem): SourceKind => item.source && item.source.kind in SOURCES ? item.source.kind : 'github';
 

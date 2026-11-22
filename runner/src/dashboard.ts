@@ -1,4 +1,5 @@
 import { describeEvent } from "./events.js";
+import { CRASH_MARKER } from "./crashes.js";
 import { CHAT_MARKER } from "./notes.js";
 import type { BoardMetrics } from "./metrics.js";
 import type { FollowUp, Job, Store, StoredEvent } from "./store.js";
@@ -42,7 +43,7 @@ export interface BoardItem {
   closes?: number;
 }
 
-export type SourceKind = "github" | "discord" | "email" | "vox" | "appstore" | "chat" | "content" | "release";
+export type SourceKind = "github" | "discord" | "email" | "vox" | "appstore" | "chat" | "content" | "release" | "crash";
 
 export interface ItemSource {
   kind: SourceKind;
@@ -66,6 +67,7 @@ export function itemSource(body: string | null | undefined, labels: string[] = [
     return link ? { kind: triage, url: link } : { kind: triage };
   }
   if (labels.includes("from-vox")) return { kind: "vox" };
+  if (text.includes(CRASH_MARKER)) return { kind: "crash" };
   if (text.includes(CHAT_MARKER)) return { kind: "chat" };
   if (text.includes("Researched by isobot's content train")) return { kind: "content" };
   if (text.startsWith("## isobot release train")) return { kind: "release" };
