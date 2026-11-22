@@ -20,7 +20,7 @@ export interface BoardItem {
   closes?: number;
 }
 
-export type SourceKind = 'github' | 'discord' | 'email' | 'vox' | 'appstore' | 'chat' | 'content' | 'release';
+export type SourceKind = 'github' | 'discord' | 'email' | 'vox' | 'appstore' | 'chat' | 'content' | 'release' | 'crash';
 
 export interface ItemSource {
   kind: SourceKind;
