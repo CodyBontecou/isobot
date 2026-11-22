@@ -120,3 +120,36 @@ test("PRs take the source of the issue they close", () => {
   const orphan = { ...item(14), kind: "pr" as const, closes: 99 };
   assert.deepEqual(inheritSources([issue, pr, orphan]).map(i => i.source.kind), ["vox", "vox", "github"]);
 });
+
+test("metrics go with a push only when they changed, and again after the board asks for a resync", async () => {
+  const store = new Store(":memory:");
+  const sent: BoardSnapshot[] = [];
+  const answers: (number | { lastEventId: number })[] = [{ lastEventId: 0 }, { lastEventId: 0 }, { lastEventId: 0 }, 409, { lastEventId: 0 }];
+  let clock = Date.parse("2026-11-20T12:00:00Z");
+  let impressions = 1;
+  const metrics = (now: Date) => ({ at: now.toISOString(), apps: [], sites: [], credits: { days: [{ day: "2026-11-20", spent: impressions }], balance: null } });
+  const dashboard = new Dashboard({
+    url: "https://bot.example", token: "t", runnerId: "laptop", store, github: { boardItems: async () => [] },
+    repos: () => [], schedule: () => [], live: () => ({ startedAt: "", activeJobs: [], manuallyPaused: false, lastTriageAt: null, lastCycleError: null }),
+    queued: () => 0, metrics, metricsEveryMs: 60_000, now: () => new Date(clock),
+    fetch: (async (_url: string, init: RequestInit) => {
+      sent.push(JSON.parse(String(init.body)));
+      const answer = answers.shift() ?? 500;
+      return typeof answer === "number" ? new Response("no", { status: answer }) : Response.json(answer);
+    }) as typeof fetch,
+  });
+  await dashboard.push();
+  assert.ok(sent[0].metrics);
+  clock += 60_000;
+  await dashboard.push();
+  assert.equal(sent[1].metrics, null, "same series, only a newer time: not sent");
+  impressions = 2;
+  clock += 60_000;
+  await dashboard.push();
+  assert.equal(sent[2].metrics?.credits.days[0].spent, 2);
+  await dashboard.push();
+  assert.equal(sent[3].metrics, null);
+  // The 409 made the board ask for everything again.
+  await dashboard.push();
+  assert.equal(sent[4].metrics?.credits.days[0].spent, 2);
+});

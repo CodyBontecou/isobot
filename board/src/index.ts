@@ -75,6 +75,7 @@ export default {
       if (!session) return json({ error: "Sign in" }, 401);
       const board = env.BOARD.getByName("board");
       if (path === "/api/board") return json(await board.board());
+      if (path === "/api/metrics") return json({ metrics: await board.metrics() });
       if (path === "/api/events") {
         const days = Math.min(Math.max(Number(url.searchParams.get("days") ?? 7) || 7, 1), 30);
         const job = url.searchParams.get("job");
@@ -114,6 +115,8 @@ export class BoardState extends DurableObject<Env> {
   }
 
   board() { return this.store.board(); }
+
+  metrics() { return this.store.metrics(); }
 
   events(options: { since: string; jobId?: string; limit?: number }) { return this.store.events(options); }
 }

@@ -28,6 +28,7 @@ import { Herdr } from "./herdr.js";
 import { HANDOFF, Notifier } from "./notify.js";
 import { Pipeline } from "./pipeline.js";
 import { runChecks } from "./checks.js";
+import { buildMetrics } from "./metrics.js";
 import { Dashboard, WEEKDAYS, every, nextDailyAt, nextWeeklyAt, type ScheduleItem } from "./dashboard.js";
 import { Awake, heartbeatAge, pingHeartbeat, readHeartbeat, rotateLog, writeHeartbeat } from "./ops.js";
 import { killAllChildren, run, setGitIdentity, sh, workerEnv } from "./proc.js";
@@ -388,6 +389,7 @@ async function loop(rt: Runtime): Promise<void> {
     schedule,
     live: () => ({ startedAt, activeJobs: rt.pipeline.activeJobs, manuallyPaused: existsSync(pausedFile(rt.env)), lastTriageAt, lastCycleError }),
     queued: () => rt.store.inState("queued").length,
+    metrics: now => buildMetrics(rt.config, rt.store, now),
   }) : null;
   console.log(`[runner] started: ${configuredRepos(rt.config).map(r => `${r.owner}/${r.repo}`).join(", ")}; sources: ${rt.sources.map(s => s.name).join(", ")}`);
   await rt.notifier.discord("🟢 isobot runner started", [], { handoff: false });

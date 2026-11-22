@@ -63,3 +63,17 @@ test("malformed snapshots are refused", () => {
     assert.throws(() => store.ingest(bad, now), BadSnapshot);
   }
 });
+
+test("metrics are kept apart from the runner snapshot and survive pushes without them", () => {
+  const store = new BoardStore(sql());
+  assert.equal(store.metrics(), null);
+  const metrics = { at: now.toISOString(), apps: [{ id: "1" }], sites: [], credits: { days: [], balance: null } };
+  store.ingest(snapshot({ metrics }), now);
+  assert.deepEqual(store.metrics(), metrics);
+  assert.equal("metrics" in store.board().runners[0], false, "metrics are served on their own");
+  store.ingest(snapshot({ metrics: null }), now);
+  store.ingest(snapshot(), now);
+  assert.deepEqual(store.metrics(), metrics);
+  assert.throws(() => store.ingest(snapshot({ metrics: { at: "soon", apps: [], sites: [], credits: {} } }), now), BadSnapshot);
+  assert.throws(() => store.ingest(snapshot({ metrics: { at: now.toISOString(), apps: {}, sites: [], credits: {} } }), now), BadSnapshot);
+});

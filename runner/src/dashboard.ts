@@ -1,5 +1,6 @@
 import { describeEvent } from "./events.js";
 import { CHAT_MARKER } from "./notes.js";
+import type { BoardMetrics } from "./metrics.js";
 import type { FollowUp, Job, Store, StoredEvent } from "./store.js";
 
 /**
@@ -119,6 +120,8 @@ export interface BoardSnapshot {
   events: { id: number; jobId: string | null; at: string; kind: string; text: string }[];
   /** Null when this push carries no GitHub refresh; the board keeps the last one. */
   github: { at: string; items: BoardItem[]; errors: string[] } | null;
+  /** The Growth view's series (metrics.ts); null when unchanged since the board last took them. */
+  metrics?: BoardMetrics | null;
 }
 
 export interface BoardGitHub {
@@ -136,8 +139,11 @@ export interface DashboardOptions {
   schedule: (now: Date) => ScheduleItem[];
   live: () => LiveRunner;
   queued: () => number;
+  /** The Growth view's series; read from runner.sqlite every `metricsEveryMs`. */
+  metrics?: (now: Date) => BoardMetrics;
   pushEveryMs?: number;
   githubEveryMs?: number;
+  metricsEveryMs?: number;
   fetch?: typeof fetch;
   now?: () => Date;
 }
@@ -152,6 +158,11 @@ export class Dashboard {
   private githubCache: BoardSnapshot["github"] = null;
   /** The last GitHub read hasn't reached the board yet. */
   private githubUnsent = false;
+  private lastMetrics = 0;
+  private metricsCache: BoardMetrics | null = null;
+  /** The series as last sent (without their `at`), to send only what changed. */
+  private metricsSent = "";
+  private metricsUnsent = false;
   private failures = 0;
 
   constructor(private readonly o: DashboardOptions) {}
@@ -173,8 +184,19 @@ export class Dashboard {
         this.githubCache = await this.readGitHub(now);
         this.githubUnsent = true;
       }
+      if (this.o.metrics && now.getTime() - this.lastMetrics >= (this.o.metricsEveryMs ?? 15 * 60_000)) {
+        this.lastMetrics = now.getTime();
+        try {
+          const metrics = this.o.metrics(now);
+          const body = JSON.stringify({ ...metrics, at: undefined });
+          if (body !== this.metricsSent) { this.metricsCache = metrics; this.metricsUnsent = true; }
+        } catch (error) {
+          console.warn(`[board] metrics failed: ${(error as Error).message}`);
+        }
+      }
       // A failed push, or a board that hasn't answered yet, gets the last read again rather than a new one.
       const github = this.githubUnsent || this.boardEventId === null ? this.githubCache : null;
+      const metrics = this.metricsUnsent || this.boardEventId === null ? this.metricsCache : null;
       const last = this.o.store.lastEventId();
       const after = this.boardEventId === null || this.boardEventId > last
         ? Math.max(0, last - EVENT_BACKFILL)
@@ -183,7 +205,7 @@ export class Dashboard {
       const snapshot = buildSnapshot({
         now, runnerId: this.o.runnerId, live: this.o.live(), queued: this.o.queued(),
         buildsPausedUntil: this.o.store.pausedUntil(), repos: this.o.repos(), schedule: this.o.schedule(now),
-        jobs: this.o.store.all(JOBS_PER_PUSH), followUps: this.o.store.followUps(), events, github,
+        jobs: this.o.store.all(JOBS_PER_PUSH), followUps: this.o.store.followUps(), events, github, metrics,
       });
       const response = await (this.o.fetch ?? fetch)(`${this.o.url}/api/ingest`, {
         method: "POST",
@@ -200,6 +222,7 @@ export class Dashboard {
       const answer = await response.json() as { lastEventId?: unknown };
       this.boardEventId = typeof answer.lastEventId === "number" ? answer.lastEventId : null;
       if (github) this.githubUnsent = false;
+      if (metrics) { this.metricsUnsent = false; this.metricsSent = JSON.stringify({ ...metrics, at: undefined }); }
       if (this.failures) console.log(`[board] pushing again after ${this.failures} failed push(es)`);
       this.failures = 0;
       return true;
@@ -242,6 +265,7 @@ export interface SnapshotInput {
   followUps: FollowUp[];
   events: StoredEvent[];
   github: BoardSnapshot["github"];
+  metrics?: BoardMetrics | null;
 }
 
 export function buildSnapshot(input: SnapshotInput): BoardSnapshot {
@@ -257,6 +281,7 @@ export function buildSnapshot(input: SnapshotInput): BoardSnapshot {
     followUps: input.followUps.map(f => ({ jobId: f.jobId, kind: f.kind, dueAt: f.dueAt, createdAt: f.createdAt, text: followUpText(f) })),
     events: input.events.map(e => ({ id: e.id, jobId: e.jobId, at: e.at, kind: e.kind, text: clip(describeEvent(e.kind, e.detail, e.data), EVENT_TEXT_LIMIT) })),
     github: input.github,
+    metrics: input.metrics ?? null,
   };
 }
 

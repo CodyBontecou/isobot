@@ -20,6 +20,7 @@ export class BoardStore {
   constructor(private readonly sql: Sql) {
     sql.exec(`CREATE TABLE IF NOT EXISTS runners (id TEXT PRIMARY KEY, at TEXT NOT NULL, snapshot TEXT NOT NULL, last_event_id INTEGER NOT NULL DEFAULT 0)`);
     sql.exec(`CREATE TABLE IF NOT EXISTS github (id INTEGER PRIMARY KEY CHECK (id = 1), at TEXT NOT NULL, data TEXT NOT NULL)`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS metrics (id INTEGER PRIMARY KEY CHECK (id = 1), at TEXT NOT NULL, data TEXT NOT NULL)`);
     sql.exec(`CREATE TABLE IF NOT EXISTS events (runner TEXT NOT NULL, id INTEGER NOT NULL, job_id TEXT, at TEXT NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL, PRIMARY KEY (runner, id))`);
     sql.exec(`CREATE INDEX IF NOT EXISTS events_at ON events (at)`);
     sql.exec(`CREATE INDEX IF NOT EXISTS events_job ON events (job_id, at)`);
@@ -43,13 +44,17 @@ export class BoardStore {
         runner, e.id, e.jobId, e.at, e.kind, e.text);
     }
     if (newest !== null && newest > last) last = newest;
-    const { events: _events, github, ...rest } = snapshot;
+    const { events: _events, github, metrics, ...rest } = snapshot;
     this.sql.exec(`INSERT INTO runners (id, at, snapshot, last_event_id) VALUES (?, ?, ?, ?)
       ON CONFLICT (id) DO UPDATE SET at = excluded.at, snapshot = excluded.snapshot, last_event_id = excluded.last_event_id`,
       runner, now.toISOString(), JSON.stringify(rest), last);
     if (github) {
       this.sql.exec(`INSERT INTO github (id, at, data) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET at = excluded.at, data = excluded.data`,
         github.at, JSON.stringify(github));
+    }
+    if (metrics) {
+      this.sql.exec(`INSERT INTO metrics (id, at, data) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET at = excluded.at, data = excluded.data`,
+        metrics.at, JSON.stringify(metrics));
     }
     const cutoff = new Date(now.getTime() - KEEP_EVENTS_DAYS * 86_400_000).toISOString();
     this.sql.exec("DELETE FROM events WHERE at < ?", cutoff);
@@ -62,6 +67,12 @@ export class BoardStore {
       .map(row => ({ ...JSON.parse(String(row.snapshot)) as Record<string, unknown>, receivedAt: String(row.at) }));
     const github = this.sql.exec("SELECT data FROM github WHERE id = 1").toArray()[0];
     return { runners, github: github ? JSON.parse(String(github.data)) : null };
+  }
+
+  /** The Growth view's series from the newest runner push that carried them (runner/src/metrics.ts), or null. */
+  metrics(): unknown {
+    const row = this.sql.exec("SELECT data FROM metrics WHERE id = 1").toArray()[0];
+    return row ? JSON.parse(String(row.data)) : null;
   }
 
   /** Events since `since` (ISO), newest first, optionally for one job. */
@@ -82,6 +93,8 @@ interface CheckedSnapshot {
   runnerId: string;
   events: { id: number; jobId: string | null; at: string; kind: string; text: string }[];
   github: { at: string } & Record<string, unknown> | null;
+  /** Absent from runners that predate the Growth view, and null when unchanged since their last push. */
+  metrics?: { at: string } & Record<string, unknown> | null;
   [key: string]: unknown;
 }
 
@@ -106,6 +119,11 @@ function checkSnapshot(raw: unknown): CheckedSnapshot {
   if (s.github !== null) {
     const g = s.github as Record<string, unknown>;
     if (!g || typeof g !== "object" || typeof g.at !== "string" || !Array.isArray(g.items)) fail("bad github");
+  }
+  if (s.metrics !== undefined && s.metrics !== null) {
+    const m = s.metrics as Record<string, unknown>;
+    if (!m || typeof m !== "object" || Array.isArray(m) || typeof m.at !== "string" || Number.isNaN(Date.parse(m.at))
+      || !Array.isArray(m.apps) || !Array.isArray(m.sites) || !m.credits || typeof m.credits !== "object") fail("bad metrics");
   }
   return s as unknown as CheckedSnapshot;
 }

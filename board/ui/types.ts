@@ -88,4 +88,40 @@ export interface BoardEvent { id: number; jobId: string | null; at: string; kind
 
 export interface Session { authenticated: boolean; oauthConfigured?: boolean; user?: { id: string; login: string; name: string | null }; csrfToken?: string }
 
-export type View = 'overview' | 'tasks' | 'activity' | 'schedule' | 'prs' | 'issues' | 'jobs';
+export type View = 'overview' | 'growth' | 'tasks' | 'activity' | 'schedule' | 'prs' | 'issues' | 'jobs';
+
+// Mirrors runner/src/metrics.ts: the Growth view's series, served by /api/metrics.
+
+export interface FunnelDay { day: string; v: Record<string, number> }
+export interface RankDay { day: string; tracked: number; ranked: number; top10: number; top3: number; median: number | null }
+export interface PhraseRank { text: string; storefront: string; rank: number | null; was7?: number | null; was28?: number | null; volume: number | null }
+export interface ListingChange { at: string; fields: string[]; version?: string; liveAt?: string }
+
+export interface MetricsApp {
+  repo: string;
+  store: 'appstore' | 'play';
+  id: string;
+  name: string;
+  funnel: FunnelDay[];
+  storefront: string;
+  ranks: RankDay[];
+  phrases: PhraseRank[];
+  compare: { d7: string | null; d28: string | null; latest: string | null };
+  changes: ListingChange[];
+}
+
+export interface SearchTotals { clicks: number; impressions: number; ctr: number; position: number }
+
+export interface MetricsSite {
+  repo: string;
+  site: string;
+  published: { at: string; number: number; title: string; prNumber: number | null }[];
+  search: { day: string; last7: SearchTotals; previous7: SearchTotals | null }[];
+}
+
+export interface Metrics {
+  at: string;
+  apps: MetricsApp[];
+  sites: MetricsSite[];
+  credits: { days: { day: string; spent: number }[]; balance: number | null };
+}

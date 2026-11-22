@@ -3,8 +3,9 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import {
   Activity, AlertTriangle, CalendarClock, CircleDot, CircleCheck, CircleX, ExternalLink, GitMerge, GitPullRequest,
   GitPullRequestClosed, GitPullRequestDraft, Hammer, Inbox, KanbanSquare, LayoutDashboard, ListChecks, LogOut, Mail,
-  MessageSquare, Bot, Mic, Newspaper, Pause, RefreshCw, Rocket, Search, Star, X,
+  MessageSquare, Bot, Mic, Newspaper, Pause, RefreshCw, Rocket, Search, Star, TrendingUp, X,
 } from 'lucide-react';
+import { Growth } from './growth';
 import type { Board, BoardEvent, BoardItem, Job, RunnerState, Session, SourceKind, View } from './types';
 import './styles.css';
 
@@ -12,6 +13,7 @@ import './styles.css';
 
 const VIEWS: { id: View; label: string; icon: typeof Activity }[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'growth', label: 'Growth', icon: TrendingUp },
   { id: 'tasks', label: 'Tasks', icon: KanbanSquare },
   { id: 'activity', label: 'Activity', icon: Activity },
   { id: 'schedule', label: 'Schedule', icon: CalendarClock },
@@ -20,12 +22,12 @@ const VIEWS: { id: View; label: string; icon: typeof Activity }[] = [
   { id: 'jobs', label: 'Jobs', icon: ListChecks },
 ];
 
-type Params = { view: View; repo: string; q: string; state: string; job: string; source: string };
+type Params = { view: View; repo: string; q: string; state: string; job: string; source: string; range: string; daily: string; app: string };
 
 function readParams(): Params {
   const p = new URLSearchParams(location.search);
   const view = (p.get('view') ?? 'overview') as View;
-  return { view: VIEWS.some(v => v.id === view) ? view : 'overview', repo: p.get('repo') ?? '', q: p.get('q') ?? '', state: p.get('state') ?? '', job: p.get('job') ?? '', source: p.get('source') ?? '' };
+  return { view: VIEWS.some(v => v.id === view) ? view : 'overview', repo: p.get('repo') ?? '', q: p.get('q') ?? '', state: p.get('state') ?? '', job: p.get('job') ?? '', source: p.get('source') ?? '', range: p.get('range') ?? '', daily: p.get('daily') ?? '', app: p.get('app') ?? '' };
 }
 
 function useParams(): [Params, (next: Partial<Params>, push?: boolean) => void] {
@@ -165,7 +167,7 @@ function App() {
         <nav>
           {VIEWS.map(({ id, label, icon: Icon }) => (
             <a key={id} href={`?view=${id}`} className={params.view === id ? 'active' : ''}
-              onClick={e => { e.preventDefault(); setParams({ view: id, state: '', q: '', source: '' }); }}>
+              onClick={e => { e.preventDefault(); setParams({ view: id, state: '', q: '', source: '', app: '' }); }}>
               <Icon size={15} /> <span>{label}</span>{counts[id] ? <em>{counts[id]}</em> : null}
             </a>
           ))}
@@ -198,6 +200,8 @@ function App() {
           : !runner ? <Empty title="No runner has reported yet" body="Set ISOBOT_BOARD_URL and ISOBOT_BOARD_TOKEN in runner.env and restart the runner." />
           : <div className="content">
               {params.view === 'overview' && <Overview runner={runner} items={items} jobs={jobs} events={repoEvents} now={now} open={job => setParams({ job })} go={view => setParams({ view })} goSource={source => setParams({ view: 'issues', state: 'open', source, q: '' })} />}
+              {params.view === 'growth' && <Growth repo={params.repo} range={params.range} setRange={range => setParams({ range: range === '90' ? '' : range })}
+                daily={params.daily === '1'} setDaily={daily => setParams({ daily: daily ? '1' : '' })} app={params.app} setApp={app => setParams({ app }, false)} />}
               {params.view === 'tasks' && <Tasks items={items} jobs={jobs} now={now} open={job => setParams({ job })} />}
               {params.view === 'activity' && <ActivityView events={repoEvents} source={params.state} setSource={state => setParams({ state })} q={params.q} setQ={q => setParams({ q }, false)} open={job => setParams({ job })} />}
               {params.view === 'schedule' && <Schedule runner={runner} now={now} open={job => setParams({ job })} />}

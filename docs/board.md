@@ -8,6 +8,7 @@ link), and a side pane with a job's full timeline.
 | View | Shows |
 | --- | --- |
 | Overview | Runner health, what's building, what needs you (review, failed, proposed, waiting to ship), what runs next, today's events |
+| Growth | What the scheduled work measures and what it changed, over 30/90/120 days: installs and listing traffic (App Store and Play), search phrases in the top 10, conversion, trials, proceeds, a per-phrase rank table with 7- and 28-day moves, Search Console clicks per week, OpenSEO credits. Listing changes (◆) and published pages (●) are marked on every chart |
 | Tasks | The `isobot:*` label queue as columns (proposed → ready → building → review, failed), plus work merged in the last 7 days |
 | Activity | The runner's event timeline by day (7 days), split into job and runner-level events, with text search |
 | Schedule | Triage, content and ASO trains, analytics, the daily check-in, search and rank reports, release trains, and pending follow-ups |
@@ -29,6 +30,13 @@ browser ──GitHub sign-in──▶ isobot-board ──RPC──▶ AccountAut
   new events since the board's last one, and every 5 minutes the open and recently closed issues and PRs
   of each configured repo (two GitHub requests per repo). A push never blocks or fails a cycle; failures are
   logged once and then every 30th time. Builder session ids aren't sent and texts are clipped.
+- **Growth series** (`runner/src/metrics.ts`) are built from what runner.sqlite already keeps, with no API calls:
+  Apple analytics days (`analytics:<id>:day:*`), Play Console days (`playstats:<pkg>:day:*`), the ASO train's daily
+  rank snapshots and listing history (`aso:<id>:day:*`, `aso:<id>:history`), published content pages, the content
+  train's weekly Search Console totals (`content:<repo>:search:*`, written by its Monday report) and OpenSEO credits.
+  The runner rebuilds them every 15 minutes and sends them only when they changed; the board keeps the latest set
+  and serves it at `/api/metrics`. Rank snapshots fill in over the day, so each phrase counts at its newest reading
+  from the last 7 days, and the rank trend uses the app's main storefront (`aso.storefront`, default US).
 - **The board only reads.** It has no GitHub token and can't change labels, jobs or the runner.
 - **Sign-in** reuses Pi's GitHub login (`cloudflare/src/account-routes.ts`) and its `AccountAuth` Durable Object
   through a cross-script binding, so the allowlist (`GITHUB_OAUTH_ALLOWED_IDS`, CodyBontecou only) and session
