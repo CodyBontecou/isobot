@@ -9,6 +9,8 @@ export const COMMUNITY_MARKER = "<!-- isobot:from-discord -->";
 /** `runner say` from the terminal. */
 export const TERMINAL_MARKER = "<!-- isobot:terminal-note -->";
 const PROPOSAL_MARKER = "<!-- isobot:triage:";
+/** On issues the staff chat opens for the owner, so the board can show where they came from. */
+export const CHAT_MARKER = "<!-- isobot:chat -->";
 
 export type NoteSource = "discord" | "terminal" | "github";
 

@@ -15,6 +15,16 @@ export interface BoardItem {
   createdAt: string;
   updatedAt: string;
   closedAt: string | null;
+  /** Missing on snapshots from runners before sources were added. */
+  source?: ItemSource;
+  closes?: number;
+}
+
+export type SourceKind = 'github' | 'discord' | 'email' | 'vox' | 'appstore' | 'chat' | 'content' | 'release';
+
+export interface ItemSource {
+  kind: SourceKind;
+  url?: string;
 }
 
 export interface ScheduleItem {

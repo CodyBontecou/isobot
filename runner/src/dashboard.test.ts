@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { Dashboard, buildSnapshot, every, nextDailyAt, nextWeeklyAt, type BoardItem, type BoardSnapshot } from "./dashboard.js";
+import { Dashboard, buildSnapshot, closesIssue, every, inheritSources, itemSource, nextDailyAt, nextWeeklyAt, type BoardItem, type BoardSnapshot } from "./dashboard.js";
 import { Store } from "./store.js";
 
 const item = (number: number): BoardItem => ({
   repo: "o/r", number, kind: "issue", title: `Issue ${number}`, url: `https://github.com/o/r/issues/${number}`, state: "open",
   merged: false, draft: false, author: "o", labels: ["isobot:ready"], comments: 0,
-  createdAt: "2026-11-01T00:00:00Z", updatedAt: "2026-11-01T00:00:00Z", closedAt: null,
+  createdAt: "2026-11-01T00:00:00Z", updatedAt: "2026-11-01T00:00:00Z", closedAt: null, source: { kind: "github" },
 });
 
 function harness(answers: (number | { lastEventId: number })[]) {
@@ -92,4 +92,31 @@ test("schedule helpers find the next local run", () => {
   assert.equal(item.cadence, "every 30 min");
   assert.equal(item.nextAt, "2026-11-20T10:30:00.000Z");
   assert.equal(every("a", "ASO", 3_600_000, 0, true).cadence, "every hour");
+});
+
+test("item sources come from what isobot wrote into the issue", () => {
+  const footer = (id: string) => `\n\n---\n<sub>Proposed by isobot triage (small, confidence 0.90): x. y</sub>\n<!-- isobot:triage:${id} -->`;
+  assert.deepEqual(itemSource(`Spec\n\n**Source:** discord message from sam: https://discord.com/channels/1/2/3${footer("discord:3")}`),
+    { kind: "discord", url: "https://discord.com/channels/1/2/3" });
+  assert.deepEqual(itemSource(`Spec\n\n**Source:** App Store review (2/5 stars): https://apps.apple.com/app/id1?see-all=reviews${footer("appstore:9")}`),
+    { kind: "appstore", url: "https://apps.apple.com/app/id1?see-all=reviews" });
+  // Email links never leave the runner, even if one slipped into the body.
+  assert.deepEqual(itemSource(`Spec\n\n**Source:** email message from a@b.c: https://mail.example/x${footer("email:a@b.c:1:2")}`), { kind: "email" });
+  assert.deepEqual(itemSource(`Spec\n\n**Source:** the owner's Vox.md voice note${footer("vox:abc")}`), { kind: "vox" });
+  assert.deepEqual(itemSource("Do the thing\n\n<!-- isobot:chat -->"), { kind: "chat" });
+  assert.deepEqual(itemSource("From a voice note", ["from-vox", "bug"]), { kind: "vox" });
+  assert.deepEqual(itemSource("Brief\n\n---\n<sub>Researched by isobot's content train for x.com. It builds…</sub>"), { kind: "content" });
+  assert.deepEqual(itemSource("## isobot release train\n\nVersion **1.2**"), { kind: "release" });
+  assert.deepEqual(itemSource("Crash on launch"), { kind: "github" });
+  assert.deepEqual(itemSource(null), { kind: "github" });
+});
+
+test("PRs take the source of the issue they close", () => {
+  assert.equal(closesIssue("Builds it.\n\nCloses #12"), 12);
+  assert.equal(closesIssue("fixes #7 too"), 7);
+  assert.equal(closesIssue("See #4"), undefined);
+  const issue = { ...item(12), source: { kind: "vox" as const } };
+  const pr = { ...item(13), kind: "pr" as const, closes: 12 };
+  const orphan = { ...item(14), kind: "pr" as const, closes: 99 };
+  assert.deepEqual(inheritSources([issue, pr, orphan]).map(i => i.source.kind), ["vox", "vox", "github"]);
 });

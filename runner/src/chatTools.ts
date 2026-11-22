@@ -3,7 +3,7 @@ import path from "node:path";
 import { configuredRepos, policyFor, type RunnerConfig } from "./config.js";
 import type { Repo } from "./git.js";
 import type { GitHubApi } from "./github.js";
-import { DISCORD_REPLY_MARKER } from "./notes.js";
+import { CHAT_MARKER, DISCORD_REPLY_MARKER } from "./notes.js";
 import type { Card } from "./notify.js";
 import { Store, type Job } from "./store.js";
 import type { Upload } from "./discordApi.js";
@@ -452,7 +452,7 @@ export async function executeAction(action: ChatAction, deps: Pick<ChatToolDeps,
     case "create_issue": {
       const [owner, repo] = action.repo.split("/");
       // The owner's own request: the auto label lets the repository's ownerAutonomy apply, as for Vox notes.
-      const issue = await deps.github.createIssue(owner, repo, action.title, action.body, action.build ? [labels.ready, labels.auto] : []);
+      const issue = await deps.github.createIssue(owner, repo, action.title, `${action.body}\n\n${CHAT_MARKER}`, action.build ? [labels.ready, labels.auto] : []);
       return `Opened ${issue.url}${action.build ? "; isobot picks it up on its next pass" : ""}.`;
     }
     case "build": {

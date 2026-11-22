@@ -1,4 +1,5 @@
 import { describeEvent } from "./events.js";
+import { CHAT_MARKER } from "./notes.js";
 import type { FollowUp, Job, Store, StoredEvent } from "./store.js";
 
 /**
@@ -34,6 +35,56 @@ export interface BoardItem {
   createdAt: string;
   updatedAt: string;
   closedAt: string | null;
+  /** Where the work came from; a PR takes the source of the issue it closes. */
+  source: ItemSource;
+  /** PRs: the issue number its body closes (`Closes #n`), if any. */
+  closes?: number;
+}
+
+export type SourceKind = "github" | "discord" | "email" | "vox" | "appstore" | "chat" | "content" | "release";
+
+export interface ItemSource {
+  kind: SourceKind;
+  /** A link to the original (Discord message, App Store review); never set for email. */
+  url?: string;
+}
+
+const TRIAGE_SOURCES: SourceKind[] = ["discord", "email", "vox", "appstore", "github"];
+
+/**
+ * Reads an issue's origin from what isobot wrote into its body: the triage marker
+ * (`<!-- isobot:triage:<source>:… -->`) and its **Source:** link, the chat marker, or the
+ * content and release trains' wording, or the `from-vox` label the Vox inbox pipeline
+ * (~/dev/vox-notebook) puts on its issues. Anything else was filed on GitHub.
+ */
+export function itemSource(body: string | null | undefined, labels: string[] = []): ItemSource {
+  const text = body ?? "";
+  const triage = /<!-- isobot:triage:([a-z]+):/.exec(text)?.[1] as SourceKind | undefined;
+  if (triage && TRIAGE_SOURCES.includes(triage)) {
+    const link = triage === "email" ? undefined : /\*\*Source:\*\*[^\n]*?(https:\/\/\S+)/.exec(text)?.[1]?.replace(/[).,>]+$/, "");
+    return link ? { kind: triage, url: link } : { kind: triage };
+  }
+  if (labels.includes("from-vox")) return { kind: "vox" };
+  if (text.includes(CHAT_MARKER)) return { kind: "chat" };
+  if (text.includes("Researched by isobot's content train")) return { kind: "content" };
+  if (text.startsWith("## isobot release train")) return { kind: "release" };
+  return { kind: "github" };
+}
+
+/** The issue a PR body closes, the way the pipeline writes it (`Closes #12`). */
+export function closesIssue(body: string | null | undefined): number | undefined {
+  const match = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?) #(\d+)\b/i.exec(body ?? "");
+  return match ? Number(match[1]) : undefined;
+}
+
+/** Gives each PR the source of the issue it closes (in the same repo), when that issue is on the board. */
+export function inheritSources(items: BoardItem[]): BoardItem[] {
+  const issues = new Map(items.filter(i => i.kind === "issue").map(i => [`${i.repo}#${i.number}`.toLowerCase(), i.source]));
+  return items.map(item => {
+    if (item.kind !== "pr" || item.closes === undefined) return item;
+    const source = issues.get(`${item.repo}#${item.closes}`.toLowerCase());
+    return source ? { ...item, source } : item;
+  });
 }
 
 export interface ScheduleItem {
@@ -171,7 +222,7 @@ export class Dashboard {
         errors.push(`${name}: ${(error as Error).message.split("\n")[0].slice(0, 200)}`);
       }
     }
-    return { at: now.toISOString(), items, errors };
+    return { at: now.toISOString(), items: inheritSources(items), errors };
   }
 
   private now(): Date {
