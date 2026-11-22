@@ -133,7 +133,7 @@ function setup(now = "2026-11-22T09:00:00Z") {
     asc: args => asc.run(args),
     fetchGz: async () => asc.crashRows,
     requestId: async () => "req1",
-    notify: async text => { posted.push(text); },
+    notify: async (text, reactions = []) => { posted.push(`${text}${reactions.length ? ` [${reactions.join("")}]` : ""}`); },
     now: () => new Date(now),
   });
   const play = audit.playApps().find(a => a.repo.toLowerCase() === healthRepo.toLowerCase())!;
@@ -154,6 +154,9 @@ test("a Play pass files the biggest groups as proposals, once, capped per pass",
   assert.match(issues[0].body, /at com\.example\.Foo\.bar/);
   assert.equal(itemSource(issues[0].body).kind, "crash");
   assert.match(t.posted[0], /opened 2 issues/);
+  // Each issue gets its own message with ✅ / 🧹, so a reaction approves exactly that one.
+  assert.equal(t.posted.length, 3);
+  assert.match(t.posted[1], /^🗳 .*Occurrence\.toWorkData <https:\/\/github\.com\/.*> \[✅🧹\]$/);
 
   // Next pass: the rest at minUsers (2) or more; the obfuscated pool (5 users) is never filed, nor groups under 2.
   const again = await t.audit.tick(true);

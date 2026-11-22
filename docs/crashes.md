@@ -22,8 +22,9 @@ Play apps are the repos with `aso.play`; App Store apps are `appStore.apps`.
   later passes. An open issue that already names the crashing method counts as filed. Each TestFlight crash
   signature (the first app frame of the crashed thread) is one issue too; the first pass files only the last
   7 days' submissions. Obfuscated groups are never filed: upload the R8 mapping file to Play to make them readable.
-  Approve one like any proposal (`isobot:ready`, or ✅ in Discord). The staff channel gets a 💥 message listing
-  what was opened.
+  Nothing is built until you approve: the staff channel gets a 💥 summary and one 🗳 message per issue with
+  ✅ (build it) and 🧹 (dismiss) reactions, or add `isobot:ready` on GitHub. Crash issues never skip approval,
+  whatever `autoApprove` says, since a crash fix touches code users already depend on.
 - **Check-in.** The daily check-in gets a **Crashes** section: per app, the last 7 days on Play (reports, users,
   ANRs, the top group) and Apple's latest App Crashes period. A flag posts a check-in on its own: reports doubling
   week over week, a new crash group only in the newest version code (what the last release brought), a 28-day

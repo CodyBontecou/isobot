@@ -1,6 +1,7 @@
 import { failure, parseTsv, RateLimited, type AscRun } from "./analytics.js";
 import { asoApps, type RunnerConfig } from "./config.js";
 import { localDay } from "./content.js";
+import { CONTROLS, PROPOSAL_CONTROLS } from "./notify.js";
 import type { GitHubApi } from "./github.js";
 import type { Store } from "./store.js";
 
@@ -47,8 +48,8 @@ export interface CrashDeps {
   /** Google's service account; null leaves Play out. */
   google: GoogleJson | null;
   github: Pick<GitHubApi, "createIssue" | "isPublic" | "openIssues">;
-  /** Posts to the staff channel. */
-  notify(text: string): Promise<unknown>;
+  /** Posts to the staff channel; `reactions` become one-click controls (the bridge acts on ✅ and 🧹). */
+  notify(text: string, reactions?: readonly string[]): Promise<unknown>;
   now?(): Date;
 }
 
@@ -241,7 +242,11 @@ export class CrashAudit {
       });
       if (stop) break;
     }
-    if (filed.length) await this.deps.notify(`💥 **Crash audit**: opened ${plural(filed.length, "issue")} for crashes users are hitting:\n${filed.map(f => `• ${f}`).join("\n")}\nAdd \`${this.deps.config.labels.ready}\` to one to have isobot fix it.`).catch(() => undefined);
+    if (filed.length) {
+      // One message per issue: the bridge acts on ✅ only on a message that links exactly one issue.
+      await this.deps.notify(`💥 **Crash audit**: opened ${plural(filed.length, "issue")} for crashes users are hitting. React ${CONTROLS.start} on one to have isobot fix it, or ${CONTROLS.cleanup} to dismiss it (or add \`${this.deps.config.labels.ready}\` on GitHub).`).catch(() => undefined);
+      for (const f of filed) await this.deps.notify(`🗳 ${f}`, PROPOSAL_CONTROLS).catch(() => undefined);
+    }
     return { filed };
   }
 

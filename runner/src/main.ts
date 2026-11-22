@@ -205,7 +205,7 @@ function runtime(): Runtime {
     fetchGz: analyticsFetch,
     requestId: appId => analytics.requestId(appId),
     google: googleAuth,
-    notify: text => notifier.discord(text),
+    notify: (text, reactions) => notifier.discord(text, reactions),
   });
   const asoDiscord = env.discordBot ? new DiscordApi(env.discordBot.token) : null;
   let asoOwners: Promise<Set<string>> | null = null;
