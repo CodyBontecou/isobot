@@ -5,7 +5,7 @@ import { ContentTrain } from "./content.js";
 import { AsoTrain, type AsoClient } from "./aso.js";
 import { AppAnalytics } from "./analytics.js";
 import { GoogleAuth, PlayPublisher } from "./google.js";
-import { PlayAnalytics } from "./playAnalytics.js";
+import { PlayAnalytics, ratingsText } from "./playAnalytics.js";
 import { CrashAudit } from "./crashes.js";
 import type { CheckReport } from "./policy.js";
 import { execFileSync } from "node:child_process";
@@ -560,6 +560,7 @@ async function startChat(rt: Runtime, live: () => LiveStatus): Promise<StaffChat
       card: id => rt.notifier.card({ id }),
       analytics: rt.analytics,
       crashes: rt.crashes.enabled() ? rt.crashes : undefined,
+      playRatings: rt.playAnalytics ?? undefined,
       ...(channel.guild_id ? { discord: { api: discord, guildId: channel.guild_id, webhookDir: path.join(rt.env.home, "webhooks") } } : {}),
       asc: async (args, { readOnly }) => {
         const result = await run("asc", args, {
@@ -733,9 +734,9 @@ const HELP = `isobot runner
                       Show the latest proposal's apply state, approve or dismiss it (like ✅ / 🛑 in Discord),
                       or write an approved one to App Store Connect now (e.g. right after creating a version).
                       A repo's Google Play app is named by its package (e.g. aso md.vox.android research)
-  analytics play [sync]
-                      Read Play Console's bulk reports now (sync), or print each Play app's week and the
-                      reports' status
+  analytics play [sync | ratings]
+                      Read Play Console's bulk reports now (sync), print each Play app's ratings (ratings),
+                      or print each Play app's week and the reports' status
   analytics [sync | checkin | <app> [days]]
                       Download new App Store analytics reports now, print the check-in's App Store section,
                       or print an app's daily numbers (default: every app's last 7 days)
@@ -946,6 +947,14 @@ async function main(): Promise<void> {
         if (days === "sync") await rt.playAnalytics.tick(true);
         const status = rt.playAnalytics.status();
         if (status) console.log(`Not readable: ${status}`);
+        if (days === "ratings") {
+          // Read-only preview: low-rating flags are printed without being marked as posted.
+          for (const pkg of asoApps(rt.config).filter(a => a.store === "play").map(a => a.aso.appId)) {
+            const r = rt.playAnalytics.ratings(pkg);
+            console.log(`${pkg}: ${r ? ratingsText(r) : "no ratings report from Play yet"}`);
+          }
+          return;
+        }
         for (const pkg of asoApps(rt.config).filter(a => a.store === "play").map(a => a.aso.appId)) {
           console.log(`${pkg}: ${rt.playAnalytics.weekLine(pkg) ?? `(no week yet; latest day ${rt.playAnalytics.latest(pkg) ?? "none"})`}`);
         }

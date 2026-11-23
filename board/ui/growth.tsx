@@ -409,6 +409,12 @@ function RepoGrowth({ apps, sites, days, smooth, daily }: { apps: MetricsApp[]; 
   };
   const iosConv = conv(ios, 'firstDownloads', 'pageViews');
   const playConv = conv(play, 'acquisitions', 'visitors');
+  // Play's ratings report: a level (overall average) and the days with new ratings. Play gives no count.
+  const playRating = funnelValues(play, 'ratingTotal');
+  const ratingSeries: Series[] = play && playRating.size ? [{ id: 'play', label: 'Google Play overall rating', color: COLORS.play, values: playRating }] : [];
+  const ratingThrough = [...funnelValues(play, 'ratingDaily').keys(), ...playRating.keys()].sort().at(-1);
+  const ratedDays30 = ratingThrough ? [...funnelValues(play, 'ratingDaily')].filter(([d, v]) => v > 0 && d >= addDays(ratingThrough, -29)).length : null;
+  const latestRating = ratingThrough ? [...playRating].sort((a, b) => a[0].localeCompare(b[0])).at(-1)?.[1] : undefined;
   const trials = lastWeeks(funnelValues(ios, 'trials'));
   const deletions = lastWeeks(funnelValues(ios, 'deletions'));
 
@@ -436,12 +442,19 @@ function RepoGrowth({ apps, sites, days, smooth, daily }: { apps: MetricsApp[]; 
             empty={ranks.length ? undefined : 'No rank snapshots yet'} table={() => <SeriesTable days={days} series={ranks} />}>
             <LineChart days={days} series={ranks} markers={markers} />
           </ChartCard>
+          {ratingSeries.length ? (
+            <ChartCard title="Google Play rating" caption={`Overall average, Play's ratings report${ratingThrough ? ` to ${dayLabel(ratingThrough)}` : ''}`} legend={ratingSeries}
+              table={() => <SeriesTable days={days} series={ratingSeries} format={n => n.toFixed(2)} />}>
+              <LineChart days={days} series={ratingSeries} markers={markers} format={n => n.toFixed(1)} />
+            </ChartCard>
+          ) : null}
           <div className="chart-card mini-tiles">
             <Mini label="App Store conversion" value={iosConv === null ? '—' : pct(iosConv)} hint="first downloads ÷ page views, 7 days" />
             <Mini label="Play conversion" value={playConv === null ? '—' : pct(playConv)} hint="listing acquisitions ÷ visitors, 7 days" />
             <Mini label="Free trials started" value={trials ? exact(trials.now) : '—'} hint="App Store, 7 days" delta={trials ? <Delta now={trials.now} before={trials.before} /> : null} />
             <Mini label="Deletions" value={deletions ? exact(deletions.now) : '—'} hint="App Store, 7 days" delta={deletions ? <Delta now={deletions.now} before={deletions.before} goodUp={false} /> : null} />
             <Mini label="Ranked phrases" value={ios?.ranks.at(-1) ? `${ios.ranks.at(-1)!.ranked} / ${ios.ranks.at(-1)!.tracked}` : '—'} hint={`App Store top 200${ios?.ranks.at(-1)?.median ? ` · median #${exact(ios.ranks.at(-1)!.median!)}` : ''}`} />
+            {play ? <Mini label="Play rating" value={latestRating === undefined ? '—' : `${latestRating.toFixed(2)}★`} hint={ratingThrough ? `overall · new ratings on ${ratedDays30} of 30 days to ${dayLabel(ratingThrough)}` : 'no ratings report yet (none rated)'} /> : null}
             <Mini label="Play ranked phrases" value={play?.ranks.at(-1) ? `${play.ranks.at(-1)!.ranked} / ${play.ranks.at(-1)!.tracked}` : '—'} hint={`Play results${play?.ranks.at(-1)?.median ? ` · median #${exact(play.ranks.at(-1)!.median!)}` : ''}`} />
           </div>
         </div>

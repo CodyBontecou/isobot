@@ -66,6 +66,8 @@ export interface ChatToolDeps {
   analytics?: AnalyticsView;
   /** The crash audit's check-in section (crashes.ts). */
   crashes?: { checkIn(): CheckInAnalytics };
+  /** Google Play's ratings for the check-in (playAnalytics.ts). */
+  playRatings?: { checkIn(): CheckInAnalytics };
 }
 
 /** Collected while one model turn runs, posted with the reply. */
@@ -339,7 +341,7 @@ export async function needsMe(deps: Pick<ChatToolDeps, "store" | "live" | "card"
 }
 
 /** The daily check-in: what needs the owner, without a model. Null when there's nothing to say. */
-export function formatCheckIn(n: NeedsMe, recent: Job[], apps?: CheckInAnalytics, crashes?: CheckInAnalytics): string | null {
+export function formatCheckIn(n: NeedsMe, recent: Job[], apps?: CheckInAnalytics, crashes?: CheckInAnalytics, ratings?: CheckInAnalytics): string | null {
   const lines: string[] = [];
   const pausedUntil = n.runner.usageLimitPauseUntil;
   if (n.runner.paused) lines.push("⏸ The runner is paused: say `resume` when you want builds again.");
@@ -357,11 +359,14 @@ export function formatCheckIn(n: NeedsMe, recent: Job[], apps?: CheckInAnalytics
   const appFlags = apps?.flags ?? [];
   // Crash lines ride along too; a crash flag (a spike, a new group in the latest release) posts one on its own.
   const crashFlags = crashes?.flags ?? [];
-  if (!lines.length && !done.length && !appFlags.length && !crashFlags.length) return null;
+  // Play rating lines ride along; a low-rating day posts one on its own.
+  const ratingFlags = ratings?.flags ?? [];
+  if (!lines.length && !done.length && !appFlags.length && !crashFlags.length && !ratingFlags.length) return null;
   const header = `☀️ **isobot check-in**${done.length ? `: ${done.length} job${done.length === 1 ? "" : "s"} landed in the last day (${done.slice(0, 5).map(j => j.id).join(", ")})` : ""}`;
   const appLines = apps?.lines.length ? ["**App Store**", ...appFlags, ...apps.lines.map(l => `- ${l}`)] : appFlags.length ? ["**App Store**", ...appFlags] : [];
   const crashLines = crashes?.lines.length || crashFlags.length ? ["**Crashes**", ...crashFlags, ...(crashes?.lines ?? []).map(l => `- ${l}`)] : [];
-  return [header, ...(lines.length ? lines : ["Nothing needs you right now."]), ...appLines, ...crashLines, "", "Mention me to talk about any of it."].join("\n");
+  const ratingLines = ratings?.lines.length || ratingFlags.length ? ["**Google Play ratings**", ...ratingFlags, ...(ratings?.lines ?? []).map(l => `- ${l}`)] : [];
+  return [header, ...(lines.length ? lines : ["Nothing needs you right now."]), ...appLines, ...crashLines, ...ratingLines, "", "Mention me to talk about any of it."].join("\n");
 }
 
 /** Validates a proposal and fills in what the confirmation needs (a PR's head commit, an issue's title). */

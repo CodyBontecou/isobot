@@ -94,7 +94,7 @@ function appleDay(m: DayMetrics): Record<string, number> {
 
 function playDay(m: PlayDay): Record<string, number> {
   const v: Record<string, number> = {};
-  for (const f of ["visitors", "acquisitions", "searchVisitors", "searchAcquisitions", "userInstalls", "userUninstalls", "newOrders"] as const) {
+  for (const f of ["visitors", "acquisitions", "searchVisitors", "searchAcquisitions", "userInstalls", "userUninstalls", "newOrders", "ratingDaily", "ratingTotal"] as const) {
     if (typeof m[f] === "number") v[f] = m[f]!;
   }
   return v;
