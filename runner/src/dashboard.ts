@@ -70,8 +70,14 @@ export function itemSource(body: string | null | undefined, labels: string[] = [
   if (text.includes(CRASH_MARKER)) return { kind: "crash" };
   if (text.includes(CHAT_MARKER)) return { kind: "chat" };
   if (text.includes("Researched by isobot's content train")) return { kind: "content" };
-  if (text.startsWith("## isobot release train")) return { kind: "release" };
+  if (isReleaseIssue(text)) return { kind: "release" };
   return { kind: "github" };
+}
+
+/** A release train's Ship issue or a weekly App Store release issue: its ready label confirms a release, never a build. */
+export function isReleaseIssue(body: string | null | undefined): boolean {
+  const text = body ?? "";
+  return text.startsWith("## isobot release train") || text.startsWith("## isobot weekly App Store release");
 }
 
 /** The issue a PR body closes, the way the pipeline writes it (`Closes #12`). */

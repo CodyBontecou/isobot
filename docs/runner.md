@@ -468,8 +468,37 @@ titled as a beta, with `joinUrl` (the group's public link) in place of the App S
 `joinUrl` it tells existing testers to update. A rejected or expired build gets no post, and the
 staff channel hears about it.
 
-GitSync.md, Health.md, Whereday and Vox.md trains ship to TestFlight. To put one on the App Store, submit it
-yourself.
+GitSync.md, Health.md, Whereday and Vox.md trains ship to TestFlight, and their weekly production release
+(below) puts the tested builds on the App Store.
+
+### Weekly App Store release
+
+Add `production` to a TestFlight train to send its builds to the App Store once a week (`runner/src/production.ts`):
+
+```json
+"train": { "...": "...", "testflight": { "...": "..." }, "production": { "weekday": 2, "hour": 10, "minBetaHours": 48, "holdHours": 4 } }
+```
+
+1. On `weekday` (0 = Sunday, default Tuesday) at `hour` (local, default 10:00), the runner picks the newest TestFlight
+   build the train uploaded that external testers have had for `minBetaHours` (default 48), that TestFlight still
+   shows as installable, and whose version is ahead of the App Store. Nothing may be in App Review; if something is,
+   or the runner was down, the week's release goes as soon as it can. With no such build, the staff channel hears
+   so once and the week is skipped.
+2. A **Release x.y.z to the App Store** issue lists every change since the last App Store release and the
+   model-written What's New, and is posted to Discord.
+3. `holdHours` later (default 4), unless the issue has `isobot:stop` or was closed, the runner stages the version
+   from that exact build (no new archive: the binary is the one testers had), copying the live version's metadata
+   and setting What's New in every locale, sets it to release once approved, **turns on a 7-day phased release and
+   checks it exists**, then submits it for App Review. If the phased release can't be confirmed, nothing is submitted.
+4. The changes' issues hear about it, the release issue closes, and with the train's `launch` set the launch post
+   goes out once the version is live. Set `"announce": false` where another service already announces App Store
+   releases (Health.md, whose iOS releases `asc-webhook-worker` posts).
+
+A repo's first weekly release waits for you to add `isobot:ready` to its release issue. Later ones don't.
+Only builds uploaded after this shipped are on record, so the first week after deploying passes quietly.
+A failed step leaves the work for next week and says on the issue which step failed; a half-staged version
+may be left in App Store Connect to fix or delete. Pausing, resuming or finishing a phased rollout early is
+still yours (`asc versions phased-release update`).
 
 ### Release notes and launch posts
 

@@ -25,6 +25,9 @@ import type { Job, Store } from "./store.js";
  * `testflight/<version>-<build>`, a build waiting on Beta App Review holds the next train, and the
  * launch post goes out once external testers can install it.
  *
+ * Each TestFlight build is kept in the `betas` cursor until the weekly production release (production.ts)
+ * takes it to the App Store.
+ *
  * A repo's first train waits for the owner to add the ready label to the ship issue; later ones don't.
  */
 
@@ -53,7 +56,7 @@ export interface TrainRepo {
 /** TestFlight external build states in which Apple is still deciding: the next build waits. */
 const BETA_BUSY_STATES = new Set(["PROCESSING", "IN_EXPORT_COMPLIANCE_REVIEW", "WAITING_FOR_BETA_REVIEW", "IN_BETA_REVIEW"]);
 /** External testers can install the build. */
-const BETA_LIVE_STATES = new Set(["BETA_APPROVED", "IN_BETA_TESTING"]);
+export const BETA_LIVE_STATES = new Set(["BETA_APPROVED", "IN_BETA_TESTING"]);
 /** The build will never reach external testers. */
 const BETA_DEAD_STATES = new Set(["BETA_REJECTED", "EXPIRED", "PROCESSING_EXCEPTION"]);
 
@@ -106,6 +109,24 @@ const LAUNCH_MAX_FAILURES = 5;
 const LAUNCH_MAX_BYTES = 24 * 1024 * 1024;
 
 const SHIPPABLE = ["merged", "released"] as const;
+
+/** A TestFlight build the train uploaded, kept until a weekly production release includes it (production.ts). */
+export interface BetaBuild {
+  version: string;
+  build: string;
+  /** When it was submitted to Beta App Review. */
+  at: string;
+  jobs: { id: string; number: number; title: string; prNumber: number | null }[];
+}
+
+/** Store key for a repo's train cursors; production.ts shares them. */
+export function trainKey(owner: string, repo: string, what: string): string {
+  return `train:${owner}/${repo}:${what}`.toLowerCase();
+}
+
+/** Launch cursors: a TestFlight build's, and an App Store version's from the weekly production release. */
+const LAUNCH_KEYS = ["launch", "launch-appstore"] as const;
+const MAX_BETA_HISTORY = 60;
 
 export function nextVersion(current: string | null): string {
   const parts = (current ?? "1.0").split(".").map(n => Number.parseInt(n, 10) || 0);
@@ -188,10 +209,12 @@ export class ReleaseTrain {
       const name = `${owner}/${repo}`;
       const train = policyFor(this.deps.config, name).train;
       if (!train || this.running.has(name)) continue;
-      try {
-        await this.launchStep(owner, repo, train);
-      } catch (error) {
-        console.warn(`[train] ${name} launch: ${(error as Error).message}`);
+      for (const which of LAUNCH_KEYS) {
+        try {
+          await this.launchStep(owner, repo, train, which);
+        } catch (error) {
+          console.warn(`[train] ${name} launch: ${(error as Error).message}`);
+        }
       }
       try {
         const ship = await this.step(owner, repo, train);
@@ -207,7 +230,7 @@ export class ReleaseTrain {
   }
 
   private key(owner: string, repo: string, what: string): string {
-    return `train:${owner}/${repo}:${what}`.toLowerCase();
+    return trainKey(owner, repo, what);
   }
 
   private waiting(owner: string, repo: string): Job[] {
@@ -293,9 +316,9 @@ export class ReleaseTrain {
   }
 
   /** Posts a submitted version's launch once the App Store has it on sale. */
-  private async launchStep(owner: string, repo: string, train: TrainConfig): Promise<void> {
+  private async launchStep(owner: string, repo: string, train: TrainConfig, which: (typeof LAUNCH_KEYS)[number]): Promise<void> {
     const { store, notifier } = this.deps;
-    const key = this.key(owner, repo, "launch");
+    const key = this.key(owner, repo, which);
     const raw = store.cursor(key);
     if (!raw) return;
     const name = `${owner}/${repo}`;
@@ -305,8 +328,8 @@ export class ReleaseTrain {
       return;
     }
     const now = this.now().getTime();
-    if (now - (this.lastLaunchCheck.get(name) ?? -Infinity) < LAUNCH_CHECK_MS) return;
-    this.lastLaunchCheck.set(name, now);
+    if (now - (this.lastLaunchCheck.get(key) ?? -Infinity) < LAUNCH_CHECK_MS) return;
+    this.lastLaunchCheck.set(key, now);
     if (launch.build) {
       const state = await this.betaState(train, launch.build);
       if (state && BETA_DEAD_STATES.has(state)) {
@@ -440,7 +463,13 @@ export class ReleaseTrain {
       return;
     }
     store.setCursor(this.key(owner, repo, "confirmed"), "1");
-    if (beta) store.setCursor(this.key(owner, repo, "beta"), buildNumber);
+    if (beta) {
+      store.setCursor(this.key(owner, repo, "beta"), buildNumber);
+      const history = JSON.parse(store.cursor(this.key(owner, repo, "betas")) || "[]") as BetaBuild[];
+      history.push({ version: pending.version, build: buildNumber, at: this.now().toISOString(),
+        jobs: jobs.map(job => ({ id: job.id, number: job.number, title: job.title, prNumber: job.prNumber })) });
+      store.setCursor(this.key(owner, repo, "betas"), JSON.stringify(history.slice(-MAX_BETA_HISTORY)));
+    }
     if (train.launch) {
       const launch: Launch = {
         version: pending.version, ...(beta ? { build: buildNumber } : {}), notes: pending.notes ?? fallbackNotes(jobs),

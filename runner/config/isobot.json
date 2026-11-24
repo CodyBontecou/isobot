@@ -247,6 +247,7 @@
         "prepare": ["make -C apps/apple prepare-healthmd-core-rust"],
         "everyHours": 24,
         "holdMinutes": 60,
+        "production": { "weekday": 2, "hour": 10, "minBetaHours": 48, "holdHours": 4, "announce": false },
         "launch": {
           "channelId": "1498086736465760458",
           "name": "Health.md",
@@ -306,6 +307,7 @@
         "scheme": "Sync.md",
         "everyHours": 24,
         "holdMinutes": 60,
+        "production": { "weekday": 2, "hour": 10, "minBetaHours": 48, "holdHours": 4 },
         "launch": {
           "channelId": "1498086728475480226",
           "name": "GitSync.md",
@@ -383,6 +385,7 @@
         "scheme": "IsoMe",
         "everyHours": 24,
         "holdMinutes": 60,
+        "production": { "weekday": 2, "hour": 10, "minBetaHours": 48, "holdHours": 4 },
         "launch": {
           "channelId": "1498086745336447078",
           "name": "Whereday",
@@ -475,6 +478,7 @@
         "scheme": "Voxboard",
         "everyHours": 24,
         "holdMinutes": 60,
+        "production": { "weekday": 2, "hour": 10, "minBetaHours": 48, "holdHours": 4 },
         "launch": {
           "channelId": "1498086776181362848",
           "name": "Vox.md",

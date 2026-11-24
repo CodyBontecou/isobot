@@ -235,6 +235,24 @@ export interface TrainConfig {
    * goes out when external testers can install the build.
    */
   testflight?: TestFlightConfig;
+  /**
+   * Weekly App Store release of the newest TestFlight build that external testers have had for `minBetaHours`
+   * (production.ts). Needs `testflight`. Each version is submitted with a 7-day phased release.
+   */
+  production?: ProductionConfig;
+}
+
+export interface ProductionConfig {
+  /** Local weekday (0 = Sunday) the weekly release is announced. Default 2 (Tuesday). */
+  weekday?: number;
+  /** Local hour it's announced. Default 10. */
+  hour?: number;
+  /** How long external testers must have had a build before it may go to the App Store. Default 48. */
+  minBetaHours?: number;
+  /** Time between the announcement and submitting for App Review. Default 4. */
+  holdHours?: number;
+  /** Post the train's launch post when the version goes live. Off where another service already announces App Store releases. Default true. */
+  announce?: boolean;
 }
 
 export interface TestFlightConfig {
@@ -507,6 +525,14 @@ export function validateConfig(config: RunnerConfig): void {
       if (t.launch) {
         if (!/^\d{17,20}$/.test(t.launch.channelId ?? "")) fail(`${name}: train.launch.channelId must be a Discord channel id`);
         if (t.launch.storeUrl !== undefined && !/^https:\/\/\S+$/.test(t.launch.storeUrl)) fail(`${name}: train.launch.storeUrl must be an https URL`);
+      }
+      if (t.production) {
+        const p = t.production;
+        if (!t.testflight) fail(`${name}: train.production promotes TestFlight builds, so it needs train.testflight`);
+        if (p.weekday !== undefined && !(Number.isInteger(p.weekday) && p.weekday >= 0 && p.weekday <= 6)) fail(`${name}: train.production.weekday must be 0–6`);
+        if (p.hour !== undefined && !(Number.isInteger(p.hour) && p.hour >= 0 && p.hour <= 23)) fail(`${name}: train.production.hour must be 0–23`);
+        if (p.minBetaHours !== undefined && !(p.minBetaHours >= 0)) fail(`${name}: train.production.minBetaHours must be 0 or more`);
+        if (p.holdHours !== undefined && !(p.holdHours >= 0)) fail(`${name}: train.production.holdHours must be 0 or more`);
       }
       if (t.testflight) {
         if (!t.testflight.group?.trim()) fail(`${name}: train.testflight.group must name an external beta group`);

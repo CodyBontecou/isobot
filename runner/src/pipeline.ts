@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AgentRun, Builder, JobDevices, PreviousReview, Review } from "./builder.js";
+import { isReleaseIssue } from "./dashboard.js";
 import { hasDevices, type DeviceLease, type Devices } from "./devices.js";
 import { collectMedia, mediaMarkdown, type MediaFile } from "./media.js";
 import { isTransient, UsageLimitError } from "./errors.js";
@@ -232,6 +233,8 @@ export class Pipeline {
       for (const issue of issues) {
         try {
           if (hasLabel(issue, this.labels.stop) || hasLabel(issue, this.labels.cleanup)) continue;
+          // The release train reads this label itself, as the go-ahead for a release.
+          if (isReleaseIssue(issue.body)) continue;
           // Approval is the trust boundary: only you (or trustedAuthors) may start a build.
           const approver = await github.labeledBy(owner, repo, issue.number, this.labels.ready);
           if (!approver || !(await this.isTrusted(approver))) {
