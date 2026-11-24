@@ -35,7 +35,7 @@ Play apps are the repos with `aso.play`; App Store apps are `appStore.apps`.
   spike, or a source the audit couldn't read.
 - **Board.** Issues it opens carry `<!-- isobot:crash:… -->` and show as **Crash report** on the board.
 
-During a phased release (7 days, see the release train), the "new crash group in the newest version" flag is the
+During a phased release (7 days, see the weekly App Store release in [runner](runner.md#weekly-app-store-release)), the "new crash group in the newest version" flag is the
 signal to pause the rollout.
 
 ## Privacy

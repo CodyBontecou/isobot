@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { ImapFlow } from "imapflow";
+import { ProductionRelease, nextSlot, productionSettings } from "./production.js";
 import { ReleaseTrain } from "./train.js";
 import { ContentTrain } from "./content.js";
 import { AsoTrain, type AsoClient } from "./aso.js";
@@ -64,6 +65,8 @@ interface Runtime {
   devices: LocalDevices;
   repoFor: (owner: string, repo: string) => Repo;
   train: ReleaseTrain;
+  /** Weekly App Store releases of soaked TestFlight builds (production.ts). */
+  production: ProductionRelease;
   content: ContentTrain;
   aso: AsoTrain;
   analytics: AppAnalytics;
@@ -148,6 +151,21 @@ function runtime(): Runtime {
   if (env.piUrl && env.piToken && config.vox) sources.push(new VoxSource(env.piUrl, env.piToken, config.vox.conversation));
   for (const account of env.imap) sources.push(new EmailSource(account));
   if (config.appStore) sources.push(new AppStoreSource(config.appStore));
+  const ascStatus = async (appId: string, platform: string) => {
+    // Without --platform, asc reports whichever platform's version is newest (a Mac app's, say).
+    const result = await run("asc", ["status", "--app", appId, "--platform", platform, "--output", "json"], { cwd: env.home, env: workerEnv(), timeoutMs: 120_000 });
+    if (result.code !== 0) throw new Error(`asc status failed: ${(result.stderr || result.stdout).trim().slice(-300)}`);
+    const status = JSON.parse(result.stdout) as { appstore?: { version?: string; state?: string }; builds?: { latest?: { version?: string } } };
+    return { version: status.appstore?.version ?? null, state: status.appstore?.state ?? null, latestBuild: status.builds?.latest?.version ?? null };
+  };
+  const ascBetaState = async (appId: string, platform: string, buildNumber: string) => {
+    const result = await run("asc", ["builds", "build-beta-detail", "view", "--app", appId, "--build-number", buildNumber, "--platform", platform, "--output", "json"],
+      { cwd: env.home, env: workerEnv(), timeoutMs: 120_000 });
+    // Right after upload, before processing, the build doesn't exist yet.
+    if (result.code !== 0) return null;
+    const detail = JSON.parse(result.stdout) as { data?: { attributes?: { externalBuildState?: string } } };
+    return detail.data?.attributes?.externalBuildState ?? null;
+  };
   const train = new ReleaseTrain({
     config, store, github, notifier, repo: repoFor,
     stopping: () => shuttingDown,
@@ -158,20 +176,19 @@ function runtime(): Runtime {
       const result = await sh(command, { cwd, env: workerEnv(), timeoutMs });
       return { ok: result.code === 0 && !result.timedOut, output: `${result.stdout}\n${result.stderr}` };
     },
-    appStatus: async (appId, platform) => {
-      // Without --platform, asc reports whichever platform's version is newest (a Mac app's, say).
-      const result = await run("asc", ["status", "--app", appId, "--platform", platform, "--output", "json"], { cwd: env.home, env: workerEnv(), timeoutMs: 120_000 });
-      if (result.code !== 0) throw new Error(`asc status failed: ${(result.stderr || result.stdout).trim().slice(-300)}`);
-      const status = JSON.parse(result.stdout) as { appstore?: { version?: string; state?: string }; builds?: { latest?: { version?: string } } };
-      return { version: status.appstore?.version ?? null, state: status.appstore?.state ?? null, latestBuild: status.builds?.latest?.version ?? null };
-    },
-    betaState: async (appId, platform, buildNumber) => {
-      const result = await run("asc", ["builds", "build-beta-detail", "view", "--app", appId, "--build-number", buildNumber, "--platform", platform, "--output", "json"],
-        { cwd: env.home, env: workerEnv(), timeoutMs: 120_000 });
-      // Right after upload, before processing, the build doesn't exist yet.
-      if (result.code !== 0) return null;
-      const detail = JSON.parse(result.stdout) as { data?: { attributes?: { externalBuildState?: string } } };
-      return detail.data?.attributes?.externalBuildState ?? null;
+    appStatus: ascStatus,
+    betaState: ascBetaState,
+  });
+  const production = new ProductionRelease({
+    config, store, github, notifier,
+    stopping: () => shuttingDown,
+    notes: input => builder.releaseNotes(input),
+    pullBody: async (owner, repo, number) => (await github.pullDetails(owner, repo, number)).body,
+    appStatus: ascStatus,
+    betaState: ascBetaState,
+    asc: async args => {
+      const result = await run("asc", args, { cwd: env.home, env: workerEnv(), timeoutMs: 30 * 60_000 });
+      return { ok: result.code === 0 && !result.timedOut, stdout: result.stdout, output: `${result.stdout}\n${result.stderr}` };
     },
   });
   const content = new ContentTrain({
@@ -230,7 +247,7 @@ function runtime(): Runtime {
       return { ok: result.code === 0 && !result.timedOut, stdout: result.stdout, stderr: result.stderr };
     },
   });
-  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, content, aso, analytics, playAnalytics, crashes, playRollout, secrets, handoff };
+  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, production, content, aso, analytics, playAnalytics, crashes, playRollout, secrets, handoff };
 }
 
 /** ASO Tracker's CLI: one JSON call per tool; it starts the tracker's daemon itself when it isn't running. */
@@ -401,6 +418,14 @@ async function loop(rt: Runtime): Promise<void> {
       items.push({ id: `train:${key}`, name: `Release train · ${key.split("/")[1]}`, cadence: `at most every ${train.everyHours} h`,
         lastAt: last, nextAt: last ? new Date(Date.parse(last) + train.everyHours * 3_600_000).toISOString() : null,
         running: Boolean(pending), detail: `${train.testflight ? "TestFlight" : "App Store"}${pending ? "; a train is under way" : "; leaves when merged work is waiting"}` });
+      if (train.production && train.testflight) {
+        const p = productionSettings(train);
+        const releasing = rt.store.cursor(`train:${key}:production-pending`.toLowerCase());
+        items.push({ id: `production:${key}`, name: `App Store release · ${key.split("/")[1]}`,
+          cadence: `weekly, ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][p.weekday]} ${String(p.hour).padStart(2, "0")}:00`,
+          lastAt: rt.store.cursor(`train:${key}:production-last`.toLowerCase()), nextAt: nextSlot(now, p.weekday, p.hour).toISOString(),
+          running: Boolean(releasing), detail: `newest TestFlight build with testers ${p.minBetaHours} h+; 7-day phased release${releasing ? "; a release is under way" : ""}` });
+      }
     }
     return items;
   };
@@ -428,6 +453,7 @@ async function loop(rt: Runtime): Promise<void> {
         await rt.pipeline.followUp();
         await rt.pipeline.cleanUp();
         await rt.train.tick();
+        await rt.production.tick();
         lastCycleError = null;
         if (!contentRunning && Date.now() - lastContent > CONTENT_EVERY_MS && contentRepos(rt.config).length) {
           lastContent = Date.now();

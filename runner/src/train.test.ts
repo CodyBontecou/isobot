@@ -357,6 +357,9 @@ test("a TestFlight train uploads to the external group, waits out Beta App Revie
   assert.doesNotMatch(t.commands[0], /appstore|--metadata-dir/);
   assert.deepEqual(t.tags, ["testflight/3.0.1-202611161301@abc123def4567890"]);
   assert.equal(t.store.get(`${REPO}#85`)!.state, "shipped");
+  const history = JSON.parse(t.store.cursor(`train:${REPO}:betas`.toLowerCase())!);
+  assert.deepEqual(history.map((e: { version: string; build: string; jobs: { number: number }[] }) => [e.version, e.build, e.jobs.map(j => j.number)]),
+    [["3.0.1", "202611161301", [85]]], "the build is kept for the weekly App Store release");
   assert.match(t.github.commentsFor(OWNER, NAME, 85).at(-1)!, /Submitted to TestFlight in 3\.0\.1 \(build 202611161301/);
   assert.match(t.staff.at(-1)!, /🧪 \*\*codybontecou\/vox.md 3\.0\.1\*\* \(build 202611161301\) submitted to TestFlight for Public beta/);
 

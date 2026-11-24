@@ -1305,3 +1305,13 @@ test("a PR that keeps conflicting with main stops being sent back after two roun
   assert.equal(github.merged.length, 0);
   assert.match(github.commentsFor(OWNER, NAME, 61).at(-1)!, /no GitHub CI reported/);
 });
+
+test("a release issue's ready label is the release train's go-ahead, never a build", async () => {
+  const t = setup();
+  t.github.add(OWNER, NAME, 350, "Ship 4.0.0", ["isobot:ready"], "## isobot release train\n\nVersion **4.0.0** goes to TestFlight");
+  t.github.add(OWNER, NAME, 351, "Release 4.0.0 to the App Store", ["isobot:ready"], "## isobot weekly App Store release\n\nTestFlight build");
+  await cycle(t.pipeline);
+  assert.equal(t.store.get(`${REPO}#350`), null);
+  assert.equal(t.store.get(`${REPO}#351`), null);
+  assert.ok(t.github.get(OWNER, NAME, 350).labels.includes("isobot:ready"), "the label stays for the train to read");
+});
