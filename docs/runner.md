@@ -599,6 +599,11 @@ TestFlight crash submissions every 6 hours, files each new crash group that affe
 `isobot:proposed` bug in the app's repo, and adds a **Crashes** section to the daily check-in. See
 [Crash audit](crashes.md).
 
+## Play rollouts
+
+With `"playRollout": {}`, the runner moves staged Google Play production rollouts forward on its own (20% for 2 days,
+50% for 5, then everyone) and halts one when the new version brings crashes. See [Play rollouts](play-rollout.md).
+
 ## Builder sandbox
 
 Builders run with Claude Code's shell sandbox on. It allows writes to the

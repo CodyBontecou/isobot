@@ -7,6 +7,7 @@ import { AppAnalytics } from "./analytics.js";
 import { GoogleAuth, PlayPublisher } from "./google.js";
 import { PlayAnalytics, ratingsText } from "./playAnalytics.js";
 import { CrashAudit } from "./crashes.js";
+import { PlayRollout, planText } from "./playRollout.js";
 import type { CheckReport } from "./policy.js";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -70,6 +71,8 @@ interface Runtime {
   playAnalytics: PlayAnalytics | null;
   /** Crashes from Google Play, the App Store and TestFlight (crashes.ts); off without config.crashes. */
   crashes: CrashAudit;
+  /** Staged Play production rollouts moved forward on their own (playRollout.ts); null without config.playRollout. */
+  playRollout: PlayRollout | null;
   /** Runner secrets and state, for settings that keep agents out of them. */
   secrets: string[];
   /** Messages carrying a 💻 (Herdr handoff), when it's on. */
@@ -207,6 +210,9 @@ function runtime(): Runtime {
     google: googleAuth,
     notify: (text, reactions) => notifier.discord(text, reactions),
   });
+  const playRollout = googleAuth && config.playRollout
+    ? new PlayRollout({ config, store, google: googleAuth, notify: text => notifier.discord(text) })
+    : null;
   const asoDiscord = env.discordBot ? new DiscordApi(env.discordBot.token) : null;
   let asoOwners: Promise<Set<string>> | null = null;
   const aso = new AsoTrain({
@@ -224,7 +230,7 @@ function runtime(): Runtime {
       return { ok: result.code === 0 && !result.timedOut, stdout: result.stdout, stderr: result.stderr };
     },
   });
-  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, content, aso, analytics, playAnalytics, crashes, secrets, handoff };
+  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, content, aso, analytics, playAnalytics, crashes, playRollout, secrets, handoff };
 }
 
 /** ASO Tracker's CLI: one JSON call per tool; it starts the tracker's daemon itself when it isn't running. */
@@ -338,6 +344,8 @@ async function loop(rt: Runtime): Promise<void> {
   let analyticsRunning = false;
   let lastCrashes = 0;
   let crashesRunning = false;
+  let lastRollout = 0;
+  let rolloutRunning = false;
   let cycleStartedAt: number | null = null;
   if (rt.env.heartbeatUrl) {
     const url = rt.env.heartbeatUrl;
@@ -380,6 +388,8 @@ async function loop(rt: Runtime): Promise<void> {
     if (rt.analytics.apps().length) items.push(every("analytics", "App Store analytics", ANALYTICS_EVERY_MS, lastAnalytics, analyticsRunning));
     if (rt.crashes.enabled()) items.push(every("crashes", "Crash audit", CRASHES_EVERY_MS, lastCrashes, crashesRunning,
       `${rt.crashes.playApps().length} Play, ${rt.crashes.iosApps().length} App Store apps; stores read every 6 h`));
+    if (rt.playRollout?.enabled()) items.push(every("play-rollout", "Play rollouts", CRASHES_EVERY_MS, lastRollout, rolloutRunning,
+      `${rt.playRollout.apps().length} Play apps; production checked every 3 h`));
     const checkInHour = rt.config.chat?.checkInHour;
     if (chat && typeof checkInHour === "number") items.push({ id: "check-in", name: "Daily check-in", cadence: `daily at ${String(checkInHour).padStart(2, "0")}:00`,
       lastAt: null, nextAt: nextDailyAt(now, checkInHour).toISOString(), running: false, detail: "staff channel" });
@@ -457,6 +467,13 @@ async function loop(rt: Runtime): Promise<void> {
           void rt.crashes.tick().then(({ filed }) => { if (filed.length) console.log(`[crashes] opened ${filed.length} issue(s)`); })
             .catch(error => console.warn(`[crashes] failed: ${(error as Error).message}`))
             .finally(() => { crashesRunning = false; });
+        }
+        if (!rolloutRunning && Date.now() - lastRollout > CRASHES_EVERY_MS && rt.playRollout?.enabled()) {
+          lastRollout = Date.now();
+          rolloutRunning = true;
+          // Reads Play at most every 3 hours itself; a failure is posted once and retried, never thrown.
+          void rt.playRollout.tick().catch(error => console.warn(`[rollout] failed: ${(error as Error).message}`))
+            .finally(() => { rolloutRunning = false; });
         }
         if (!triageRunning && Date.now() - lastTriage > rt.config.triageMinutes * 60_000) {
           lastTriage = Date.now();
@@ -740,6 +757,9 @@ const HELP = `isobot runner
   analytics [sync | checkin | <app> [days]]
                       Download new App Store analytics reports now, print the check-in's App Store section,
                       or print an app's daily numbers (default: every app's last 7 days)
+  play rollout [run | resume <package>]
+                      Print what the Play rollout train would do with each staged production rollout (default),
+                      do it now (run), or resume a rollout it halted, accepting the crashes it halted for (resume)
   crashes [sync | checkin]
                       Read Google Play, App Store and TestFlight crashes now and open issues for new ones (sync),
                       or print the check-in's crash section (checkin, the default)`;
@@ -934,6 +954,27 @@ async function main(): Promise<void> {
       }
       const { lines, flags } = rt.crashes.checkIn();
       console.log([...flags, ...lines].join("\n") || "(no crashes recorded: run `crashes sync`)");
+      return;
+    }
+    case "play": {
+      const [what, action, pkg] = process.argv.slice(3);
+      if (what !== "rollout") { console.error("usage: play rollout [run | resume <package>]"); process.exitCode = 2; return; }
+      if (!rt.playRollout?.enabled()) {
+        console.error("Play rollouts are off: add \"playRollout\": {} (and a Play app's aso.play, with aso.googleKey) to the runner config.");
+        process.exitCode = 2;
+        return;
+      }
+      if (action === "resume") {
+        if (!pkg) { console.error("usage: play rollout resume <package>"); process.exitCode = 2; return; }
+        console.log(await rt.playRollout.resume(pkg));
+        return;
+      }
+      if (action === "run") {
+        for (const [i, plan] of (await rt.playRollout.tick(true)).entries()) console.log(planText(rt.playRollout.apps()[i].pkg, plan));
+        return;
+      }
+      // Read-only: what the next pass would do.
+      for (const app of rt.playRollout.apps()) console.log(planText(app.pkg, await rt.playRollout.plan(app.pkg).catch(error => ({ action: "none" as const, why: `error: ${(error as Error).message}` }))));
       return;
     }
     case "analytics": {
