@@ -45,6 +45,7 @@
   },
   "analytics": {},
   "crashes": { "autoApprove": true },
+  "playRollout": {},
   "labels": {
     "proposed": "isobot:proposed",
     "ready": "isobot:ready",

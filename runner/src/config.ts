@@ -169,6 +169,15 @@ export interface CrashLimits {
   autoApprove?: boolean;
 }
 
+export interface PlayRolloutLimits {
+  /** Rollout fractions in order, ending at 1 (everyone). Default [0.2, 0.5, 1]. */
+  stages?: number[];
+  /** Days a release stays at each stage before the next, one per stage but the last. Default [2, 5]. */
+  holdDays?: number[];
+  /** A crash or ANR cluster new in the version halts the rollout once it reaches this many users. Default 2. */
+  minUsers?: number;
+}
+
 export interface AsoLimits {
   /** The ASO Tracker CLI: an installed app's `Contents/Resources/aso`, or a checkout's `bin/aso.mjs`. */
   cli: string;
@@ -283,6 +292,8 @@ export interface RunnerConfig {
   analytics?: AnalyticsLimits;
   /** The crash audit (crashes.ts): App Store, TestFlight and Google Play crashes. Off without this block. */
   crashes?: CrashLimits;
+  /** The Play rollout train (playRollout.ts): staged production rollouts move forward on their own. Off without this block. */
+  playRollout?: PlayRolloutLimits;
   /** 💻 on isobot's Discord messages opens the conversation in the owner's local Herdr (handoff.ts). */
   handoff?: HandoffConfig;
   defaults: RepoPolicy;
@@ -431,6 +442,13 @@ export function validateConfig(config: RunnerConfig): void {
     if (c.issuesPerPass !== undefined && !(Number.isInteger(c.issuesPerPass) && c.issuesPerPass >= 0 && c.issuesPerPass <= 20)) fail("crashes.issuesPerPass must be 0-20");
     if (c.fileIssues !== undefined && typeof c.fileIssues !== "boolean") fail("crashes.fileIssues must be true or false");
     if (c.autoApprove !== undefined && typeof c.autoApprove !== "boolean") fail("crashes.autoApprove must be true or false");
+  }
+  if (config.playRollout) {
+    const r = config.playRollout;
+    if (r.stages !== undefined && !(Array.isArray(r.stages) && r.stages.length >= 1 && r.stages.every((x, i) => typeof x === "number" && x > 0 && x <= 1 && (i === 0 || x > r.stages![i - 1])) && r.stages[r.stages.length - 1] === 1)) fail("playRollout.stages must be rising fractions above 0 that end at 1");
+    const stages = r.stages ?? [0.2, 0.5, 1];
+    if (r.holdDays !== undefined && !(Array.isArray(r.holdDays) && r.holdDays.length === stages.length - 1 && r.holdDays.every(d => typeof d === "number" && d >= 0 && d <= 30))) fail("playRollout.holdDays needs one number of days (0-30) per stage but the last");
+    if (r.minUsers !== undefined && !(Number.isInteger(r.minUsers) && r.minUsers >= 1)) fail("playRollout.minUsers must be a whole number of at least 1");
   }
   if (config.handoff) {
     const h = config.handoff;
