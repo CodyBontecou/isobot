@@ -9,7 +9,9 @@ import { asoApps, validateConfig } from "./config.js";
 import { AsoTrain, reportText, type AsoClient } from "./aso.js";
 import { GoogleAuth, PlayPublisher, type Fetch, type PlayListing } from "./google.js";
 import { parsePlayProposal, promoProblems, stuffedWords } from "./play.js";
-import { decodeReport, parseCsv, parseInstalls, parseSales, parseStorePerformance, PlayAnalytics, playWeekText, unzip } from "./playAnalytics.js";
+import { decodeReport, parseCsv, parseInstalls, parseRatings, parseSales, parseStorePerformance, PlayAnalytics, playRatings, playWeekText, ratingsText, unzip } from "./playAnalytics.js";
+import { formatCheckIn, type NeedsMe } from "./chatTools.js";
+import { buildMetrics } from "./metrics.js";
 import { beforeAfterText } from "./analytics.js";
 import { Store } from "./store.js";
 import { FakeGitHub, FakeRepo, testConfig } from "./testing.js";
@@ -335,4 +337,44 @@ test("the weekly Play line needs a whole week, and before/after calls thin sampl
   assert.equal(playWeekText([{ day: "2026-11-01", m: { visitors: 1 } }], []), null);
   assert.match(beforeAfterText({ visits: 700, installs: 140, paid: 7, days: 28 }, { visits: 700, installs: 210, paid: 14, days: 28 }), /^per day 5 → 7.5 installs, 25 → 25 page visits, conversion 20% → 30%, paid 0.3 → 0.5 \(28 days before, 28 after\)$/);
   assert.match(beforeAfterText({ visits: 70, installs: 10, paid: 0, days: 28 }, { visits: 70, installs: 12, paid: 0, days: 10 }), /inconclusive/);
+});
+
+const RATINGS = "Date,Package Name,Daily Average Rating,Total Average Rating\n"
+  + ["2026-11-01,md.vox.android,0.0,3.8095", "2026-11-02,md.vox.android,5.0,3.913", "2026-11-03,md.vox.android,0.0,3.913",
+    "2026-11-06,md.vox.android,1.0,3.75", "2026-11-07,md.vox.android,0.0,3.75"].join("\n");
+
+test("Play ratings report: 0.0 is a day without ratings, and no count is made up", () => {
+  const days = parseRatings(parseCsv(decodeReport(utf16(RATINGS))));
+  assert.deepEqual(days.get("2026-11-02"), { ratingDaily: 5, ratingTotal: 3.913 });
+  assert.deepEqual(parseRatings(parseCsv("Date,Daily Average Rating,Total Average Rating\n2026-11-01,0.0,0.0")).get("2026-11-01"), { ratingDaily: 0 }, "an overall 0 is no ratings yet");
+  const r = playRatings([...days].map(([day, m]) => ({ day, m })))!;
+  assert.deepEqual(r, { through: "2026-11-07", total: 3.75, ratedDays7: 2, ratedDays30: 2, latest: { day: "2026-11-06", average: 1 } });
+  assert.equal(ratingsText(r), "overall 3.75★ (Play's report to 11-07); new ratings on 2 of the last 30 days, the latest 11-06 averaging 1★");
+  assert.equal(playRatings([{ day: "2026-11-01", m: { visitors: 3 } }]), null);
+  const week = Array.from({ length: 7 }, (_, i) => ({ day: `2026-11-0${i + 1}`, m: { visitors: 10, acquisitions: 1, ...(days.get(`2026-11-0${i + 1}`) ?? {}) } }));
+  assert.match(playWeekText(week, [])!, /rating 3\.75★ overall, new ratings on 2 of the 5 days Play's ratings report covers$/);
+});
+
+test("Play ratings reach the check-in (a low day flags once) and the board's Play funnel", async () => {
+  const google = new FakeGoogle();
+  const store = new Store(":memory:");
+  const now = new Date("2026-11-10T12:00:00");
+  const pa = new PlayAnalytics({ store, auth: new GoogleAuth(KEY, google.fetch), bucket: "pubsite_prod_1", packages: () => ["md.vox.android", "com.other.app"], now: () => now });
+  google.objects["stats/ratings/ratings_md.vox.android_202611_overview.csv"] = { generation: "1", data: utf16(RATINGS) };
+  google.objects["stats/ratings/ratings_md.vox.android_202607_overview.csv"] = { generation: "1", data: utf16("Date,Daily Average Rating,Total Average Rating\n2026-07-01,4.0,4.0") };
+  await pa.tick();
+  assert.equal(pa.days("md.vox.android", "2026-07-01", "2026-07-31").length, 1, "reads ratings months back for the board");
+  const first = pa.checkIn();
+  assert.deepEqual(first.flags, ["⭐ md.vox.android: new Google Play ratings on 11-06 averaged 1★"]);
+  assert.match(first.lines[0], /^\*\*md\.vox\.android\*\*: overall 3\.75★/);
+  assert.match(first.lines[1], /com\.other\.app\*\*: no ratings report from Play yet/);
+  assert.deepEqual(pa.checkIn().flags, [], "a low day is flagged once");
+
+  const quiet: NeedsMe = { review: [], ship: [], failed: [], releaseFailed: [], proposals: [], runner: { paused: false, usageLimitPauseUntil: null, lastCycleError: null } };
+  assert.equal(formatCheckIn(quiet, [], undefined, undefined, { lines: first.lines, flags: [] }), null, "rating lines alone don't post a check-in");
+  const posted = formatCheckIn(quiet, [], undefined, undefined, first)!;
+  assert.match(posted, /\*\*Google Play ratings\*\*\n⭐ md\.vox\.android.*\n- \*\*md\.vox\.android\*\*: overall 3\.75★/);
+
+  const play = buildMetrics(testConfig(), store, now).apps.find(a => a.store === "play" && a.id === "md.vox.android")!;
+  assert.deepEqual(play.funnel.find(d => d.day === "2026-11-02")?.v, { ratingDaily: 5, ratingTotal: 3.913 });
 });

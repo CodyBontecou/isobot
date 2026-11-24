@@ -491,7 +491,7 @@ export class StaffChat {
     if (now.getHours() !== hour || this.state.checkInDate === today) return;
     this.state.checkInDate = today;
     this.save();
-    const text = formatCheckIn(await needsMe(this.o.tools), this.o.tools.store.all(50), this.appNumbers(), this.crashNumbers());
+    const text = formatCheckIn(await needsMe(this.o.tools), this.o.tools.store.all(50), this.appNumbers(), this.crashNumbers(), this.ratingNumbers());
     const posted = text ? await this.say(this.o.channelId, text) : null;
     if (posted && this.o.handoff) {
       this.o.handoff.add(this.o.channelId, posted, { kind: "message" });
@@ -515,6 +515,16 @@ export class StaffChat {
       return this.o.tools.crashes?.checkIn();
     } catch (error) {
       console.warn(`[chat] check-in crashes: ${(error as Error).message}`);
+      return undefined;
+    }
+  }
+
+  /** The check-in's Google Play ratings section; a failure leaves it out rather than the whole check-in. */
+  private ratingNumbers() {
+    try {
+      return this.o.tools.playRatings?.checkIn();
+    } catch (error) {
+      console.warn(`[chat] check-in Play ratings: ${(error as Error).message}`);
       return undefined;
     }
   }

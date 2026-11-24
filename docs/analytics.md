@@ -77,6 +77,20 @@ from the account's sales report (`sales/salesreport_<month>.zip`: first orders, 
 number, refunds, and charged amounts by buyer currency, since Play doesn't convert them). Files are UTF-16 CSV and
 read by column name; only files whose generation changed are downloaded again.
 
+Ratings come from `stats/ratings/…_overview.csv`: per day, the average of that day's new ratings (0.0 when there
+were none) and the app's overall average. Play gives no count of ratings, so isobot reports the overall average,
+the days with new ratings (in the last 7 and 30 days of the report, which lags the others by a few days) and the
+newest day's average, never a number of ratings. Play writes no ratings file before an app's first rating. The
+overall average in the report can move back and forth between days (Play restates it); it's shown as Play gives it.
+Ratings are read for the last 5 months so the board's 120 days are covered.
+
+- **Daily check-in**: a **Google Play ratings** section with a line per Play app (or "no ratings report yet").
+  Lines ride along; a day in the last 14 whose new ratings averaged 2★ or less posts a check-in on its own,
+  once per day (`playstats:<package>:lowrating:<date>`).
+- **Board**: the Growth view's Play funnel carries `ratingDaily` and `ratingTotal`; each repo shows a
+  "Google Play rating" chart and a "Play rating" tile.
+- **Weekly ASO report**: the Google Play line adds the overall rating and the days with new ratings.
+
 It feeds the weekly ASO report's Google Play section and the Play listing research. A 403 (Play shares the bucket
 with a newly invited account within about a day) is kept in `playstats:error`, shown in the report instead of the
 numbers, and retried each pass. State: `playstats:<package>:day:<date>` (kept 400 days) and `playstats:gen:<file>`.
@@ -84,4 +98,5 @@ numbers, and retried each pass. State: `playstats:<package>:day:<date>` (kept 40
 ```sh
 npm run runner -- analytics play sync   # read Play Console's reports now
 npm run runner -- analytics play        # each Play app's week, or why the reports can't be read
+npm run runner -- analytics play ratings  # each Play app's ratings
 ```

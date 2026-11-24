@@ -11,6 +11,9 @@ import type { Store } from "./store.js";
  *   - stats/installs/installs_<pkg>_<YYYYMM>_overview.csv: daily user installs and uninstalls
  *   - stats/store_performance/store_performance_<pkg>_<YYYYMM>_traffic_source.csv: store listing visitors and
  *     acquisitions by traffic source (Google Play search, explore, third-party referrals)
+ *   - stats/ratings/ratings_<pkg>_<YYYYMM>_overview.csv: the average of the day's new ratings (0 when there were
+ *     none) and the app's overall average. Play gives no count of ratings, and writes no file before an app's first
+ *     rating
  *   - sales/salesreport_<YYYYMM>.zip: orders across the account (charged, refunded), by product
  *
  * The files are monthly and Google rewrites the current month's every day or so; each pass re-reads only files
@@ -34,6 +37,10 @@ export interface PlayDay {
   refunds?: number;
   /** Charged amounts by the buyer's currency (Play's sales report doesn't convert). */
   charged?: Record<string, number>;
+  /** Play's average of the star ratings left that day; 0 means no new ratings that day (Play reports no count). */
+  ratingDaily?: number;
+  /** Play's overall average rating as of that day. */
+  ratingTotal?: number;
 }
 
 export interface PlayAnalyticsDeps {
@@ -47,6 +54,12 @@ export interface PlayAnalyticsDeps {
 
 const SYNC_EVERY_MS = 6 * 3_600_000;
 const KEEP_DAYS = 400;
+/** Months of the ratings report read (one small file a month), enough for the board's 120 days. */
+const RATING_MONTHS = 5;
+/** A day whose new ratings average this or lower is flagged in the check-in. */
+export const LOW_RATING = 2;
+/** Only days this recent are flagged, so a first backfill doesn't flag old ones. */
+const LOW_RATING_RECENT_DAYS = 14;
 
 /** Report bytes → text: UTF-16 (with or without BOM, as Play writes it) or UTF-8. */
 export function decodeReport(data: Buffer): string {
@@ -118,6 +131,57 @@ export function parseInstalls(rows: Record<string, string>[]): Map<string, PlayD
     days.set(day, { userInstalls: num(col(r, "daily user installs")), userUninstalls: num(col(r, "daily user uninstalls")) });
   }
   return days;
+}
+
+/** ratings_…_overview.csv → day → Play's daily average of new ratings (0: none that day) and its overall average. */
+export function parseRatings(rows: Record<string, string>[]): Map<string, PlayDay> {
+  const days = new Map<string, PlayDay>();
+  for (const r of rows) {
+    const day = reportDay(col(r, "date"));
+    if (!day) continue;
+    const d: PlayDay = { ratingDaily: num(col(r, "daily average rating")), ratingTotal: num(col(r, "total average rating")) };
+    // An overall average of 0 is "no ratings yet", not a zero-star app.
+    if (!d.ratingTotal) delete d.ratingTotal;
+    days.set(day, d);
+  }
+  return days;
+}
+
+/** One Play app's ratings, from the ratings report's days. */
+export interface PlayRatings {
+  /** The newest day in the ratings report. */
+  through: string;
+  /** Play's overall average on that day. */
+  total: number | null;
+  /** Days with at least one new rating, in the 7 and 30 days ending at `through` (Play reports no count). */
+  ratedDays7: number;
+  ratedDays30: number;
+  /** The newest day with new ratings, and their average. */
+  latest: { day: string; average: number } | null;
+}
+
+export function playRatings(days: { day: string; m: PlayDay }[]): PlayRatings | null {
+  const rated = days.filter(d => d.m.ratingDaily !== undefined || d.m.ratingTotal !== undefined);
+  const through = rated.at(-1)?.day;
+  if (!through) return null;
+  const since = (n: number) => addDays(through, -(n - 1));
+  const withNew = rated.filter(d => (d.m.ratingDaily ?? 0) > 0);
+  const last = withNew.at(-1);
+  return {
+    through,
+    total: [...rated].reverse().find(d => d.m.ratingTotal !== undefined)?.m.ratingTotal ?? null,
+    ratedDays7: withNew.filter(d => d.day >= since(7)).length,
+    ratedDays30: withNew.filter(d => d.day >= since(30)).length,
+    latest: last ? { day: last.day, average: last.m.ratingDaily! } : null,
+  };
+}
+
+const stars = (n: number) => `${(Math.round(n * 100) / 100).toString()}★`;
+
+/** "overall 3.96★ (Play's report to 11-12); new ratings on 2 of the last 30 days, the latest 11-06 averaging 5★". */
+export function ratingsText(r: PlayRatings): string {
+  const latest = r.latest ? `, the latest ${r.latest.day.slice(5)} averaging ${stars(r.latest.average)}` : "";
+  return `overall ${r.total === null ? "—" : stars(r.total)} (Play's report to ${r.through.slice(5)}); new ratings on ${r.ratedDays30} of the last 30 days${latest}`;
 }
 
 /**
@@ -240,6 +304,12 @@ export function playWeekText(thisWeek: { day: string; m: PlayDay }[], lastWeek: 
     parts.push(`${item("first orders", a.newOrders, b?.newOrders)}${a.orders > a.newOrders ? `, ${a.orders - a.newOrders} renewals` : ""}${a.refunds ? `, ${a.refunds} refunds` : ""}`);
     if (Object.keys(a.charged).length) parts.push(`charged ${money(a.charged)}`);
   }
+  const ratings = playRatings(thisWeek);
+  if (ratings) {
+    // The ratings report lags the others, so only the days it covers are counted.
+    const covered = thisWeek.filter(d => d.m.ratingDaily !== undefined).length;
+    parts.push(`rating ${ratings.total === null ? "—" : stars(ratings.total)} overall, new ratings on ${ratings.ratedDays7} of the ${covered} day${covered === 1 ? "" : "s"} Play's ratings report covers`);
+  }
   const span = `${thisWeek[0].day.slice(5)}–${thisWeek.at(-1)!.day.slice(5)}`;
   return `**Google Play analytics** (${span}${b ? ", vs the 7 days before" : ""}): ${parts.join(" · ")}`;
 }
@@ -282,6 +352,10 @@ export class PlayAnalytics {
       const d = new Date(this.now().getFullYear(), this.now().getMonth() - back, 15);
       return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}`;
     });
+    const ratingMonths = Array.from({ length: RATING_MONTHS }, (_, back) => {
+      const d = new Date(this.now().getFullYear(), this.now().getMonth() - back, 15);
+      return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}`;
+    });
     let read = 0;
     const fresh = async (name: string, generation: string): Promise<Buffer | null> => {
       const k = `playstats:gen:${name}`;
@@ -292,12 +366,13 @@ export class PlayAnalytics {
       return data;
     };
     for (const pkg of this.deps.packages()) {
-      for (const [prefix, suffix, parse] of [
-        [`stats/installs/installs_${pkg}_`, "_overview.csv", parseInstalls],
-        [`stats/store_performance/store_performance_${pkg}_`, "_traffic_source.csv", parseStorePerformance],
+      for (const [prefix, suffix, parse, within] of [
+        [`stats/installs/installs_${pkg}_`, "_overview.csv", parseInstalls, months],
+        [`stats/store_performance/store_performance_${pkg}_`, "_traffic_source.csv", parseStorePerformance, months],
+        [`stats/ratings/ratings_${pkg}_`, "_overview.csv", parseRatings, ratingMonths],
       ] as const) {
         for (const o of await listObjects(auth, bucket, prefix)) {
-          if (!o.name.endsWith(suffix) || !months.some(m => o.name.includes(`_${m}_`))) continue;
+          if (!o.name.endsWith(suffix) || !within.some(m => o.name.includes(`_${m}_`))) continue;
           const data = await fresh(o.name, o.generation);
           if (data) this.merge(pkg, parse(parseCsv(decodeReport(data))));
         }
@@ -318,6 +393,8 @@ export class PlayAnalytics {
     for (const pkg of followed) {
       const prefix = this.key(pkg, "day:");
       for (const { key } of store.cursorsWithPrefix(prefix)) if (key.slice(prefix.length) < oldest) store.deleteCursor(key);
+      const flagged = this.key(pkg, "lowrating:");
+      for (const { key } of store.cursorsWithPrefix(flagged)) if (key.slice(flagged.length) < oldest) store.deleteCursor(key);
     }
     return read;
   }
@@ -353,6 +430,35 @@ export class PlayAnalytics {
       return error ? `**Google Play analytics**: not available yet. ${error}.` : null;
     }
     return playWeekText(this.days(pkg, addDays(day, -6), day), this.days(pkg, addDays(day, -13), addDays(day, -7)));
+  }
+
+  /** One app's ratings from Play's ratings report, or null when Play has written none (no ratings yet). */
+  ratings(pkg: string): PlayRatings | null {
+    return playRatings(this.days(pkg));
+  }
+
+  /**
+   * The daily check-in's Google Play ratings section: a line per app, and a flag (posted on its own) for each
+   * recent day whose new ratings averaged LOW_RATING★ or less, once per day.
+   */
+  checkIn(): { lines: string[]; flags: string[] } {
+    const lines: string[] = [];
+    const flags: string[] = [];
+    const recent = addDays(localDay(this.now()), -LOW_RATING_RECENT_DAYS);
+    for (const pkg of this.deps.packages()) {
+      const r = this.ratings(pkg);
+      lines.push(`**${pkg}**: ${r ? ratingsText(r) : "no ratings report from Play yet (it writes one after the first rating)"}`);
+      for (const { day, m } of this.days(pkg, recent)) {
+        if (m.ratingDaily === undefined || m.ratingDaily <= 0 || m.ratingDaily > LOW_RATING) continue;
+        const k = this.key(pkg, `lowrating:${day}`);
+        if (this.deps.store.cursor(k)) continue;
+        this.deps.store.setCursor(k, this.now().toISOString());
+        flags.push(`⭐ ${pkg}: new Google Play ratings on ${day.slice(5)} averaged ${stars(m.ratingDaily)}`);
+      }
+    }
+    const error = this.status();
+    if (error && !lines.some(l => !l.includes("no ratings report"))) return { lines: [`Google Play's reports can't be read: ${error}`], flags };
+    return { lines, flags };
   }
 
   /** A listing change's before/after, for the research prompt. */
