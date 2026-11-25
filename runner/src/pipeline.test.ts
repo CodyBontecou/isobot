@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { RunnerConfig } from "./config.js";
 import { Notifier } from "./notify.js";
-import { buildTask, leaseMarker, parseBlockers, Pipeline, slug } from "./pipeline.js";
+import { alreadyDone, buildTask, leaseMarker, parseBlockers, Pipeline, slug } from "./pipeline.js";
 import type { CheckReport } from "./policy.js";
 import { Store } from "./store.js";
 import { DISCORD_REPLY_MARKER } from "./notes.js";
@@ -220,6 +220,71 @@ test("no changes from the builder fails the job with its explanation", async () 
   assert.equal(store.get("codybontecou/time.md#12")!.state, "failed");
   assert.deepEqual(github.get(OWNER, NAME, 12).labels, ["isobot:failed"]);
   assert.match(github.commentsFor(OWNER, NAME, 12).at(-1)!, /made no changes[\s\S]*design decision about X/);
+});
+
+test("a builder that finds the issue already done closes it as completed instead of failing", async () => {
+  const { github, pipeline, store, repo, builder } = setup();
+  repo.changes = false;
+  builder.implementResult = { ok: true, sessionId: "s", summary: "Already done: 4f2a1c9 guards the nil URL in Export.swift:88; the regression test passes." };
+  github.add(OWNER, NAME, 13, "Android crash in Export", ["isobot:ready"]);
+  await cycle(pipeline);
+  assert.equal(store.get("codybontecou/time.md#13")!.state, "closed");
+  assert.deepEqual(github.get(OWNER, NAME, 13).labels, [], "neither failed nor building");
+  assert.equal(github.closedAs.get("codybontecou/time.md#13"), "completed");
+  assert.match(github.commentsFor(OWNER, NAME, 13).at(-1)!, /already done on the default branch[\s\S]*4f2a1c9/);
+});
+
+test("alreadyDone reads the marker and the plain words builders used before it", () => {
+  assert.ok(alreadyDone("Already done: the guard is in Foo.kt:12"));
+  assert.ok(alreadyDone("**Already done:** see abc123"));
+  // Real builder answers on Health.md crash issues #422, #423 and #439.
+  assert.ok(alreadyDone("I made no code changes. The crash in issue #422 is already fixed on `main`, and builds that contain the fix have shipped."));
+  assert.ok(alreadyDone("I made no changes: this ANR is already fixed on `main`, and a regression test for it is already there."));
+  assert.ok(alreadyDone("I made no changes: this crash is already fixed on `main`. The fix just hasn't been released yet."));
+  assert.ok(!alreadyDone("This needs a design decision about X."));
+  assert.ok(!alreadyDone("The settings screen is already done in the mock, but the export needs a new API on the server."));
+});
+
+test("a device that stops under the checks is booted again and the checks rerun, without a fix round", async () => {
+  const devices = new FakeDevices();
+  const { github, pipeline, builder, checkCalls, store } = setup(config => {
+    config.repos[REPO] = { autonomy: "merge", checks: ["make test"], requireCi: false, devices: { android: { avd: "isobot-api35" } } };
+  }, [{ configured: true, passed: false, results: [{ command: "make test", ok: false, output: "Connected device with serial 'emulator-5600' not found" }] }], undefined, devices);
+  // Up for the pre-check look, gone after the first run (the reaper took it), then up again.
+  devices.down = [false, true];
+  github.add(OWNER, NAME, 34, "Fix the widget", ["isobot:ready"]);
+  await cycle(pipeline);
+
+  assert.equal(checkCalls.length, 2, "the checks ran again on the revived device");
+  assert.equal(builder.reviseFeedback.length, 0, "the builder wasn't asked to fix a missing device");
+  assert.deepEqual(github.merged, [100]);
+  assert.equal(devices.revived, 1);
+  assert.ok(store.events("codybontecou/time.md#34").some(e => e.kind === "devices_revived"));
+});
+
+test("devices that keep stopping retry the job later and keep the builder's work", async () => {
+  const devices = new FakeDevices();
+  const failing = { configured: true, passed: false, results: [{ command: "make test", ok: false, output: "device not found" }] };
+  const { github, pipeline, builder, store } = setup(config => {
+    config.repos[REPO] = { autonomy: "merge", checks: ["make test"], requireCi: false, devices: { android: { avd: "isobot-api35" } } };
+  }, [failing, failing, failing], undefined, devices);
+  devices.down = [false, true, true, true];
+  github.add(OWNER, NAME, 35, "Fix the widget", ["isobot:ready"]);
+  await cycle(pipeline);
+
+  const job = store.get("codybontecou/time.md#35")!;
+  assert.equal(job.state, "queued", "a temporary problem, not a failure");
+  assert.equal(builder.implementCalls, 1);
+  assert.equal(builder.reviseFeedback.length, 0);
+
+  // The retry runs checks and review on the kept commit; the builder doesn't start over.
+  devices.down = [];
+  // The backoff is on the wall clock (Store.requeue); make the retry due now.
+  (store as unknown as { db: { prepare(sql: string): { run(...a: unknown[]): void } } }).db
+    .prepare("UPDATE jobs SET not_before = NULL WHERE id = ?").run("codybontecou/time.md#35");
+  await cycle(pipeline);
+  assert.equal(builder.implementCalls, 1, "no second implement");
+  assert.deepEqual(github.merged, [100]);
 });
 
 test("the stop label prevents claiming and stops a queued job", async () => {
@@ -721,10 +786,20 @@ class FakeDevices implements Devices {
   leased: { jobId: string; spec: DeviceSpec }[] = [];
   released = 0;
   fail?: Error;
+  /** Answers to successive revive() calls: true means a device was down and got booted again. */
+  down: boolean[] = [];
+  revived = 0;
   async lease(jobId: string, spec: DeviceSpec) {
     if (this.fail) throw this.fail;
     this.leased.push({ jobId, spec });
-    return { env: { ISOBOT_IOS_SIMULATOR: "SIM-1" }, describe: () => "- iOS simulator: SIM-1", release: async () => { this.released++; } };
+    return {
+      env: { ISOBOT_IOS_SIMULATOR: "SIM-1" }, describe: () => "- iOS simulator: SIM-1", release: async () => { this.released++; },
+      revive: async () => {
+        if (!this.down.shift()) return [];
+        this.revived++;
+        return ["Android emulator emulator-5600 → emulator-5602"];
+      },
+    };
   }
   async cleanupStale() {}
 }

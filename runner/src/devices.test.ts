@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { ANDROID_PORTS, emulatorArgs, emulatorExitError, emulatorSerials, freePort, LocalDevices, LOCKED_AVD_RETRY_MS, LOW_DISK_RETRY_MS, simulatorName, staleSimulators, type Exec } from "./devices.js";
+import { ANDROID_PORTS, emulatorArgs, emulatorExitError, emulatorSerials, freePort, LocalDevices, LOCKED_AVD_RETRY_MS, LOW_DISK_RETRY_MS, simulatorName, simulatorState, staleSimulators, type Exec } from "./devices.js";
 import { TransientError } from "./errors.js";
 import type { RunResult } from "./proc.js";
 
@@ -38,6 +38,36 @@ test("an iOS lease creates and boots a fresh simulator, and release deletes it",
     `xcrun simctl shutdown ${UDID}`,
     `xcrun simctl delete ${UDID}`,
   ]);
+});
+
+test("revive boots a fresh simulator when the job's one stopped, and updates the same env in place", async () => {
+  const UDID2 = "99999999-2222-3333-4444-555555555555";
+  const calls: string[] = [];
+  let created = 0;
+  let state = "Booted";
+  const exec: Exec = async (command, args) => {
+    calls.push([command, ...args].join(" "));
+    if (args[1] === "create") return ok(`${created++ ? UDID2 : UDID}\n`);
+    if (args[1] === "list") return ok(JSON.stringify({ devices: { "iOS-27": [{ udid: UDID, state }] } }));
+    return ok();
+  };
+  const lease = await new LocalDevices("/tmp/isobot-test-devices", exec).lease("o/r#3", { ios: { deviceType: "iPhone 17" } });
+  const env = lease.env;
+  assert.deepEqual(await lease.revive!(), [], "a booted simulator is left alone");
+  state = "Shutdown";
+  assert.deepEqual(await lease.revive!(), [`iOS simulator ${UDID} → ${UDID2}`]);
+  assert.equal(env.ISOBOT_IOS_SIMULATOR, UDID2, "checks holding the env see the new device");
+  assert.match(lease.describe(), new RegExp(UDID2));
+  assert.ok(calls.includes(`xcrun simctl delete ${UDID}`), "the stopped one is thrown away");
+  await lease.release();
+  assert.ok(calls.includes(`xcrun simctl delete ${UDID2}`));
+});
+
+test("simulatorState reads a device's state, or null when it's gone", () => {
+  const list = JSON.stringify({ devices: { a: [{ udid: "A", state: "Booted" }], b: [{ udid: "B", state: "Shutdown" }] } });
+  assert.equal(simulatorState(list, "A"), "Booted");
+  assert.equal(simulatorState(list, "B"), "Shutdown");
+  assert.equal(simulatorState(list, "C"), null);
 });
 
 test("a simulator that fails to boot is deleted and reported as transient", async () => {
@@ -94,6 +124,30 @@ test("each job boots its own copy of the template AVD, deleted when the job ends
   assert.equal(existsSync(path.join(android.avdHome, `${job}.avd`)), false);
   assert.equal(existsSync(path.join(android.avdHome, `${job}.ini`)), false);
   assert.ok(existsSync(path.join(android.avdHome, "isobot-api35.avd", "userdata-qemu.img")), "the template is untouched");
+});
+
+test("revive boots the job's emulator again when adb no longer sees it", async () => {
+  const android = fakeAndroid("echo \"$@\" >> \"$(dirname \"$0\")/args\"; sleep 30");
+  let up = true;
+  const exec: Exec = async (_command, args) => {
+    if (args.includes("getprop")) return ok(existsSync(path.join(android.sdk, "emulator", "args")) ? "1\n" : "");
+    if (args.includes("get-state")) return up ? ok("device\n") : { code: 1, stdout: "", stderr: "error: device 'emulator-5600' not found", timedOut: false };
+    return ok("List of devices attached\n");
+  };
+  const devices = new LocalDevices(path.join(android.sdk, "logs"), exec, android.env, () => new Promise(r => setTimeout(r, 20)));
+  const lease = await devices.lease("codybontecou/health-md#440", { android: { avd: "isobot-api35" } });
+  assert.deepEqual(await lease.revive!(), []);
+  up = false;
+  const revived = await lease.revive!();
+  up = true;
+  assert.equal(revived.length, 1);
+  assert.match(revived[0], /^Android emulator emulator-5600 → emulator-56\d\d$/);
+  // The fake reports "booted" once its args file exists, which the first boot already wrote: wait for the second line.
+  const boots = () => readFileSync(path.join(android.sdk, "emulator", "args"), "utf8").trim().split("\n").length;
+  for (let i = 0; i < 100 && boots() < 2; i++) await new Promise(r => setTimeout(r, 20));
+  assert.equal(boots(), 2, "booted a second time");
+  assert.equal(lease.env.ANDROID_SERIAL, revived[0].split(" → ")[1]);
+  await lease.release();
 });
 
 test("startup removes job AVDs a crashed runner left behind, and nothing else", async () => {

@@ -15,6 +15,10 @@ export type EventData =
   | { type: "blocked"; v: 1; on: string[] }
   // Content the gates refused, closed instead of left for the owner (Pipeline.drop).
   | { type: "dropped"; v: 1; reasons: string[] }
+  // The builder found the issue already done on the default branch; it closed as completed (Pipeline.closeAlreadyDone).
+  | { type: "already_done"; v: 1 }
+  // Job devices that stopped mid-job and were booted again before checks (DeviceLease.revive).
+  | { type: "devices_revived"; v: 1; devices: string[] }
   | { type: "claim"; v: 1; runner: string; outcome: "won" | "lost" | "held_elsewhere"; holder?: string };
 
 export type EventType = EventData["type"];
@@ -32,6 +36,8 @@ export function describeEvent(kind: string, detail: string | null, data: EventDa
     case "gate": return data.merge ? "gate: merge" : `gate: left to you (${data.reasons.join("; ")})`;
     case "blocked": return `waiting on ${data.on.join(", ")}`;
     case "dropped": return `dropped: ${data.reasons.join("; ")}`;
+    case "already_done": return "already done on the default branch: closed";
+    case "devices_revived": return `devices booted again: ${data.devices.join("; ")}`;
     case "claim": return `claim ${data.outcome.replace("_", " ")} by ${data.runner}${data.holder ? ` (held by ${data.holder})` : ""}`;
   }
 }

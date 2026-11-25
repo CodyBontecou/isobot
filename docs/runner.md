@@ -294,6 +294,18 @@ long job.
   comment; after five attempts it's marked `isobot:failed`.
 - **Claude usage limit**: all builds pause until the limit resets (or an hour),
   without using up attempts. `status` shows the pause.
+- **Any temporary problem after the builder committed** keeps that commit: the retry runs checks and review on
+  it again instead of building from scratch (`♻️ Trying again after a temporary problem`).
+- **A job device that stopped mid-job** (an idle reaper, memory pressure, someone shutting it down): before every
+  check run the runner asks each leased simulator and emulator whether it is still up, and boots whatever isn't.
+  When checks fail and a device turns out to have gone under them, the checks run again on the revived device
+  instead of sending the builder to fix code that isn't broken (no fix round used). After two such reruns the job
+  retries later, keeping the builder's commit. The timeline shows `devices booted again`. The Mac's `devicepool`
+  watchdog never reaps `isobot-job-*` AVDs or `isobot-*` simulators while the runner's heartbeat is fresh.
+- **Already done**: a builder that finds the issue already done on the default branch (typically a crash fixed by
+  other work and not yet released) makes no changes and says `Already done:` with the commit or code that does it.
+  The issue then closes as completed with that explanation, instead of `isobot:failed`. Reopen it and comment
+  `retry` if it isn't.
 - **Claude Code signed out**: treated as temporary; `doctor` says so.
 - **Restart, crash or reboot**: launchd restarts the runner, and interrupted builds
   pick up where they were. On startup, before clearing workspaces, the runner commits
