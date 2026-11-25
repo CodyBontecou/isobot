@@ -9,6 +9,7 @@ import { Store, type Job } from "./store.js";
 import type { Upload } from "./discordApi.js";
 import { DISCORD_ACTIONS, executeDiscord, layout, prepareDiscord, type DiscordAction, type DiscordAdmin } from "./discordAdmin.js";
 import type { AnalyticsView, CheckInAnalytics } from "./analytics.js";
+import { checkInLines, latestSweep } from "./prSweep.js";
 
 /**
  * What isobot's staff chat can see and do. The chat model gets read-only tools plus one way to act:
@@ -316,6 +317,8 @@ export interface NeedsMe {
   failed: { id: string; title: string; error: string | null }[];
   releaseFailed: { id: string; title: string }[];
   proposals: { repo: string; number: number; title: string }[];
+  /** The PR sweep's lines (prSweep.ts checkInLines): PRs to merge, to land, to close. Missing before the first sweep. */
+  pulls?: string[];
   runner: { paused: boolean; usageLimitPauseUntil: string | null; lastCycleError: string | null };
 }
 
@@ -336,6 +339,7 @@ export async function needsMe(deps: Pick<ChatToolDeps, "store" | "live" | "card"
     failed: deps.store.inState("failed").filter(job => Date.parse(job.updatedAt) > week).map(job => ({ id: job.id, title: job.title, error: job.lastError?.split("\n")[0].slice(0, 200) ?? null })),
     releaseFailed: deps.store.inState("merged").filter(job => job.lastError && Date.parse(job.updatedAt) > week).map(job => ({ id: job.id, title: job.title })),
     proposals: proposals.slice(0, 20),
+    pulls: checkInLines(latestSweep(deps.store)),
     runner: { paused: live.manuallyPaused, usageLimitPauseUntil: deps.store.pausedUntil(), lastCycleError: live.lastCycleError },
   };
 }
@@ -353,6 +357,7 @@ export function formatCheckIn(n: NeedsMe, recent: Job[], apps?: CheckInAnalytics
   section("Failed this week", n.failed.map(f => `${f.id}: ${f.title}${f.error ? ` (${f.error.slice(0, 100)})` : ""}`));
   section("Release failed", n.releaseFailed.map(f => `${f.id}: ${f.title}`));
   section("Proposals awaiting approval", n.proposals.map(p => `${p.repo}#${p.number}: ${p.title}`));
+  section("Pull requests", n.pulls ?? []);
   const day = Date.now() - 86_400_000;
   const done = recent.filter(j => Date.parse(j.updatedAt) > day && ["merged", "released", "shipped"].includes(j.state));
   // App numbers ride along on a check-in; only a flag (a jump, a drop, data that stopped) posts one on its own.

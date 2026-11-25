@@ -169,6 +169,17 @@ export interface CrashLimits {
   autoApprove?: boolean;
 }
 
+export interface PrSweepConfig {
+  /** False turns the sweep off. Default true. */
+  enabled?: boolean;
+  /** Hours between sweeps. Default 6. */
+  everyHours?: number;
+  /** A PR with no activity this many days is called stale. Default 14. */
+  staleDays?: number;
+  /** Close release and ship PRs whose version (or a newer one) is already out. Default true. */
+  closeSuperseded?: boolean;
+}
+
 export interface PlayRolloutLimits {
   /** Rollout fractions in order, ending at 1 (everyone). Default [0.2, 0.5, 1]. */
   stages?: number[];
@@ -312,6 +323,8 @@ export interface RunnerConfig {
   crashes?: CrashLimits;
   /** The Play rollout train (playRollout.ts): staged production rollouts move forward on their own. Off without this block. */
   playRollout?: PlayRolloutLimits;
+  /** The pull request sweep (prSweep.ts): every open PR in the configured repos, sorted into what needs the owner. On by default. */
+  prSweep?: PrSweepConfig;
   /** 💻 on isobot's Discord messages opens the conversation in the owner's local Herdr (handoff.ts). */
   handoff?: HandoffConfig;
   defaults: RepoPolicy;
@@ -370,6 +383,8 @@ export interface Labels {
   auto: string;
   /** Dismiss: the runner removes what it made locally, strips its labels and closes the issue. Default isobot:cleanup. */
   cleanup: string;
+  /** On a pull request: isobot takes it over and brings it to merge (Pipeline.discoverLand). Default isobot:land. */
+  land: string;
   /** Marks content-train issues: they build with the site's content policy. Default isobot:content. */
   content: string;
 }
@@ -418,6 +433,7 @@ export function validateConfig(config: RunnerConfig): void {
   // Added after the others; older configs get the default.
   if (config.labels && !config.labels.cleanup) config.labels.cleanup = "isobot:cleanup";
   if (config.labels && !config.labels.content) config.labels.content = "isobot:content";
+  if (config.labels && !config.labels.land) config.labels.land = "isobot:land";
   for (const key of ["proposed", "ready", "building", "review", "failed", "ship", "stop", "auto"] as const) {
     if (!config.labels?.[key]) fail(`labels.${key} is required`);
   }
@@ -460,6 +476,13 @@ export function validateConfig(config: RunnerConfig): void {
     if (c.issuesPerPass !== undefined && !(Number.isInteger(c.issuesPerPass) && c.issuesPerPass >= 0 && c.issuesPerPass <= 20)) fail("crashes.issuesPerPass must be 0-20");
     if (c.fileIssues !== undefined && typeof c.fileIssues !== "boolean") fail("crashes.fileIssues must be true or false");
     if (c.autoApprove !== undefined && typeof c.autoApprove !== "boolean") fail("crashes.autoApprove must be true or false");
+  }
+  if (config.prSweep) {
+    const s = config.prSweep;
+    if (s.enabled !== undefined && typeof s.enabled !== "boolean") fail("prSweep.enabled must be true or false");
+    if (s.everyHours !== undefined && !(s.everyHours >= 1 && s.everyHours <= 168)) fail("prSweep.everyHours must be 1-168");
+    if (s.staleDays !== undefined && !(Number.isInteger(s.staleDays) && s.staleDays >= 1)) fail("prSweep.staleDays must be a whole number of at least 1");
+    if (s.closeSuperseded !== undefined && typeof s.closeSuperseded !== "boolean") fail("prSweep.closeSuperseded must be true or false");
   }
   if (config.playRollout) {
     const r = config.playRollout;

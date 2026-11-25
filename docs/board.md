@@ -7,12 +7,12 @@ link), and a side pane with a job's full timeline.
 
 | View | Shows |
 | --- | --- |
-| Overview | Runner health, what's building, what needs you (review, failed, proposed, waiting to ship), what runs next, today's events |
+| Overview | Runner health, what's building, what needs you (review, failed, proposed, waiting to ship), the PRs the sweep says need you, what runs next, today's events |
 | Growth | What the scheduled work measures and what it changed, over 30/90/120 days: installs and listing traffic (App Store and Play), Google Play's overall rating and the days with new ratings, search phrases in the top 10, conversion, trials, proceeds, a per-phrase rank table with 7- and 28-day moves, Search Console clicks per week, OpenSEO credits. Listing changes (◆) and published pages (●) are marked on every chart |
 | Tasks | The `isobot:*` label queue as columns (proposed → ready → building → review, failed), plus work merged in the last 7 days |
 | Activity | The runner's event timeline by day (7 days), split into job and runner-level events, with text search |
 | Schedule | Triage, content and ASO trains, analytics, the daily check-in, search and rank reports, release trains, and pending follow-ups |
-| Pull requests / Issues | Open items, and items merged or closed in the last 14 days, across every configured repository |
+| Pull requests / Issues | Open items, and items merged or closed in the last 14 days, across every configured repository. Open PRs carry the PR sweep's verdict (merge, land, duplicate, superseded, stale draft) with its reason on hover, and Pull requests has a **Needs you** tab ([PR sweep](runner.md#pull-request-sweep)) |
 | Jobs | The runner's 200 latest jobs with state, attempts and PR; click one for its timeline |
 
 The repository list in the sidebar filters every view.

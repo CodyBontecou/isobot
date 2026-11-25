@@ -287,6 +287,59 @@ test("devices that keep stopping retry the job later and keep the builder's work
   assert.deepEqual(github.merged, [100]);
 });
 
+test("isobot:land takes over someone else's PR: its own branch, its description kept, every gate", async () => {
+  const { github, pipeline, store, repo, builder } = setup(config => {
+    config.repos[REPO] = { autonomy: "merge", checks: ["make test"], requireCi: false };
+  });
+  github.addPull(OWNER, NAME, 50, "Fix the sync crash", "fix/sync-crash", ["isobot:land"], "Guards the nil URL in sync.");
+  await cycle(pipeline);
+
+  const job = store.get("codybontecou/time.md#50")!;
+  assert.equal(job.branch, "fix/sync-crash");
+  assert.deepEqual(github.merged, [50], "merged the PR itself");
+  assert.equal(github.pulls.size, 1, "no second PR");
+  assert.equal(builder.implementCalls, 0, "continues the PR instead of starting over");
+  assert.match(builder.reviseFeedback[0], /existing pull request you were asked to land/);
+  assert.match(builder.reviewTasks[0], /You are landing an existing pull request[\s\S]*Guards the nil URL/);
+  assert.ok(repo.calls.includes("fetch fix/sync-crash") && repo.calls.some(c => c.startsWith("merge-main")), "brings the default branch in first");
+  assert.ok(repo.calls.some(c => /^push \S+ fix\/sync-crash$/.test(c)), "pushes to the PR's own branch");
+  assert.equal(github.pulls.get(50)!.body, "Guards the nil URL in sync.", "the author's description stays");
+  const comments = github.commentsFor(OWNER, NAME, 50);
+  assert.match(comments[0], /taking this PR over/);
+  assert.ok(comments.some(c => /landing report[\s\S]*Independent review/.test(c)));
+  assert.ok(!github.get(OWNER, NAME, 50).labels.includes("isobot:land"));
+});
+
+test("isobot:land added by someone the runner doesn't trust is refused", async () => {
+  const { github, pipeline, store } = setup();
+  github.addPull(OWNER, NAME, 51, "Bump deps", "dependabot/npm/x", ["isobot:land"]);
+  github.labelers.set(`${OWNER}/${NAME}#51:isobot:land`, "stranger");
+  await cycle(pipeline);
+  assert.equal(store.get("codybontecou/time.md#51"), null);
+  assert.deepEqual(github.get(OWNER, NAME, 51).labels, []);
+  assert.match(github.commentsFor(OWNER, NAME, 51).at(-1)!, /added by @stranger/);
+});
+
+test("isobot:land on a fork's PR is refused: its branch isn't in this repository", async () => {
+  const { github, pipeline, store } = setup();
+  github.addPull(OWNER, NAME, 52, "Typo", "patch-1", ["isobot:land"], "Fix", "owner", "someone/time.md");
+  await cycle(pipeline);
+  assert.equal(store.get("codybontecou/time.md#52"), null);
+  assert.match(github.commentsFor(OWNER, NAME, 52).at(-1)!, /only land PRs whose branch is in this repository \(this one is in someone\/time.md\)/);
+});
+
+test("a landed PR the gates won't merge is left to the owner, still without a second PR", async () => {
+  const { github, pipeline, store } = setup(config => {
+    config.repos[REPO] = { autonomy: "pr", checks: ["make test"] };
+  });
+  github.addPull(OWNER, NAME, 53, "Add a setting", "feat/setting", ["isobot:land"]);
+  await cycle(pipeline);
+  assert.equal(store.get("codybontecou/time.md#53")!.state, "pr_open");
+  assert.equal(github.merged.length, 0);
+  assert.equal(github.pulls.size, 1);
+  assert.match(github.commentsFor(OWNER, NAME, 53).at(-1)!, /brought this PR as far as it can and is leaving the merge to you/);
+});
+
 test("the stop label prevents claiming and stops a queued job", async () => {
   const { github, pipeline, store, builder } = setup();
   github.add(OWNER, NAME, 13, "Stop me", ["isobot:ready", "isobot:stop"]);

@@ -199,7 +199,7 @@ function App() {
         {!board ? <div className="center"><span className="spinner" /></div>
           : !runner ? <Empty title="No runner has reported yet" body="Set ISOBOT_BOARD_URL and ISOBOT_BOARD_TOKEN in runner.env and restart the runner." />
           : <div className="content">
-              {params.view === 'overview' && <Overview runner={runner} items={items} jobs={jobs} events={repoEvents} now={now} open={job => setParams({ job })} go={view => setParams({ view })} goSource={source => setParams({ view: 'issues', state: 'open', source, q: '' })} />}
+              {params.view === 'overview' && <Overview runner={runner} items={items} jobs={jobs} events={repoEvents} now={now} open={job => setParams({ job })} go={view => setParams({ view })} goSource={source => setParams({ view: 'issues', state: 'open', source, q: '' })} goPrs={() => setParams({ view: 'prs', state: 'needs', source: '', q: '' })} />}
               {params.view === 'growth' && <Growth repo={params.repo} range={params.range} setRange={range => setParams({ range: range === '90' ? '' : range })}
                 daily={params.daily === '1'} setDaily={daily => setParams({ daily: daily ? '1' : '' })} app={params.app} setApp={app => setParams({ app }, false)} />}
               {params.view === 'tasks' && <Tasks items={items} jobs={jobs} now={now} open={job => setParams({ job })} />}
@@ -303,15 +303,37 @@ function ItemIcon({ item }: { item: BoardItem }) {
   return item.state === 'open' ? <CircleDot size={15} className="tone-ok" /> : <CircleCheck size={15} className="tone-merged" />;
 }
 
+/** The PR sweep's verdict as a chip: what to do about the PR, its reason on hover. */
+const ATTENTION: Record<string, { label: string; tone: string }> = {
+  ready: { label: 'merge', tone: 'ok' },
+  review: { label: 'review', tone: 'warn' },
+  conflicting: { label: 'land: conflicts', tone: 'warn' },
+  failing: { label: 'land: CI red', tone: 'bad' },
+  duplicate: { label: 'duplicate', tone: 'warn' },
+  superseded: { label: 'superseded', tone: 'muted' },
+  draft: { label: 'stale draft', tone: 'muted' },
+};
+
+/** Open PRs the last sweep says something waits on the owner for (isobot's own review PRs are listed by their issue). */
+const prNeedsYou = (i: BoardItem) => i.kind === 'pr' && i.state === 'open' && Boolean(i.attention?.action) && i.attention?.status !== 'review';
+
+function AttentionChip({ item }: { item: BoardItem }) {
+  const a = item.attention;
+  if (!a?.action) return null;
+  const known = ATTENTION[a.status] ?? { label: a.status, tone: 'muted' };
+  return <Chip tone={known.tone} title={`${a.reason} → ${a.action}`}>{known.label}</Chip>;
+}
+
 function ItemRow({ item, now }: { item: BoardItem; now: number }) {
+  const why = item.state === 'open' && item.attention?.action ? ` · ${item.attention.reason} → ${item.attention.action}` : '';
   return (
     <a className="row" href={item.url} target="_blank" rel="noreferrer">
       <ItemIcon item={item} />
       <span className="row-main">
         <span className="row-title">{item.title}</span>
-        <span className="row-sub">{short(item.repo)}#{item.number} · {item.author} · {item.state === 'open' ? `opened ${rel(item.createdAt, now)}` : `${item.merged ? 'merged' : 'closed'} ${rel(item.closedAt, now)}`}</span>
+        <span className="row-sub">{short(item.repo)}#{item.number} · {item.author} · {item.state === 'open' ? `opened ${rel(item.createdAt, now)}` : `${item.merged ? 'merged' : 'closed'} ${rel(item.closedAt, now)}`}{why}</span>
       </span>
-      <span className="row-chips"><SourceChip item={item} /><Labels labels={item.labels} /></span>
+      <span className="row-chips"><AttentionChip item={item} /><SourceChip item={item} /><Labels labels={item.labels} /></span>
       <span className="row-time" title={full(item.updatedAt)}>{rel(item.updatedAt, now)}</span>
     </a>
   );
@@ -319,9 +341,11 @@ function ItemRow({ item, now }: { item: BoardItem; now: number }) {
 
 // ---------- overview ----------
 
-function Overview({ runner, items, jobs, events, now, open, go, goSource }: { runner: RunnerState; items: BoardItem[]; jobs: Job[]; events: BoardEvent[]; now: number; open: (id: string) => void; go: (v: View) => void; goSource: (kind: SourceKind) => void }) {
+function Overview({ runner, items, jobs, events, now, open, go, goSource, goPrs }: { runner: RunnerState; items: BoardItem[]; jobs: Job[]; events: BoardEvent[]; now: number; open: (id: string) => void; go: (v: View) => void; goSource: (kind: SourceKind) => void; goPrs: () => void }) {
   const needs = items.filter(i => i.state === 'open' && i.labels.some(l => ['isobot:review', 'isobot:failed', 'isobot:proposed'].includes(l)));
   const shipping = jobs.filter(j => j.state === 'awaiting_ship');
+  const order = Object.keys(ATTENTION);
+  const prs = items.filter(prNeedsYou).sort((a, b) => order.indexOf(a.attention!.status) - order.indexOf(b.attention!.status));
   const active = runner.runner.activeJobs.map(id => jobs.find(j => j.id === id) ?? runner.jobs.find(j => j.id === id)).filter(Boolean) as Job[];
   const today = new Date().toDateString();
   const todays = events.filter(e => new Date(e.at).toDateString() === today);
@@ -338,7 +362,7 @@ function Overview({ runner, items, jobs, events, now, open, go, goSource }: { ru
         <Stat label="Building" value={runner.runner.activeJobs.length} icon={<Hammer size={14} />} onClick={() => go('jobs')} />
         <Stat label="Queued" value={runner.runner.queued} icon={<ListChecks size={14} />} onClick={() => go('jobs')} />
         <Stat label="Needs you" value={needs.length + shipping.length} tone={needs.length + shipping.length ? 'warn' : undefined} icon={<Inbox size={14} />} onClick={() => go('tasks')} />
-        <Stat label="Open PRs" value={items.filter(i => i.kind === 'pr' && i.state === 'open').length} icon={<GitPullRequest size={14} />} onClick={() => go('prs')} />
+        <Stat label="PRs need you" value={prs.length} tone={prs.length ? 'warn' : undefined} icon={<GitPullRequest size={14} />} onClick={() => goPrs()} />
         <Stat label="Merged today" value={mergedToday} icon={<GitMerge size={14} />} onClick={() => go('jobs')} />
         <Stat label="Events today" value={todays.length} icon={<Activity size={14} />} onClick={() => go('activity')} />
       </div>
@@ -350,6 +374,12 @@ function Overview({ runner, items, jobs, events, now, open, go, goSource }: { ru
           {needs.length + shipping.length === 0 ? <Empty title="Nothing waiting on you" /> : <div className="list">
             {shipping.map(j => <button key={j.id} className="row" onClick={() => open(j.id)}><CircleDot size={15} className="tone-warn" /><span className="row-main"><span className="row-title">{j.title}</span><span className="row-sub">{short(j.repo)}#{j.number} · waiting for isobot:ship</span></span><Chip tone="warn">ship</Chip></button>)}
             {needs.map(i => <ItemRow key={`${i.repo}#${i.number}`} item={i} now={now} />)}
+          </div>}
+        </Section>
+
+        <Section title="Pull requests to act on" action={<button className="link" onClick={() => goPrs()}>All {prs.length} →</button>}>
+          {prs.length === 0 ? <Empty title="No PR waits on you" body="From the PR sweep: what to merge, what to land, what to close" /> : <div className="list">
+            {prs.slice(0, 8).map(i => <ItemRow key={`${i.repo}#${i.number}`} item={i} now={now} />)}
           </div>}
         </Section>
 
@@ -518,7 +548,7 @@ function Schedule({ runner, now, open }: { runner: RunnerState; now: number; ope
 function Items({ kind, items, source, setSource, state, setState, q, setQ, now, githubAt }: { kind: 'pr' | 'issue'; items: BoardItem[]; source: string; setSource: (s: string) => void; state: string; setState: (s: string) => void; q: string; setQ: (q: string) => void; now: number; githubAt?: string }) {
   const own = items.filter(i => i.kind === kind);
   const tabs = kind === 'pr'
-    ? [{ id: 'open', label: 'Open', test: (i: BoardItem) => i.state === 'open' }, { id: 'merged', label: 'Merged', test: (i: BoardItem) => i.merged }, { id: 'closed', label: 'Closed', test: (i: BoardItem) => i.state === 'closed' && !i.merged }]
+    ? [{ id: 'open', label: 'Open', test: (i: BoardItem) => i.state === 'open' }, { id: 'needs', label: 'Needs you', test: prNeedsYou }, { id: 'merged', label: 'Merged', test: (i: BoardItem) => i.merged }, { id: 'closed', label: 'Closed', test: (i: BoardItem) => i.state === 'closed' && !i.merged }]
     : [{ id: 'open', label: 'Open', test: (i: BoardItem) => i.state === 'open' }, { id: 'closed', label: 'Closed', test: (i: BoardItem) => i.state === 'closed' }];
   const tab = tabs.find(t => t.id === state) ?? tabs[0];
   const needle = q.toLowerCase();
