@@ -32,6 +32,7 @@ import { HANDOFF, Notifier } from "./notify.js";
 import { Pipeline } from "./pipeline.js";
 import { runChecks } from "./checks.js";
 import { buildMetrics } from "./metrics.js";
+import { formatSweep, PrSweep } from "./prSweep.js";
 import { Dashboard, WEEKDAYS, every, nextDailyAt, nextWeeklyAt, type ScheduleItem } from "./dashboard.js";
 import { Awake, heartbeatAge, pingHeartbeat, readHeartbeat, rotateLog, writeHeartbeat } from "./ops.js";
 import { killAllChildren, run, setGitIdentity, sh, workerEnv } from "./proc.js";
@@ -76,6 +77,8 @@ interface Runtime {
   crashes: CrashAudit;
   /** Staged Play production rollouts moved forward on their own (playRollout.ts); null without config.playRollout. */
   playRollout: PlayRollout | null;
+  /** Every open PR in the configured repos, sorted into what needs the owner (prSweep.ts); on unless prSweep.enabled is false. */
+  prSweep: PrSweep;
   /** Runner secrets and state, for settings that keep agents out of them. */
   secrets: string[];
   /** Messages carrying a 💻 (Herdr handoff), when it's on. */
@@ -247,7 +250,11 @@ function runtime(): Runtime {
       return { ok: result.code === 0 && !result.timedOut, stdout: result.stdout, stderr: result.stderr };
     },
   });
-  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, production, content, aso, analytics, playAnalytics, crashes, playRollout, secrets, handoff };
+  const prSweep = new PrSweep({
+    config: config.prSweep, landLabel: config.labels.land, github, store,
+    repos: () => configuredRepos(config).filter(r => policyFor(config, `${r.owner}/${r.repo}`).autonomy !== "off").map(r => `${r.owner}/${r.repo}`),
+  });
+  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, production, content, aso, analytics, playAnalytics, crashes, playRollout, prSweep, secrets, handoff };
 }
 
 /** ASO Tracker's CLI: one JSON call per tool; it starts the tracker's daemon itself when it isn't running. */
@@ -319,6 +326,8 @@ const ASO_POLL_MS = 5 * 60_000;
 const ANALYTICS_EVERY_MS = 30 * 60_000;
 /** How often the crash audit looks; it reads the stores at most every 6 hours itself. */
 const CRASHES_EVERY_MS = 30 * 60_000;
+/** How often the PR sweep looks; it sweeps every prSweep.everyHours itself. */
+const PR_SWEEP_POLL_MS = 10 * 60_000;
 
 /** A cycle running longer than this (release steps included) counts as hung for the external heartbeat. */
 const HUNG_CYCLE_MS = 2 * 60 * 60_000;
@@ -363,6 +372,8 @@ async function loop(rt: Runtime): Promise<void> {
   let crashesRunning = false;
   let lastRollout = 0;
   let rolloutRunning = false;
+  let lastPrPoll = 0;
+  let prSweepRunning = false;
   let cycleStartedAt: number | null = null;
   if (rt.env.heartbeatUrl) {
     const url = rt.env.heartbeatUrl;
@@ -407,6 +418,12 @@ async function loop(rt: Runtime): Promise<void> {
       `${rt.crashes.playApps().length} Play, ${rt.crashes.iosApps().length} App Store apps; stores read every 6 h`));
     if (rt.playRollout?.enabled()) items.push(every("play-rollout", "Play rollouts", CRASHES_EVERY_MS, lastRollout, rolloutRunning,
       `${rt.playRollout.apps().length} Play apps; production checked every 3 h`));
+    if (rt.prSweep.enabled()) {
+      const last = rt.prSweep.latest()?.at ?? null;
+      items.push({ id: "pr-sweep", name: "PR sweep", cadence: `every ${rt.prSweep.everyMs() / 3_600_000} h`, lastAt: last,
+        nextAt: last ? new Date(Date.parse(last) + rt.prSweep.everyMs()).toISOString() : null, running: prSweepRunning,
+        detail: "every open PR: what to merge, what to land, release PRs a newer release replaced" });
+    }
     const checkInHour = rt.config.chat?.checkInHour;
     if (chat && typeof checkInHour === "number") items.push({ id: "check-in", name: "Daily check-in", cadence: `daily at ${String(checkInHour).padStart(2, "0")}:00`,
       lastAt: null, nextAt: nextDailyAt(now, checkInHour).toISOString(), running: false, detail: "staff channel" });
@@ -500,6 +517,15 @@ async function loop(rt: Runtime): Promise<void> {
           // Reads Play at most every 3 hours itself; a failure is posted once and retried, never thrown.
           void rt.playRollout.tick().catch(error => console.warn(`[rollout] failed: ${(error as Error).message}`))
             .finally(() => { rolloutRunning = false; });
+        }
+        if (!prSweepRunning && Date.now() - lastPrPoll > PR_SWEEP_POLL_MS && rt.prSweep.enabled()) {
+          lastPrPoll = Date.now();
+          prSweepRunning = true;
+          // A few GraphQL reads per repo; beside the cycle, one pass at a time. It never merges or pushes.
+          void rt.prSweep.tick().then(result => {
+            if (result) console.log(`[pr-sweep] ${result.pulls.length} open PRs, ${result.pulls.filter(p => p.action).length} need you, ${result.closed.length} closed`);
+          }).catch(error => console.warn(`[pr-sweep] failed: ${(error as Error).message}`))
+            .finally(() => { prSweepRunning = false; });
         }
         if (!triageRunning && Date.now() - lastTriage > rt.config.triageMinutes * 60_000) {
           lastTriage = Date.now();
@@ -965,6 +991,17 @@ async function main(): Promise<void> {
       }
       if (what === "report") console.log(await rt.content.report(site, true) ?? "(no report)");
       else console.log(JSON.stringify(await rt.content.maybeResearch(site, true, flag === "--dry-run"), null, 2));
+      return;
+    }
+    case "prs": {
+      // `prs`: the last sweep. `prs preview`: sweep now and change nothing. `prs sweep`: sweep now (closes replaced releases).
+      const what = process.argv[3] ?? "last";
+      if (what === "preview" || what === "sweep") {
+        console.log(formatSweep(await rt.prSweep.sweep(new Date(), what === "preview")));
+        return;
+      }
+      const last = rt.prSweep.latest();
+      console.log(last ? formatSweep(last) : "No sweep yet: run `prs preview` to see one without changing anything, or `prs sweep`.");
       return;
     }
     case "crashes": {

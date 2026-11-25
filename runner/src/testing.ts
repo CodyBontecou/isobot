@@ -81,7 +81,20 @@ export class FakeGitHub implements GitHubApi {
   }
   async defaultBranch(): Promise<string> { return "main"; }
   async issuesWithLabel(owner: string, repo: string, label: string): Promise<Issue[]> {
-    return [...this.issues.values()].filter(i => i.owner === owner && i.repo === repo && i.state === "open" && i.labels.includes(label));
+    return [...this.issues.values()].filter(i => i.owner === owner && i.repo === repo && i.state === "open" && i.labels.includes(label) && !this.prIssues.has(`${owner}/${repo}#${i.number}`));
+  }
+  async pullsWithLabel(owner: string, repo: string, label: string): Promise<Issue[]> {
+    return [...this.issues.values()].filter(i => i.owner === owner && i.repo === repo && i.state === "open" && i.labels.includes(label) && this.prIssues.has(`${owner}/${repo}#${i.number}`));
+  }
+  /** Issues that are pull requests (addPull): GitHub lists PRs as issues too. */
+  prIssues = new Set<string>();
+  /** Someone else's open PR (an agent session's, Dependabot's), on `branch`: an issue and a pull, as on GitHub. */
+  addPull(owner: string, repo: string, number: number, title: string, branch: string, labels: string[] = [], body = "Fix the thing", author = "owner", headRepo = `${owner}/${repo}`): Issue {
+    const issue = this.add(owner, repo, number, title, labels, body, author);
+    issue.url = `https://github.com/${owner}/${repo}/pull/${number}`;
+    this.prIssues.add(`${owner}/${repo}#${number}`);
+    this.pulls.set(number, { owner, repo, number, url: issue.url, state: "open", merged: false, headSha: `head-${number}`, mergeCommitSha: null, branch, body, headRef: branch, headRepo });
+    return issue;
   }
   async openIssues(owner: string, repo: string): Promise<Issue[]> {
     return [...this.issues.values()].filter(i => i.owner === owner && i.repo === repo && i.state === "open");

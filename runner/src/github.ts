@@ -3,6 +3,7 @@ import { closesIssue, itemSource, type BoardItem } from "./dashboard.js";
 import type { PullDetails } from "./chatTools.js";
 import type { Labels } from "./config.js";
 import { RUNNER_MARKER } from "./notes.js";
+import type { SweepRepoData } from "./prSweep.js";
 
 export interface Issue {
   owner: string;
@@ -25,6 +26,9 @@ export interface PullRequest {
   mergeCommitSha: string | null;
   /** False when it conflicts with its base; null while GitHub is still working it out (or unknown). */
   mergeable?: boolean | null;
+  /** The head branch, and the repository it lives in (`owner/repo`; another one for a fork). */
+  headRef?: string;
+  headRepo?: string | null;
 }
 
 export type CiState = "success" | "pending" | "failure" | "none";
@@ -37,7 +41,7 @@ export interface IssueComment {
 
 const LABEL_COLORS: Record<keyof Labels, string> = {
   proposed: "c5def5", ready: "0e8a16", building: "fbca04", review: "1d76db",
-  failed: "b60205", ship: "5319e7", stop: "000000", auto: "0b7285", cleanup: "d4c5f9", content: "bfdadc",
+  failed: "b60205", ship: "5319e7", stop: "000000", auto: "0b7285", cleanup: "d4c5f9", content: "bfdadc", land: "0e8a16",
 };
 
 const LABEL_DESCRIPTIONS: Record<keyof Labels, string> = {
@@ -51,6 +55,7 @@ const LABEL_DESCRIPTIONS: Record<keyof Labels, string> = {
   auto: "From the owner: isobot may take it end to end (only counts when the owner adds it)",
   cleanup: "Dismiss: isobot removes its local workspaces, strips its labels and closes the issue",
   content: "Website content from isobot's SEO research: builds and merges under the site's content policy",
+  land: "On a PR: isobot takes it over, brings it up to date, fixes checks and CI, and merges it under the usual gates",
 };
 
 /** The subset of GitHub the runner needs; an interface so tests can fake it. */
@@ -65,6 +70,8 @@ export interface GitHubApi {
   labeledBy(owner: string, repo: string, number: number, label: string): Promise<string | null>;
   isPublic(owner: string, repo: string): Promise<boolean>;
   issuesWithLabel(owner: string, repo: string, label: string): Promise<Issue[]>;
+  /** Open pull requests with this label, read as issues (title, body, labels, author). */
+  pullsWithLabel(owner: string, repo: string, label: string): Promise<Issue[]>;
   openIssues(owner: string, repo: string, since?: string): Promise<Issue[]>;
   issue(owner: string, repo: string, number: number): Promise<Issue>;
   addLabels(owner: string, repo: string, number: number, labels: string[]): Promise<void>;
@@ -166,6 +173,11 @@ export class GitHub implements GitHubApi {
     return data.filter(item => !item.pull_request).map(item => toIssue(owner, repo, item));
   }
 
+  async pullsWithLabel(owner: string, repo: string, label: string): Promise<Issue[]> {
+    const data = await this.octokit.paginate(this.octokit.issues.listForRepo, { owner, repo, labels: label, state: "open", per_page: 100 });
+    return data.filter(item => item.pull_request).map(item => toIssue(owner, repo, item));
+  }
+
   async openIssues(owner: string, repo: string, since?: string): Promise<Issue[]> {
     const data = await this.octokit.paginate(this.octokit.issues.listForRepo, {
       owner, repo, state: "open", per_page: 100, sort: "created", direction: "desc", ...(since ? { since } : {}),
@@ -226,6 +238,7 @@ export class GitHub implements GitHubApi {
     return {
       number: data.number, url: data.html_url, state: data.state as "open" | "closed", merged: data.merged,
       headSha: data.head.sha, mergeCommitSha: data.merged ? data.merge_commit_sha : null, mergeable: data.mergeable,
+      headRef: data.head.ref, headRepo: data.head.repo?.full_name ?? null,
     };
   }
 
@@ -285,6 +298,23 @@ export class GitHub implements GitHubApi {
         ...item.pull_request ? { closes: closesIssue(item.body) } : {},
       };
     });
+  }
+
+  /** Everything the PR sweep needs for one repo (prSweep.ts), in one GraphQL query. */
+  async sweepRepo(owner: string, repo: string): Promise<SweepRepoData> {
+    const data = await this.octokit.graphql<SweepQuery>(SWEEP_QUERY, { owner, name: repo });
+    const r = data.repository;
+    return {
+      pulls: r.open.nodes.map(pr => ({
+        number: pr.number, title: pr.title, url: pr.url, branch: pr.headRefName, author: pr.author?.login ?? "ghost",
+        draft: pr.isDraft, createdAt: pr.createdAt, updatedAt: pr.updatedAt, mergeable: pr.mergeable,
+        ci: rollupState(pr.commits.nodes[0]?.commit.statusCheckRollup?.state),
+        labels: pr.labels.nodes.map(l => l.name),
+        closes: pr.closingIssuesReferences.nodes.map(i => ({ number: i.number, state: i.state === "CLOSED" ? "closed" as const : "open" as const })),
+      })),
+      tags: r.refs.nodes.map(t => t.name),
+      merged: r.merged.nodes.map(pr => ({ number: pr.number, title: pr.title, branch: pr.headRefName })),
+    };
   }
 
   async openPulls(owner: string, repo: string): Promise<{ number: number; title: string; headRef: string; author: string; draft: boolean }[]> {
@@ -351,6 +381,45 @@ export class GitHub implements GitHubApi {
       await this.octokit.issues.createLabel({ owner, repo, name: labels[key], color: LABEL_COLORS[key], description: LABEL_DESCRIPTIONS[key] });
     }
   }
+}
+
+interface SweepQuery {
+  repository: {
+    open: { nodes: {
+      number: number; title: string; url: string; isDraft: boolean; createdAt: string; updatedAt: string; headRefName: string;
+      author: { login: string } | null; mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+      labels: { nodes: { name: string }[] };
+      closingIssuesReferences: { nodes: { number: number; state: "OPEN" | "CLOSED" }[] };
+      commits: { nodes: { commit: { statusCheckRollup: { state: string } | null } }[] };
+    }[] };
+    refs: { nodes: { name: string }[] };
+    merged: { nodes: { number: number; title: string; headRefName: string }[] };
+  };
+}
+
+// 100 open PRs is far more than any of these repos has; tags newest first.
+const SWEEP_QUERY = `query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    open: pullRequests(states: OPEN, first: 100, orderBy: { field: UPDATED_AT, direction: DESC }) {
+      nodes {
+        number title url isDraft createdAt updatedAt headRefName mergeable
+        author { login }
+        labels(first: 20) { nodes { name } }
+        closingIssuesReferences(first: 10) { nodes { number state } }
+        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+      }
+    }
+    refs(refPrefix: "refs/tags/", first: 100, orderBy: { field: TAG_COMMIT_DATE, direction: DESC }) { nodes { name } }
+    merged: pullRequests(states: MERGED, last: 60) { nodes { number title headRefName } }
+  }
+}`;
+
+/** A commit's check rollup (GraphQL StatusState) as the sweep reads it. */
+export function rollupState(state: string | undefined): "success" | "failure" | "pending" | "none" {
+  if (!state) return "none";
+  if (state === "SUCCESS") return "success";
+  if (state === "FAILURE" || state === "ERROR") return "failure";
+  return "pending";
 }
 
 export function combineCi(runs: { status: string; conclusion: string | null }[], statuses: string[]): CiState {

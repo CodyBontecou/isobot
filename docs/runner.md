@@ -65,6 +65,7 @@ doesn't propose your whole backlog.
 | `cloud-smoke <repo> [--checks]` | One real build in a Cloudflare build sandbox, never pushed ([cloud builds](cloud-builds.md)) |
 | `aso <repo> snapshot \| report \| research [--dry-run]` | Read an app's ASO Tracker board, post its weekly rank report now, or draft and measure a listing proposal ([ASO train](aso.md)) |
 | `aso <repo> pending \| approve \| reject \| apply` | Show, approve or dismiss an app's latest listing proposal, or write an approved one to App Store Connect now ([ASO train](aso.md#applying-a-proposal)) |
+| `prs [preview \| sweep]` | The last [PR sweep](#pull-request-sweep); `preview` sweeps now and changes nothing, `sweep` sweeps now |
 | `release <repo#n>` | Run a merged job's `release.onMerge` again, e.g. one a restart interrupted. The running runner does it on its next pass |
 
 Logs: `~/Library/Application Support/isobot/logs/runner.log` (rotated at
@@ -644,6 +645,42 @@ TestFlight crash submissions every 6 hours, files each new crash group that affe
 
 With `"playRollout": {}`, the runner moves staged Google Play production rollouts forward on its own (20% for 2 days,
 50% for 5, then everyone) and halts one when the new version brings crashes. See [Play rollouts](play-rollout.md).
+
+## Pull request sweep
+
+PRs come from the runner, from your own agent sessions, from release scripts and from Dependabot, and the runner used
+to follow only its own. Every 6 hours (`prSweep.everyHours`) it reads every open PR in the configured repos (one
+GraphQL query per repo) and gives each one status, a reason and at most one thing for you to do:
+
+| Status | Means | You |
+| --- | --- | --- |
+| ready | merges cleanly, CI green (or no CI) | merge it |
+| conflicting / failing | conflicts with the default branch, or CI is red | add `isobot:land` |
+| duplicate | another open PR closes the same issue, or every issue it closes is already closed | keep one / close it |
+| superseded | a release or ship PR whose version is already out | closed by the sweep when a strictly newer release is out; listed when it's the same version |
+| draft | a draft; listed once it's had no activity for `staleDays` (14) | finish or close it |
+| review | isobot's own PR, left to you | merge it or reply on the issue |
+| runner / pending | isobot is on it, or CI is running | nothing |
+
+A release PR is one whose title starts with Release or Ship, or whose branch is `release/…` or a ship job's. It is
+superseded by a tag or a merged release PR with the same version or a newer one for the same store: `android/…` tags
+and Android-only titles count only for Android, `testflight/…` and iOS titles only for iOS, plain `v4.0.1` for both.
+Closing leaves a comment and the branch; reopen it if it still needs to merge. `closeSuperseded: false` only lists them.
+
+What needs you goes into the daily check-in (**Pull requests**), the staff chat's `needs_me`, and the board (a chip on
+every open PR, a **Needs you** tab on Pull requests, and **Pull requests to act on** on the Overview).
+`npm run runner -- prs` prints the last sweep, `prs preview` sweeps now and changes nothing, `prs sweep` sweeps now.
+The sweep never merges and never pushes.
+
+### Landing someone else's PR
+
+Add `isobot:land` to a PR (yours, an agent session's, Dependabot's) and isobot takes it over. The job is keyed by the
+PR's own number and continues its branch as a revision: the default branch is merged in, the builder resolves
+conflicts and fixes failing checks without changing the PR's scope, and then the reviewer, protected paths, CI and the
+merge gates run exactly as for isobot's own PRs. Whether it may merge without you follows the PR's author, as for an
+issue (Dependabot isn't trusted, so its PRs come back to you checked and reviewed). The PR's description stays its
+author's; isobot's checks and review go in a "landing report" comment. Only labels you (or `trustedAuthors`) add count,
+and a PR from a fork is refused. `isobot:stop` stops it like any job.
 
 ## Builder sandbox
 

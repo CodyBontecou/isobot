@@ -1,4 +1,5 @@
 import { describeEvent } from "./events.js";
+import { latestSweep, type SweepResult } from "./prSweep.js";
 import { CRASH_MARKER } from "./crashes.js";
 import { CHAT_MARKER } from "./notes.js";
 import type { BoardMetrics } from "./metrics.js";
@@ -41,6 +42,8 @@ export interface BoardItem {
   source: ItemSource;
   /** PRs: the issue number its body closes (`Closes #n`), if any. */
   closes?: number;
+  /** Open PRs: what the last PR sweep made of it (prSweep.ts); `action` null when nothing waits on the owner. */
+  attention?: { status: string; reason: string; action: string | null; at: string };
 }
 
 export type SourceKind = "github" | "discord" | "email" | "vox" | "appstore" | "chat" | "content" | "release" | "crash";
@@ -84,6 +87,16 @@ export function isReleaseIssue(body: string | null | undefined): boolean {
 export function closesIssue(body: string | null | undefined): number | undefined {
   const match = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?) #(\d+)\b/i.exec(body ?? "");
   return match ? Number(match[1]) : undefined;
+}
+
+/** Puts the last PR sweep's verdict on each open PR it saw. */
+export function withAttention(items: BoardItem[], sweep: SweepResult | null): BoardItem[] {
+  if (!sweep) return items;
+  const seen = new Map(sweep.pulls.map(p => [`${p.repo}#${p.number}`.toLowerCase(), p]));
+  return items.map(item => {
+    const pull = item.kind === "pr" && item.state === "open" ? seen.get(`${item.repo}#${item.number}`.toLowerCase()) : undefined;
+    return pull ? { ...item, attention: { status: pull.status, reason: pull.reason, action: pull.action, at: sweep.at } } : item;
+  });
 }
 
 /** Gives each PR the source of the issue it closes (in the same repo), when that issue is on the board. */
@@ -253,7 +266,7 @@ export class Dashboard {
         errors.push(`${name}: ${(error as Error).message.split("\n")[0].slice(0, 200)}`);
       }
     }
-    return { at: now.toISOString(), items: inheritSources(items), errors };
+    return { at: now.toISOString(), items: withAttention(inheritSources(items), latestSweep(this.o.store)), errors };
   }
 
   private now(): Date {

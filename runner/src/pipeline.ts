@@ -290,17 +290,81 @@ export class Pipeline {
           console.warn(`[discover] ${owner}/${repo}#${issue.number}: ${(error as Error).message}`);
         }
       }
+      claimed.push(...await this.discoverLand(owner, repo));
     }
     return claimed;
+  }
+
+  /**
+   * `isobot:land` on a pull request (one of yours, an agent session's, Dependabot's): isobot takes it over. The job is
+   * keyed by the PR's own number and continues its branch as a revision, so it gets everything isobot's own PRs get:
+   * the default branch merged in, the builder resolving conflicts and fixing checks, the reviewer, protected paths,
+   * CI and the merge gates. Who may merge without you is decided by the PR's author, as for an issue.
+   */
+  private async discoverLand(owner: string, repo: string): Promise<Job[]> {
+    const { github, store } = this.deps;
+    const claimed: Job[] = [];
+    let pulls: Issue[];
+    try {
+      pulls = await github.pullsWithLabel(owner, repo, this.labels.land);
+    } catch (error) {
+      console.warn(`[discover] ${owner}/${repo} land: ${(error as Error).message}`);
+      return claimed;
+    }
+    for (const issue of pulls) {
+      try {
+        if (hasLabel(issue, this.labels.stop)) continue;
+        const refuse = async (why: string) => {
+          await github.removeLabel(owner, repo, issue.number, this.labels.land);
+          await github.comment(owner, repo, issue.number, why);
+        };
+        const approver = await github.labeledBy(owner, repo, issue.number, this.labels.land);
+        if (!approver || !(await this.isTrusted(approver))) {
+          await refuse(`isobot only takes over PRs its owner asks it to; \`${this.labels.land}\` was added by @${approver ?? "unknown"}.`);
+          continue;
+        }
+        const pull = await github.pull(owner, repo, issue.number);
+        if (pull.state !== "open" || pull.merged) { await github.removeLabel(owner, repo, issue.number, this.labels.land); continue; }
+        if (!pull.headRef || (pull.headRepo && pull.headRepo.toLowerCase() !== `${owner}/${repo}`.toLowerCase())) {
+          await refuse(`isobot can only land PRs whose branch is in this repository${pull.headRepo ? ` (this one is in ${pull.headRepo})` : ""}.`);
+          continue;
+        }
+        const baseline = maxCommentId(await github.issueComments(owner, repo, issue.number));
+        const job = store.enqueue(owner, repo, issue.number, issue.title);
+        await github.removeLabel(owner, repo, issue.number, this.labels.land);
+        if (!job) {
+          const existing = store.get(storeId(owner, repo, issue.number));
+          await github.comment(owner, repo, issue.number, `isobot is already on this (${existing?.state.replace("_", " ") ?? "in progress"}).`);
+          continue;
+        }
+        store.update(job.id, { prNumber: issue.number, branch: pull.headRef, revising: true });
+        await github.removeLabel(owner, repo, issue.number, this.labels.failed);
+        await github.addLabels(owner, repo, issue.number, [this.labels.building]);
+        const text = `🛬 isobot is taking this PR over: it brings \`${pull.headRef}\` up to date with the default branch, resolves conflicts, ` +
+          `fixes failing checks, then reviews it and merges it if every gate passes (otherwise it leaves it to you with the reason). ` +
+          `It keeps the PR's scope and its description. Add the \`${this.labels.stop}\` label at any time to stop.`;
+        if (!(await this.claim(store.get(job.id)!, baseline, text))) continue;
+        await this.listenForNotes(job);
+        await this.feed(store.get(job.id)!, { phase: "queued", title: issue.title });
+        claimed.push(store.get(job.id)!);
+      } catch (error) {
+        console.warn(`[discover] ${owner}/${repo}#${issue.number} land: ${(error as Error).message}`);
+      }
+    }
+    return claimed;
+  }
+
+  /** A job that took over an existing PR (`isobot:land`): it is keyed by the PR itself. */
+  private isLanding(job: Job): boolean {
+    return job.prNumber !== null && job.prNumber === job.number;
   }
 
   /**
    * Posts the claim comment with this runner's lease, then reads the issue again. Two runners that claimed the
    * same approval at once both see both leases; the earlier comment wins and the other backs off.
    */
-  private async claim(job: Job, baseline: number): Promise<boolean> {
+  private async claim(job: Job, baseline: number, text = `🤖 isobot picked this up and is building it now. Add the \`${this.labels.stop}\` label at any time to stop.`): Promise<boolean> {
     const { github, store } = this.deps;
-    const text = `🤖 isobot picked this up and is building it now. Add the \`${this.labels.stop}\` label at any time to stop.`;
     const until = new Date(this.now().getTime() + LEASE_MS);
     const commentId = await github.comment(job.owner, job.repo, job.number, `${text}\n\n${leaseMarker(this.runnerId, until)}`);
     store.setCursor(leaseKey(job.id), JSON.stringify({ commentId, until: until.toISOString(), text }));
@@ -532,7 +596,10 @@ export class Pipeline {
       const timeoutMinutes = job.kind === "content" ? this.deps.config.builder.contentTimeoutMinutes : undefined;
       const notes = await this.takeNotes(job);
       // Everything the owner said since approving goes into the task, so the reviewer judges against it too.
-      let task = withNotes(source.task, notes.all);
+      const landing = this.isLanding(job);
+      // The reviewer judges a landed PR's whole change against what its author wrote, not just isobot's fixes.
+      const baseTask = landing ? `${LAND_TASK}\n\n${source.task}` : source.task;
+      let task = withNotes(baseTask, notes.all);
       let run: AgentRun;
       let mainSummary = "";
       let baseSha: string;
@@ -579,12 +646,17 @@ export class Pipeline {
         if (conflicts.length) store.event(job.id, "main_conflict", conflicts.join(", "));
         await github.removeLabel(job.owner, job.repo, job.number, this.labels.review);
         await github.addLabels(job.owner, job.repo, job.number, [this.labels.building]);
-        await github.comment(job.owner, job.repo, job.number, notes.fresh.length
-          ? `🔁 isobot is revising PR #${job.prNumber} with your note. Add \`${this.labels.stop}\` to stop.`
-          : `🔁 isobot is bringing PR #${job.prNumber} up to date with ${base}. Add \`${this.labels.stop}\` to stop.`);
+        // A PR isobot is landing got its own comment when it was claimed.
+        if (!landing || notes.fresh.length) {
+          await github.comment(job.owner, job.repo, job.number, notes.fresh.length
+            ? `🔁 isobot is revising PR #${job.prNumber} with your note. Add \`${this.labels.stop}\` to stop.`
+            : `🔁 isobot is bringing PR #${job.prNumber} up to date with ${base}. Add \`${this.labels.stop}\` to stop.`);
+        }
         await this.feed(job, { phase: "revising", notes: this.noteCount(job, notes.fresh.length) }, notes.fresh.length ? this.ackNotes(notes.fresh) : undefined);
         if (notes.fresh.length) noteRounds++;
-        const asked = notes.fresh.length ? noteFeedback(notes.fresh) : "Re-read the task and the owner's follow-up notes, and make sure this branch satisfies all of them.";
+        const asked = notes.fresh.length ? noteFeedback(notes.fresh)
+          : landing ? LAND_FEEDBACK
+          : "Re-read the task and the owner's follow-up notes, and make sure this branch satisfies all of them.";
         run = await builderStep(ids => builder.revise({
           cwd: workspace!, ...ids, task, devices, media: builderMedia, timeoutMinutes,
           feedback: conflicts.length ? `${conflictFeedback(conflicts, base)}\n\n${asked}` : asked,
@@ -654,7 +726,7 @@ export class Pipeline {
           const late = await this.takeNotes(job);
           if (late.fresh.length) {
             noteRounds++;
-            task = withNotes(source.task, late.all);
+            task = withNotes(baseTask, late.all);
             await this.feed(job, { phase: "revising", notes: this.noteCount(job, late.fresh.length) }, this.ackNotes(late.fresh));
             run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback: noteFeedback(late.fresh), devices, media: builderMedia, timeoutMinutes }));
             laterRounds.push({ label: "Owner note", summary: run.summary });
@@ -735,10 +807,19 @@ export class Pipeline {
       await repo.push(sha, branch);
       const media = await this.publishMedia(job, repo, mediaDir, sha);
       const body = prBody({ issue, run: mainSummary, rounds: laterRounds, checks, review, diff, media: media.markdown });
-      const existing = await github.findPull(job.owner, job.repo, branch);
-      const pr = existing && existing.state === "open"
-        ? (await github.updatePull(job.owner, job.repo, existing.number, body), existing)
-        : await github.createPull(job.owner, job.repo, { head: branch, base, title: issue.title, body });
+      let pr: PullRequest;
+      let existing: PullRequest | null;
+      if (landing) {
+        // Someone else's PR: its description stays theirs; isobot's checks and review go in a comment.
+        existing = pr = await github.pull(job.owner, job.repo, job.number);
+        if (pr.state !== "open") return this.stop(job, await github.issue(job.owner, job.repo, job.number));
+        await github.comment(job.owner, job.repo, job.number, landComment({ run: mainSummary, rounds: laterRounds, checks, review, diff, media: media.markdown }));
+      } else {
+        existing = await github.findPull(job.owner, job.repo, branch);
+        pr = existing && existing.state === "open"
+          ? (await github.updatePull(job.owner, job.repo, existing.number, body), existing)
+          : await github.createPull(job.owner, job.repo, { head: branch, base, title: issue.title, body });
+      }
       store.update(job.id, { prNumber: pr.number });
       await this.feed(job, { prUrl: pr.url }, `📤 ${pr === existing ? "Updated" : "Opened"} ${pr.url} (${diff.files.length} files, ${diff.changedLines} lines)`);
       if (media.files.length) await this.deps.notifier.media(job, `📸 What the change looks like (also on ${pr.url}):`, media.files);
@@ -813,7 +894,9 @@ export class Pipeline {
       await github.addLabels(job.owner, job.repo, job.number, [this.labels.review]);
       store.update(job.id, { state: "pr_open" });
       const reasons = gate.reasons.map(r => `- ${r}`).join("\n") + needsYou(context.review);
-      await github.comment(job.owner, job.repo, job.number, `🔍 isobot opened ${prUrl} and is leaving the merge to you:\n${reasons}`);
+      await github.comment(job.owner, job.repo, job.number, this.isLanding(job)
+        ? `🔍 isobot brought this PR as far as it can and is leaving the merge to you:\n${reasons}`
+        : `🔍 isobot opened ${prUrl} and is leaving the merge to you:\n${reasons}`);
       await this.feed(job, { phase: "waiting", detail: reasons },
         `🔍 Leaving the merge to you:\n${reasons}\n\nReply here to ask for changes; isobot will revise the PR.`,
         `🔍 **${job.owner}/${job.repo}#${job.number}** ${title}: PR ready for your review: <${prUrl}>`);
@@ -1463,6 +1546,33 @@ export function buildTask(issue: Pick<Issue, "title" | "url" | "body">, policy: 
     body || "(no description)",
     ...(policy.notes ? ["## Repository notes from the owner", policy.notes] : []),
   ].join("\n\n");
+}
+
+/** For a PR isobot takes over (`isobot:land`): the reviewer judges the PR's whole change, not only isobot's fixes. */
+const LAND_TASK = "You are landing an existing pull request someone else wrote: the task below is its title and description. " +
+  "Judge and finish the PR's whole change as it stands against the default branch, not only what isobot adds.";
+
+const LAND_FEEDBACK = "This branch is an existing pull request you were asked to land, written by someone else. The default branch " +
+  "was just merged in. Keep the PR's scope and intent: resolve any conflicts, make the repository's checks pass, and fix what " +
+  "they show is broken. Don't add features, rename things or refactor beyond what landing it needs. If the PR can't land as " +
+  "written (it needs a decision only its author can make), make no changes and say why.";
+
+/** isobot's report on a PR it is landing, posted as a comment so the author's description stays theirs. */
+function landComment(input: { run: string; rounds?: { label: string; summary: string }[]; checks: CheckReport; review: Review; diff: DiffStat; media?: string }): string {
+  const { run, checks, review, diff } = input;
+  const rounds = (input.rounds ?? []).filter(r => r.summary.trim());
+  return [
+    `## 🛬 isobot's landing report`,
+    `${diff.files.length} files, ${diff.changedLines} lines against the default branch.`,
+    "### What isobot did",
+    run || "(builder gave no summary)",
+    ...(rounds.length ? [`<details><summary>Later rounds (${rounds.length})</summary>\n\n${rounds.map(r => `**${r.label}:** ${r.summary}`).join("\n\n")}\n\n</details>`] : []),
+    ...(input.media ? ["### Screenshots", input.media] : []),
+    "### Runner checks",
+    formatChecks(checks),
+    "### Independent review",
+    `**${review.verdict}** · confidence ${review.confidence.toFixed(2)} · risk ${review.risk}\n\n${review.summary}${review.concerns.length ? `\n\n${review.concerns.map(c => `- ${c}`).join("\n")}` : ""}${needsYou(review)}`,
+  ].join("\n\n").slice(0, 65_000);
 }
 
 function prBody(input: { issue: Issue; run: string; rounds?: { label: string; summary: string }[]; checks: CheckReport; review: Review; diff: DiffStat; media?: string }): string {

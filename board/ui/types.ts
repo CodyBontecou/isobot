@@ -18,6 +18,8 @@ export interface BoardItem {
   /** Missing on snapshots from runners before sources were added. */
   source?: ItemSource;
   closes?: number;
+  /** Open PRs: the runner's last PR sweep (runner/src/prSweep.ts). Missing before the first sweep. */
+  attention?: { status: string; reason: string; action: string | null; at: string };
 }
 
 export type SourceKind = 'github' | 'discord' | 'email' | 'vox' | 'appstore' | 'chat' | 'content' | 'release' | 'crash';
