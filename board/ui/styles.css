@@ -319,3 +319,60 @@ a.changes-row:hover { background: var(--bg-hover); }
   .growth-stats .stat:nth-child(2n) { border-right: 0; }
   .growth-body { padding: 10px; }
 }
+
+/* summary */
+.period-bar { position: relative; z-index: 4; }
+.period-nav { display: inline-flex; align-items: center; gap: 4px; }
+.icon.bordered { border: 1px solid var(--border-strong); background: var(--bg); }
+.icon.bordered:disabled, .button:disabled { opacity: .4; cursor: default; }
+.button:disabled:hover { background: var(--bg); }
+.picker { position: relative; }
+.picker-button { min-width: 200px; justify-content: center; font-variant-numeric: tabular-nums; }
+.picker-pop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 10; width: 280px; background: var(--bg); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: var(--shadow); padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+.picker-head { display: flex; align-items: center; justify-content: space-between; }
+.picker-head strong { font-size: 13px; }
+.picker-foot { color: var(--text-3); font-size: 11px; text-align: center; }
+.cal { display: flex; flex-direction: column; gap: 2px; }
+.cal-row { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px; border-radius: 6px; }
+.cal-weekdays span { text-align: center; color: var(--text-3); font-size: 11px; padding: 2px 0; }
+.cal-day { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; height: 34px; border-radius: 6px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.cal-day:hover:not(:disabled) { background: var(--bg-hover); }
+.cal-day:disabled { color: var(--text-3); opacity: .45; cursor: default; }
+.cal-day.outside { color: var(--text-3); }
+.cal-day.today span { font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
+.cal-day.selected, .cal-row.selected { background: var(--info-bg); }
+.cal-day.selected { color: var(--info); font-weight: 600; box-shadow: inset 0 0 0 1px var(--info); }
+.cal-row.selected { box-shadow: inset 0 0 0 1px var(--info); }
+.cal.by-week .cal-row:not(.cal-weekdays):hover { background: var(--bg-hover); }
+.cal.by-week .cal-row:not(.cal-weekdays) .cal-day:hover { background: none; }
+.heat { width: 14px; height: 3px; border-radius: 2px; background: transparent; }
+.heat.l1 { background: color-mix(in srgb, var(--series-1) 30%, transparent); }
+.heat.l2 { background: color-mix(in srgb, var(--series-1) 55%, transparent); }
+.heat.l3 { background: color-mix(in srgb, var(--series-1) 80%, transparent); }
+.heat.l4 { background: var(--series-1); }
+.months { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+.cal-month { height: 36px; border-radius: 6px; text-align: center; }
+.cal-month:hover:not(:disabled) { background: var(--bg-hover); }
+.cal-month:disabled { opacity: .4; cursor: default; }
+.cal-month.selected { background: var(--info-bg); color: var(--info); font-weight: 600; box-shadow: inset 0 0 0 1px var(--info); }
+.summary-stats .growth-stat { cursor: default; }
+.summary-stats .growth-stat:hover { background: none; }
+.summary-chart { padding: 12px 14px 6px; }
+.list.scroll { max-height: 420px; overflow-y: auto; }
+.source-strip { display: flex; gap: 6px; flex-wrap: wrap; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.work summary { list-style: none; cursor: pointer; }
+.work summary::-webkit-details-marker { display: none; }
+.work[open] summary { background: var(--bg-subtle); }
+.work-events { display: flex; flex-direction: column; border-bottom: 1px solid var(--border); padding: 4px 0; max-height: 260px; overflow-y: auto; }
+.work-event { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px; padding: 4px 14px 4px 24px; font-size: 12px; color: var(--text-2); word-break: break-word; }
+.row-title.mono { font-family: var(--mono); font-size: 12px; }
+.footnote.plain { border-top: 0; padding: 10px 0; }
+.section > .table.compact svg { vertical-align: -1px; }
+@media (max-width: 760px) {
+  .summary-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .summary-stats .stat { border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  .summary-stats .stat:nth-child(2n) { border-right: 0; }
+  .picker-button { min-width: 0; }
+  .picker-pop { left: 50%; transform: translateX(-50%); width: min(300px, calc(100vw - 32px)); }
+  .period-bar .meta { width: 100%; }
+}

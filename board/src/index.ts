@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { handleAccountRequest, resolveAccountSession, type AccountEnvironment } from "../../cloudflare/src/account-routes.js";
-import { BadSnapshot, BoardStore, type IngestResult } from "./store.js";
+import { BadSnapshot, BoardStore, CALENDAR_MAX_DAYS, SUMMARY_MAX_DAYS, type IngestResult } from "./store.js";
 
 /**
  * The isobot board at bot.isolated.tech: a read-only view of the runner (state, schedule, timeline)
@@ -83,6 +83,17 @@ export default {
         const since = new Date(Date.now() - days * 86_400_000).toISOString();
         return json({ events: await board.events({ since, jobId: job ?? undefined, limit: 5000 }) });
       }
+      if (path === "/api/summary" || path === "/api/calendar") {
+        // The browser picks the period in its own time zone and sends its bounds as instants.
+        const span = instants(url, ["from", "to", ...(path === "/api/summary" ? ["compare"] : [])]);
+        const max = (path === "/api/summary" ? SUMMARY_MAX_DAYS : CALENDAR_MAX_DAYS) * 86_400_000;
+        if (!span) return json({ error: "Bad range" }, 400);
+        const start = span.compare ?? span.from;
+        if (span.from > span.to || start > span.from || Date.parse(span.to) - Date.parse(start) > max) return json({ error: "Bad range" }, 400);
+        return path === "/api/summary"
+          ? json(await board.summary({ from: span.from, to: span.to, compareFrom: start }))
+          : json(await board.calendar({ from: span.from, to: span.to }));
+      }
       return json({ error: "Not found" }, 404);
     }
 
@@ -119,6 +130,22 @@ export class BoardState extends DurableObject<Env> {
   metrics() { return this.store.metrics(); }
 
   events(options: { since: string; jobId?: string; limit?: number }) { return this.store.events(options); }
+
+  summary(options: { from: string; to: string; compareFrom: string }) { return this.store.summary(options); }
+
+  calendar(options: { from: string; to: string }) { return this.store.calendar(options); }
+}
+
+/** The named query parameters as ISO instants (normalized, so they compare as strings), or null if any is missing or bad. */
+function instants(url: URL, names: string[]): Record<string, string> | null {
+  const out: Record<string, string> = {};
+  for (const name of names) {
+    const value = url.searchParams.get(name);
+    const time = value ? Date.parse(value) : Number.NaN;
+    if (Number.isNaN(time)) return null;
+    out[name] = new Date(time).toISOString();
+  }
+  return out;
 }
 
 async function readText(request: Request, limit: number): Promise<string | null> {

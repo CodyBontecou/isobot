@@ -1,6 +1,6 @@
 /**
- * What the board keeps: each runner's latest snapshot, the newest GitHub read, and 30 days of runner
- * events. Runners push (runner/src/dashboard.ts); the browser only reads. Written over a minimal SQL
+ * What the board keeps: each runner's latest snapshot, the newest GitHub read, a year of runner events,
+ * and every issue, PR and job it has seen (so the Summary view can look back past the snapshot's 14 days). Runners push (runner/src/dashboard.ts); the browser only reads. Written over a minimal SQL
  * interface so it runs on Durable Object SQLite and, in tests, on node:sqlite.
  */
 
@@ -9,7 +9,20 @@ export interface Sql {
 }
 
 export const SNAPSHOT_VERSION = 1;
-const KEEP_EVENTS_DAYS = 30;
+/** Over a year, so the Summary view can look back a full year (~250 events a day, a few MB). */
+const KEEP_EVENTS_DAYS = 400;
+/** The Summary view's longest span (a month and the month before it), and the calendar's (six weeks). */
+export const SUMMARY_MAX_DAYS = 64;
+export const CALENDAR_MAX_DAYS = 43;
+/**
+ * Events the Summary view lists by name, rather than only counting: work that landed or failed, what the
+ * trains, ASO, content and crash audit did. Errors (`*_error`) are matched separately.
+ */
+export const HIGHLIGHT_KINDS = ["state:merged", "state:shipped", "state:failed", "train", "aso_applied", "aso_live",
+  "aso_proposed", "content_proposed", "content_dropped", "crash_issue", "pr_sweep_closed", "dropped", "already_done"];
+const HIGHLIGHT_LIMIT = 800;
+/** How far back a runner snapshot lists closed issues and PRs (CLOSED_DAYS in runner/src/dashboard.ts). */
+const ITEM_WINDOW_DAYS = 14;
 const RUNNER_ID = /^[\w.-]{1,64}$/;
 
 export interface BoardEvent { id: number; jobId: string | null; at: string; kind: string; text: string; runner: string }
@@ -24,6 +37,10 @@ export class BoardStore {
     sql.exec(`CREATE TABLE IF NOT EXISTS events (runner TEXT NOT NULL, id INTEGER NOT NULL, job_id TEXT, at TEXT NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL, PRIMARY KEY (runner, id))`);
     sql.exec(`CREATE INDEX IF NOT EXISTS events_at ON events (at)`);
     sql.exec(`CREATE INDEX IF NOT EXISTS events_job ON events (job_id, at)`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS items (repo TEXT NOT NULL, number INTEGER NOT NULL, created_at TEXT NOT NULL, closed_at TEXT, first_seen TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (repo, number))`);
+    sql.exec(`CREATE INDEX IF NOT EXISTS items_created ON items (created_at)`);
+    sql.exec(`CREATE INDEX IF NOT EXISTS items_closed ON items (closed_at)`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS job_history (id TEXT PRIMARY KEY, updated_at TEXT NOT NULL, data TEXT NOT NULL)`);
   }
 
   /** Stores one runner push. Throws a `BadSnapshot` for anything that isn't a well-formed snapshot. */
@@ -48,7 +65,20 @@ export class BoardStore {
     this.sql.exec(`INSERT INTO runners (id, at, snapshot, last_event_id) VALUES (?, ?, ?, ?)
       ON CONFLICT (id) DO UPDATE SET at = excluded.at, snapshot = excluded.snapshot, last_event_id = excluded.last_event_id`,
       runner, now.toISOString(), JSON.stringify(rest), last);
+    // Jobs and GitHub items are kept past the snapshot's window, newest copy wins.
+    for (const job of snapshot.jobs as Record<string, unknown>[]) {
+      if (!job || typeof job.id !== "string" || typeof job.updatedAt !== "string") continue;
+      this.sql.exec(`INSERT INTO job_history (id, updated_at, data) VALUES (?, ?, ?)
+        ON CONFLICT (id) DO UPDATE SET updated_at = excluded.updated_at, data = excluded.data WHERE excluded.updated_at >= job_history.updated_at`,
+        job.id, job.updatedAt, JSON.stringify(job));
+    }
     if (github) {
+      for (const item of github.items as Record<string, unknown>[]) {
+        if (!item || typeof item.repo !== "string" || !Number.isSafeInteger(item.number) || typeof item.createdAt !== "string") continue;
+        this.sql.exec(`INSERT INTO items (repo, number, created_at, closed_at, first_seen, data) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT (repo, number) DO UPDATE SET created_at = excluded.created_at, closed_at = excluded.closed_at, data = excluded.data`,
+          item.repo, item.number, item.createdAt, typeof item.closedAt === "string" ? item.closedAt : null, now.toISOString(), JSON.stringify(item));
+      }
       this.sql.exec(`INSERT INTO github (id, at, data) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET at = excluded.at, data = excluded.data`,
         github.at, JSON.stringify(github));
     }
@@ -81,9 +111,69 @@ export class BoardStore {
     const rows = options.jobId
       ? this.sql.exec("SELECT * FROM events WHERE job_id = ? AND at >= ? ORDER BY at DESC, id DESC LIMIT ?", options.jobId, options.since, limit).toArray()
       : this.sql.exec("SELECT * FROM events WHERE at >= ? ORDER BY at DESC, id DESC LIMIT ?", options.since, limit).toArray();
-    return rows.map(row => ({ id: Number(row.id), jobId: row.job_id === null ? null : String(row.job_id), at: String(row.at),
-      kind: String(row.kind), text: String(row.text), runner: String(row.runner) }));
+    return rows.map(eventRow);
   }
+
+  /**
+   * What happened between `from` and `to` (ISO instants), for the Summary view. Counts come back per UTC hour, kind
+   * and repo so the browser can cut them into its own local days, and start at `compareFrom` so the period before
+   * can be compared. Highlights (named events), the issues and PRs opened or closed, and the jobs those events
+   * name are for `from`–`to` only, except items, which also cover the period before for its counts.
+   */
+  summary(options: { from: string; to: string; compareFrom: string }): Summary {
+    const { from, to, compareFrom } = options;
+    const hours = this.sql.exec(`SELECT substr(at, 1, 13) AS hour, kind, CASE WHEN job_id IS NULL THEN NULL ELSE substr(job_id, 1, instr(job_id, '#') - 1) END AS repo, count(*) AS n
+      FROM events WHERE at >= ? AND at < ? GROUP BY 1, 2, 3`, compareFrom, to).toArray()
+      .map(row => ({ hour: String(row.hour), kind: String(row.kind), repo: row.repo === null ? null : String(row.repo), n: Number(row.n) }));
+    const marks = HIGHLIGHT_KINDS.map(() => "?").join(", ");
+    const highlights = this.sql.exec(`SELECT * FROM events WHERE at >= ? AND at < ? AND (kind IN (${marks}) OR kind GLOB '*_error')
+      ORDER BY at DESC, id DESC LIMIT ?`, from, to, ...HIGHLIGHT_KINDS, HIGHLIGHT_LIMIT).toArray().map(eventRow);
+    const items = this.sql.exec(`SELECT data FROM items WHERE (created_at >= ? AND created_at < ?) OR (closed_at >= ? AND closed_at < ?)`,
+      compareFrom, to, compareFrom, to).toArray().map(row => JSON.parse(String(row.data)) as unknown);
+    const ids = [...new Set(highlights.map(e => e.jobId).filter((id): id is string => id !== null))];
+    const jobs: unknown[] = [];
+    for (let i = 0; i < ids.length; i += 90) {
+      const chunk = ids.slice(i, i + 90);
+      jobs.push(...this.sql.exec(`SELECT data FROM job_history WHERE id IN (${chunk.map(() => "?").join(", ")})`, ...chunk).toArray()
+        .map(row => JSON.parse(String(row.data)) as unknown));
+    }
+    const first = this.sql.exec("SELECT min(at) AS at FROM events").toArray()[0];
+    // A snapshot carries every open item and those closed in its last 14 days, so the first one covers that far back.
+    const firstItem = this.sql.exec("SELECT min(first_seen) AS at FROM items").toArray()[0];
+    return {
+      from, to, compareFrom, hours, highlights, truncated: highlights.length === HIGHLIGHT_LIMIT, items, jobs,
+      eventsSince: first?.at ? String(first.at) : null,
+      itemsSince: firstItem?.at ? new Date(Date.parse(String(firstItem.at)) - ITEM_WINDOW_DAYS * 86_400_000).toISOString() : null,
+    };
+  }
+
+  /** Event counts per UTC hour and repo (null for runner-level events), for the calendar's activity shading. */
+  calendar(options: { from: string; to: string }): { hours: { hour: string; repo: string | null; n: number }[] } {
+    const hours = this.sql.exec(`SELECT substr(at, 1, 13) AS hour, CASE WHEN job_id IS NULL THEN NULL ELSE substr(job_id, 1, instr(job_id, '#') - 1) END AS repo, count(*) AS n
+      FROM events WHERE at >= ? AND at < ? GROUP BY 1, 2`, options.from, options.to).toArray()
+      .map(row => ({ hour: String(row.hour), repo: row.repo === null ? null : String(row.repo), n: Number(row.n) }));
+    return { hours };
+  }
+}
+
+export interface Summary {
+  from: string;
+  to: string;
+  compareFrom: string;
+  hours: { hour: string; kind: string; repo: string | null; n: number }[];
+  highlights: BoardEvent[];
+  /** The highlight list hit its limit; counts are still complete. */
+  truncated: boolean;
+  items: unknown[];
+  jobs: unknown[];
+  /** The oldest event and item the board holds: periods before these are incomplete. */
+  eventsSince: string | null;
+  itemsSince: string | null;
+}
+
+function eventRow(row: Record<string, unknown>): BoardEvent {
+  return { id: Number(row.id), jobId: row.job_id === null ? null : String(row.job_id), at: String(row.at),
+    kind: String(row.kind), text: String(row.text), runner: String(row.runner) };
 }
 
 export class BadSnapshot extends Error {}
