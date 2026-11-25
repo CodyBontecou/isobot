@@ -217,7 +217,7 @@ function LineChart({ days, series, markers, format = exact, height = 170 }: { da
   );
 }
 
-function ColumnChart({ points, color, format = exact, label, height = 150 }: { points: { key: string; label: string; value: number; note?: string }[]; color: string; format?: (n: number) => string; label: string; height?: number }) {
+export function ColumnChart({ points, color, format = exact, label, height = 150, onSelect }: { points: { key: string; label: string; value: number; note?: string }[]; color: string; format?: (n: number) => string; label: string; height?: number; onSelect?: (key: string) => void }) {
   const [ref, width] = useWidth<HTMLDivElement>();
   const [hover, setHover] = useState<number | null>(null);
   const max = niceMax(Math.max(0, ...points.map(p => p.value)));
@@ -226,7 +226,7 @@ function ColumnChart({ points, color, format = exact, label, height = 150 }: { p
   const band = points.length ? plotW / points.length : plotW;
   const barW = Math.max(2, Math.min(24, band - 2));
   const y = (v: number) => PAD.top + plotH - (v / max) * plotH;
-  const labelEvery = Math.max(1, Math.ceil(points.length / 6));
+  const labelEvery = points.length <= 8 ? 1 : Math.max(1, Math.ceil(points.length / 6));
   const column = (cx: number, top: number) => {
     const h = PAD.top + plotH - top;
     const r = Math.min(4, h, barW / 2);
@@ -246,7 +246,9 @@ function ColumnChart({ points, color, format = exact, label, height = 150 }: { p
           {points.map((p, i) => {
             const cx = PAD.left + band * i + band / 2;
             return (
-              <g key={p.key} onPointerEnter={() => setHover(i)} tabIndex={0} onFocus={() => setHover(i)} onBlur={() => setHover(null)}>
+              <g key={p.key} onPointerEnter={() => setHover(i)} tabIndex={0} onFocus={() => setHover(i)} onBlur={() => setHover(null)}
+                onClick={onSelect ? () => onSelect(p.key) : undefined} onKeyDown={onSelect ? e => { if (e.key === 'Enter') onSelect(p.key); } : undefined}
+                style={onSelect ? { cursor: 'pointer' } : undefined} aria-label={onSelect ? `${p.label}: ${format(p.value)} ${label}` : undefined}>
                 <rect x={PAD.left + band * i} y={PAD.top} width={band} height={plotH} fill="transparent" />
                 {p.value > 0 ? <path d={column(cx, y(p.value))} fill={color} opacity={hover === null || hover === i ? 1 : 0.55} /> : null}
                 {i % labelEvery === 0 || i === points.length - 1 ? <text x={cx} y={height - 6} className="tick" textAnchor="middle">{p.label}</text> : null}

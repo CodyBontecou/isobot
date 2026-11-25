@@ -90,7 +90,7 @@ export interface BoardEvent { id: number; jobId: string | null; at: string; kind
 
 export interface Session { authenticated: boolean; oauthConfigured?: boolean; user?: { id: string; login: string; name: string | null }; csrfToken?: string }
 
-export type View = 'overview' | 'growth' | 'tasks' | 'activity' | 'schedule' | 'prs' | 'issues' | 'jobs';
+export type View = 'overview' | 'summary' | 'growth' | 'tasks' | 'activity' | 'schedule' | 'prs' | 'issues' | 'jobs';
 
 // Mirrors runner/src/metrics.ts: the Growth view's series, served by /api/metrics.
 
@@ -127,3 +127,23 @@ export interface Metrics {
   sites: MetricsSite[];
   credits: { days: { day: string; spent: number }[]; balance: number | null };
 }
+
+// Mirrors BoardStore.summary() (board/src/store.ts), served by /api/summary.
+
+export interface SummaryData {
+  from: string;
+  to: string;
+  compareFrom: string;
+  /** Event counts per UTC hour (`2026-11-25T14`), kind and repo (null for runner-level events). */
+  hours: { hour: string; kind: string; repo: string | null; n: number }[];
+  highlights: BoardEvent[];
+  truncated: boolean;
+  /** Issues and PRs opened or closed from compareFrom to `to`. */
+  items: BoardItem[];
+  /** The jobs the highlights name, as last seen. */
+  jobs: Job[];
+  eventsSince: string | null;
+  itemsSince: string | null;
+}
+
+export interface CalendarData { hours: { hour: string; repo: string | null; n: number }[] }

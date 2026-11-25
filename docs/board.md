@@ -8,6 +8,7 @@ link), and a side pane with a job's full timeline.
 | View | Shows |
 | --- | --- |
 | Overview | Runner health, what's building, what needs you (review, failed, proposed, waiting to ship), the PRs the sweep says need you, what runs next, today's events |
+| Summary | One day, week (Mon–Sun) or month at a time, in your time zone, against the period before (or, for one still under way, the same stretch of it): PRs merged, issues opened and closed, failed builds, runner errors, activity by hour or day, what shipped, new issues by source, what the trains, content and ASO did, problems, work per repository, and store numbers, listing changes and published pages. Step with ‹ › or the arrow keys, jump with the calendar (shaded by activity) or **Today** (`t`); `d`/`w`/`m` switch period, and clicking a day in the chart opens it. `?view=summary&period=month&date=2026-11-01` links to a period |
 | Growth | What the scheduled work measures and what it changed, over 30/90/120 days: installs and listing traffic (App Store and Play), Google Play's overall rating and the days with new ratings, search phrases in the top 10, conversion, trials, proceeds, a per-phrase rank table with 7- and 28-day moves, Search Console clicks per week, OpenSEO credits. Listing changes (◆) and published pages (●) are marked on every chart |
 | Tasks | The `isobot:*` label queue as columns (proposed → ready → building → review, failed), plus work merged in the last 7 days |
 | Activity | The runner's event timeline by day (7 days), split into job and runner-level events, with text search |
@@ -37,6 +38,11 @@ browser ──GitHub sign-in──▶ isobot-board ──RPC──▶ AccountAut
   The runner rebuilds them every 15 minutes and sends them only when they changed; the board keeps the latest set
   and serves it at `/api/metrics`. Rank snapshots fill in over the day, so each phrase counts at its newest reading
   from the last 7 days, and the rank trend uses the app's main storefront (`aso.storefront`, default US).
+- **History for the Summary view**: the board keeps runner events for 400 days, and every issue, PR and job it has
+  seen (newest copy), so periods older than a snapshot's 14 days of closed items still count. `/api/summary` returns
+  event counts per UTC hour, kind and repo (the browser cuts them into local days), the named events (merges,
+  failures, trains, ASO, content, crash issues, `*_error`), and the items and jobs for the period; `/api/calendar`
+  returns counts for the date picker. History starts when the board does, and the view says when a period predates it.
 - **The board only reads.** It has no GitHub token and can't change labels, jobs or the runner.
 - **Sign-in** reuses Pi's GitHub login (`cloudflare/src/account-routes.ts`) and its `AccountAuth` Durable Object
   through a cross-script binding, so the allowlist (`GITHUB_OAUTH_ALLOWED_IDS`, CodyBontecou only) and session

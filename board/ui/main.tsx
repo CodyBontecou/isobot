@@ -1,11 +1,15 @@
 import { createRoot } from 'react-dom/client';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
-  Activity, AlertTriangle, Bug, CalendarClock, CircleDot, CircleCheck, CircleX, ExternalLink, GitMerge, GitPullRequest,
-  GitPullRequestClosed, GitPullRequestDraft, Hammer, Inbox, KanbanSquare, LayoutDashboard, ListChecks, LogOut, Mail,
-  MessageSquare, Bot, Mic, Newspaper, Pause, RefreshCw, Rocket, Search, Star, TrendingUp, X,
+  Activity, AlertTriangle, CalendarClock, CalendarRange, CircleDot, CircleX, ExternalLink, GitMerge, GitPullRequest,
+  Hammer, Inbox, KanbanSquare, LayoutDashboard, ListChecks, LogOut, Pause, RefreshCw, TrendingUp, X,
 } from 'lucide-react';
+import {
+  ATTENTION, Chip, Empty, getJson, ItemRow, JobLink, Labels, labelTone, prNeedsYou, rel, full, SearchBox, Section, short,
+  SignedOut, SourceChip, SOURCES, sourceOf, STATE_TONE,
+} from './common';
 import { Growth } from './growth';
+import { Summary, type Period } from './summary';
 import type { Board, BoardEvent, BoardItem, Job, RunnerState, Session, SourceKind, View } from './types';
 import './styles.css';
 
@@ -13,6 +17,7 @@ import './styles.css';
 
 const VIEWS: { id: View; label: string; icon: typeof Activity }[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'summary', label: 'Summary', icon: CalendarRange },
   { id: 'growth', label: 'Growth', icon: TrendingUp },
   { id: 'tasks', label: 'Tasks', icon: KanbanSquare },
   { id: 'activity', label: 'Activity', icon: Activity },
@@ -22,12 +27,12 @@ const VIEWS: { id: View; label: string; icon: typeof Activity }[] = [
   { id: 'jobs', label: 'Jobs', icon: ListChecks },
 ];
 
-type Params = { view: View; repo: string; q: string; state: string; job: string; source: string; range: string; daily: string; app: string };
+type Params = { view: View; repo: string; q: string; state: string; job: string; source: string; range: string; daily: string; app: string; period: string; date: string };
 
 function readParams(): Params {
   const p = new URLSearchParams(location.search);
   const view = (p.get('view') ?? 'overview') as View;
-  return { view: VIEWS.some(v => v.id === view) ? view : 'overview', repo: p.get('repo') ?? '', q: p.get('q') ?? '', state: p.get('state') ?? '', job: p.get('job') ?? '', source: p.get('source') ?? '', range: p.get('range') ?? '', daily: p.get('daily') ?? '', app: p.get('app') ?? '' };
+  return { view: VIEWS.some(v => v.id === view) ? view : 'overview', repo: p.get('repo') ?? '', q: p.get('q') ?? '', state: p.get('state') ?? '', job: p.get('job') ?? '', source: p.get('source') ?? '', range: p.get('range') ?? '', daily: p.get('daily') ?? '', app: p.get('app') ?? '', period: p.get('period') ?? '', date: p.get('date') ?? '' };
 }
 
 function useParams(): [Params, (next: Partial<Params>, push?: boolean) => void] {
@@ -52,28 +57,11 @@ function useParams(): [Params, (next: Partial<Params>, push?: boolean) => void] 
 
 // ---------- time ----------
 
-function rel(iso: string | null | undefined, now = Date.now()): string {
-  if (!iso) return '—';
-  const diff = Date.parse(iso) - now;
-  const abs = Math.abs(diff);
-  const unit = abs < 60_000 ? `${Math.max(1, Math.round(abs / 1000))}s` : abs < 3_600_000 ? `${Math.round(abs / 60_000)}m`
-    : abs < 86_400_000 ? `${Math.round(abs / 3_600_000)}h` : `${Math.round(abs / 86_400_000)}d`;
-  return diff > 0 ? `in ${unit}` : `${unit} ago`;
-}
 const clock = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const dayKey = (iso: string) => new Date(iso).toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
-const full = (iso: string | null | undefined) => iso ? new Date(iso).toLocaleString() : '';
-const short = (repo: string) => repo.split('/')[1] ?? repo;
 
 // ---------- data ----------
 
-async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(path, { credentials: 'same-origin', signal, headers: { Accept: 'application/json' } });
-  if (response.status === 401) throw new SignedOut();
-  if (!response.ok) throw new Error(`${path} answered ${response.status}`);
-  return response.json() as Promise<T>;
-}
-class SignedOut extends Error {}
 
 /** Runner liveness from its newest push: the runner pushes every minute. */
 function liveness(runner: RunnerState | undefined, now: number): { label: string; tone: 'ok' | 'warn' | 'bad' } {
@@ -95,10 +83,6 @@ const COLUMNS = [
   { label: 'isobot:failed', title: 'Failed', hint: 'Needs a look' },
 ];
 
-const STATE_TONE: Record<string, string> = {
-  queued: 'muted', blocked: 'warn', building: 'info', awaiting_ci: 'info', pr_open: 'accent', merged: 'ok', released: 'ok',
-  awaiting_ship: 'warn', shipped: 'ok', closed: 'muted', failed: 'bad', stopped: 'muted',
-};
 
 // ---------- app ----------
 
@@ -167,7 +151,7 @@ function App() {
         <nav>
           {VIEWS.map(({ id, label, icon: Icon }) => (
             <a key={id} href={`?view=${id}`} className={params.view === id ? 'active' : ''}
-              onClick={e => { e.preventDefault(); setParams({ view: id, state: '', q: '', source: '', app: '' }); }}>
+              onClick={e => { e.preventDefault(); setParams({ view: id, state: '', q: '', source: '', app: '', period: '', date: '' }); }}>
               <Icon size={15} /> <span>{label}</span>{counts[id] ? <em>{counts[id]}</em> : null}
             </a>
           ))}
@@ -200,6 +184,8 @@ function App() {
           : !runner ? <Empty title="No runner has reported yet" body="Set ISOBOT_BOARD_URL and ISOBOT_BOARD_TOKEN in runner.env and restart the runner." />
           : <div className="content">
               {params.view === 'overview' && <Overview runner={runner} items={items} jobs={jobs} events={repoEvents} now={now} open={job => setParams({ job })} go={view => setParams({ view })} goSource={source => setParams({ view: 'issues', state: 'open', source, q: '' })} goPrs={() => setParams({ view: 'prs', state: 'needs', source: '', q: '' })} />}
+              {params.view === 'summary' && <Summary runner={runner} repo={params.repo} setRepo={repo => setParams({ repo })} period={(['day', 'week', 'month'].includes(params.period) ? params.period : 'week') as Period}
+                date={params.date} go={(period, date) => setParams({ period: period === 'week' ? '' : period, date })} open={job => setParams({ job })} />}
               {params.view === 'growth' && <Growth repo={params.repo} range={params.range} setRange={range => setParams({ range: range === '90' ? '' : range })}
                 daily={params.daily === '1'} setDaily={daily => setParams({ daily: daily ? '1' : '' })} app={params.app} setApp={app => setParams({ app }, false)} />}
               {params.view === 'tasks' && <Tasks items={items} jobs={jobs} now={now} open={job => setParams({ job })} />}
@@ -240,104 +226,6 @@ function SignIn({ configured }: { configured: boolean }) {
   );
 }
 
-// ---------- shared bits ----------
-
-function Empty({ title, body }: { title: string; body?: string }) {
-  return <div className="empty"><Inbox size={20} /><strong>{title}</strong>{body ? <span>{body}</span> : null}</div>;
-}
-
-function Section({ title, action, children }: { title: string; action?: ReactNode; children: ReactNode }) {
-  return <section className="section"><div className="section-head"><h2>{title}</h2>{action}</div>{children}</section>;
-}
-
-function Chip({ tone = 'muted', children, title }: { tone?: string; children: ReactNode; title?: string }) {
-  return <span className={`chip ${tone}`} title={title}>{children}</span>;
-}
-
-function JobLink({ id, open }: { id: string; open: (id: string) => void }) {
-  return <button className="joblink" onClick={() => open(id)}>{short(id.split('#')[0])}#{id.split('#')[1]}</button>;
-}
-
-function SearchBox({ q, setQ, placeholder }: { q: string; setQ: (q: string) => void; placeholder: string }) {
-  return <label className="search"><Search size={14} /><input value={q} onChange={e => setQ(e.target.value)} placeholder={placeholder} />{q ? <button className="icon" onClick={() => setQ('')}><X size={12} /></button> : null}</label>;
-}
-
-function Labels({ labels }: { labels: string[] }) {
-  return <>{labels.map(l => <Chip key={l} tone={l.startsWith('isobot:') ? labelTone(l) : 'muted'}>{l.replace(/^isobot:/, '')}</Chip>)}</>;
-}
-function labelTone(label: string): string {
-  return { 'isobot:failed': 'bad', 'isobot:review': 'accent', 'isobot:building': 'info', 'isobot:ready': 'ok', 'isobot:proposed': 'warn', 'isobot:ship': 'warn', 'isobot:stop': 'bad' }[label] ?? 'muted';
-}
-
-const SOURCES: Record<SourceKind, { label: string; icon: typeof Activity; hint: string }> = {
-  github: { label: 'GitHub', icon: CircleDot, hint: 'Filed on GitHub' },
-  discord: { label: 'Discord', icon: MessageSquare, hint: 'A Discord message, via triage' },
-  email: { label: 'Email', icon: Mail, hint: 'An email, via triage' },
-  vox: { label: 'Vox note', icon: Mic, hint: 'Your Vox.md voice note' },
-  appstore: { label: 'App Store review', icon: Star, hint: 'An App Store review, via triage' },
-  chat: { label: 'isobot chat', icon: Bot, hint: 'Asked for in the isobot staff chat' },
-  content: { label: 'Content train', icon: Newspaper, hint: 'Researched by the content train' },
-  release: { label: 'Release train', icon: Rocket, hint: 'Opened by the release train' },
-  crash: { label: 'Crash report', icon: Bug, hint: 'A Play, App Store or TestFlight crash, via the crash audit' },
-};
-const sourceOf = (item: BoardItem): SourceKind => item.source && item.source.kind in SOURCES ? item.source.kind : 'github';
-
-/** Where the work came from. With `link`, it opens the original message or review when there is one (not inside another link). */
-function SourceChip({ item, link = false }: { item: BoardItem; link?: boolean }) {
-  const kind = sourceOf(item);
-  const { label, icon: Icon, hint } = SOURCES[kind];
-  const body = <><Icon size={11} />{label}</>;
-  const title = item.kind === 'pr' && item.closes ? `${hint} (from #${item.closes})` : hint;
-  return link && item.source?.url && /^https:\/\//.test(item.source.url)
-    ? <a className={`chip source ${kind}`} href={item.source.url} target="_blank" rel="noreferrer" title={`${title}: open the original`} onClick={e => e.stopPropagation()}>{body}<ExternalLink size={10} /></a>
-    : <span className={`chip source ${kind}`} title={title}>{body}</span>;
-}
-
-function ItemIcon({ item }: { item: BoardItem }) {
-  if (item.kind === 'pr') {
-    if (item.merged) return <GitMerge size={15} className="tone-merged" />;
-    if (item.state === 'closed') return <GitPullRequestClosed size={15} className="tone-bad" />;
-    if (item.draft) return <GitPullRequestDraft size={15} className="tone-muted" />;
-    return <GitPullRequest size={15} className="tone-ok" />;
-  }
-  return item.state === 'open' ? <CircleDot size={15} className="tone-ok" /> : <CircleCheck size={15} className="tone-merged" />;
-}
-
-/** The PR sweep's verdict as a chip: what to do about the PR, its reason on hover. */
-const ATTENTION: Record<string, { label: string; tone: string }> = {
-  ready: { label: 'merge', tone: 'ok' },
-  review: { label: 'review', tone: 'warn' },
-  conflicting: { label: 'land: conflicts', tone: 'warn' },
-  failing: { label: 'land: CI red', tone: 'bad' },
-  duplicate: { label: 'duplicate', tone: 'warn' },
-  superseded: { label: 'superseded', tone: 'muted' },
-  draft: { label: 'stale draft', tone: 'muted' },
-};
-
-/** Open PRs the last sweep says something waits on the owner for (isobot's own review PRs are listed by their issue). */
-const prNeedsYou = (i: BoardItem) => i.kind === 'pr' && i.state === 'open' && Boolean(i.attention?.action) && i.attention?.status !== 'review';
-
-function AttentionChip({ item }: { item: BoardItem }) {
-  const a = item.attention;
-  if (!a?.action) return null;
-  const known = ATTENTION[a.status] ?? { label: a.status, tone: 'muted' };
-  return <Chip tone={known.tone} title={`${a.reason} → ${a.action}`}>{known.label}</Chip>;
-}
-
-function ItemRow({ item, now }: { item: BoardItem; now: number }) {
-  const why = item.state === 'open' && item.attention?.action ? ` · ${item.attention.reason} → ${item.attention.action}` : '';
-  return (
-    <a className="row" href={item.url} target="_blank" rel="noreferrer">
-      <ItemIcon item={item} />
-      <span className="row-main">
-        <span className="row-title">{item.title}</span>
-        <span className="row-sub">{short(item.repo)}#{item.number} · {item.author} · {item.state === 'open' ? `opened ${rel(item.createdAt, now)}` : `${item.merged ? 'merged' : 'closed'} ${rel(item.closedAt, now)}`}{why}</span>
-      </span>
-      <span className="row-chips"><AttentionChip item={item} /><SourceChip item={item} /><Labels labels={item.labels} /></span>
-      <span className="row-time" title={full(item.updatedAt)}>{rel(item.updatedAt, now)}</span>
-    </a>
-  );
-}
 
 // ---------- overview ----------
 

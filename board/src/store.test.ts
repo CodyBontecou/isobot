@@ -49,9 +49,9 @@ test("a runner whose event ids went backwards starts its history over", () => {
   assert.deepEqual(store.events({ since: "2026-11-01T00:00:00Z" }).map(e => e.id), [1]);
 });
 
-test("events older than 30 days are pruned and job filters apply", () => {
+test("events older than 400 days are pruned and job filters apply", () => {
   const store = new BoardStore(sql());
-  store.ingest(snapshot({ events: [event(1, "2026-10-01T00:00:00Z"), event(2, "2026-11-20T10:00:00Z", "o/r#2"), event(3)] }), now);
+  store.ingest(snapshot({ events: [event(1, "2025-10-01T00:00:00Z"), event(2, "2026-11-20T10:00:00Z", "o/r#2"), event(3)] }), now);
   assert.deepEqual(store.events({ since: "2026-01-01T00:00:00Z" }).map(e => e.id), [3, 2]);
   assert.deepEqual(store.events({ since: "2026-01-01T00:00:00Z", jobId: "o/r#2" }).map(e => e.id), [2]);
 });
@@ -76,4 +76,35 @@ test("metrics are kept apart from the runner snapshot and survive pushes without
   assert.deepEqual(store.metrics(), metrics);
   assert.throws(() => store.ingest(snapshot({ metrics: { at: "soon", apps: [], sites: [], credits: {} } }), now), BadSnapshot);
   assert.throws(() => store.ingest(snapshot({ metrics: { at: now.toISOString(), apps: {}, sites: [], credits: {} } }), now), BadSnapshot);
+});
+
+test("the summary counts by hour from the comparison start and names highlights in the period", () => {
+  const store = new BoardStore(sql());
+  const kind = (id: number, k: string, at: string, jobId: string | null = "o/r#1") => ({ ...event(id, at, jobId), kind: k });
+  store.ingest(snapshot({
+    events: [
+      kind(1, "state:merged", "2026-11-18T09:10:00Z"),
+      kind(2, "checks", "2026-11-19T09:20:00Z"),
+      kind(3, "state:merged", "2026-11-19T09:30:00Z", "o/s#4"),
+      kind(4, "aso_error", "2026-11-19T10:00:00Z", null),
+      kind(5, "content_proposed", "2026-11-20T23:59:00Z", null),
+    ],
+    jobs: [{ id: "o/s#4", title: "Fix it", updatedAt: "2026-11-19T09:30:00Z" }, { id: "o/r#1", title: "Other", updatedAt: "2026-11-18T09:10:00Z" }],
+    github: { at: now.toISOString(), errors: [], items: [
+      { repo: "o/r", number: 7, kind: "pr", createdAt: "2026-11-10T00:00:00Z", closedAt: "2026-11-19T12:00:00Z", merged: true },
+      { repo: "o/r", number: 8, kind: "issue", createdAt: "2026-11-01T00:00:00Z", closedAt: null },
+    ] },
+  }), now);
+  // An item that later drops out of the snapshot is still kept.
+  store.ingest(snapshot({ github: { at: now.toISOString(), errors: [], items: [] } }), now);
+  const s = store.summary({ from: "2026-11-19T00:00:00.000Z", to: "2026-11-20T00:00:00.000Z", compareFrom: "2026-11-18T00:00:00.000Z" });
+  assert.deepEqual(s.hours.map(h => `${h.hour} ${h.kind} ${h.repo} ${h.n}`).sort(), [
+    "2026-11-18T09 state:merged o/r 1", "2026-11-19T09 checks o/r 1", "2026-11-19T09 state:merged o/s 1", "2026-11-19T10 aso_error null 1",
+  ]);
+  assert.deepEqual(s.highlights.map(e => e.id), [4, 3], "merges and errors are named; checks and the next day aren't");
+  assert.deepEqual(s.jobs, [{ id: "o/s#4", title: "Fix it", updatedAt: "2026-11-19T09:30:00Z" }]);
+  assert.deepEqual((s.items as { number: number }[]).map(i => i.number), [7]);
+  assert.equal(s.eventsSince, "2026-11-18T09:10:00Z");
+  assert.equal(s.itemsSince, "2026-11-06T12:00:00.000Z", "first seen, less the snapshot's 14 days of closed items");
+  assert.deepEqual(store.calendar({ from: "2026-11-19T00:00:00Z", to: "2026-11-21T00:00:00Z" }).hours.map(h => h.n).reduce((a, b) => a + b), 4);
 });
