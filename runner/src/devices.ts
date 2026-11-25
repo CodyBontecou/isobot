@@ -27,6 +27,8 @@ export interface DeviceLease {
   /** Shown to the builder: which devices are its own and how to reach them. */
   describe(): string;
   release(): Promise<void>;
+  /** Boots again whichever leased device stopped since it was leased; returns what it brought back (empty: all up). */
+  revive?(): Promise<string[]>;
 }
 
 export interface Devices {
@@ -57,6 +59,12 @@ export function simulatorName(jobId: string): string {
 export function staleSimulators(listJson: string): string[] {
   const parsed = JSON.parse(listJson) as { devices?: Record<string, { name: string; udid: string }[]> };
   return Object.values(parsed.devices ?? {}).flat().filter(d => d.name.startsWith(SIMULATOR_PREFIX)).map(d => d.udid);
+}
+
+/** A simulator's state ("Booted", "Shutdown", ...) from `simctl list devices -j`, or null when it's gone. */
+export function simulatorState(listJson: string, udid: string): string | null {
+  const parsed = JSON.parse(listJson) as { devices?: Record<string, { udid: string; state?: string }[]> };
+  return Object.values(parsed.devices ?? {}).flat().find(d => d.udid === udid)?.state ?? null;
 }
 
 /** Running emulator serials from `adb devices`. */
@@ -99,30 +107,74 @@ export class LocalDevices implements Devices {
   private get emulator(): string { return path.join(this.sdk, "emulator", "emulator"); }
 
   async lease(jobId: string, spec: DeviceSpec): Promise<DeviceLease> {
+    // `env` is the same object for the lease's whole life: a revived device updates it in place, so checks and
+    // the builder's shell always see the devices that are up now.
     const env: Record<string, string> = {};
-    const lines: string[] = [];
-    const releases: (() => Promise<void>)[] = [];
-    const release = async () => { for (const undo of releases.reverse()) await undo().catch(() => undefined); };
+    let udid: string | null = null;
+    let android: { serial: string; stop: () => Promise<void> } | null = null;
+    const release = async () => {
+      if (android) await android.stop().catch(() => undefined);
+      if (udid) await this.deleteSimulator(udid).catch(() => undefined);
+      android = null;
+      udid = null;
+    };
+    const describe = () => [
+      ...(spec.ios && udid ? [`- iOS simulator ${spec.ios.deviceType}: UDID ${udid} (booted; in the isobot shell it's $ISOBOT_IOS_SIMULATOR, e.g. \`xcodebuild test -destination "id=$ISOBOT_IOS_SIMULATOR"\`).`] : []),
+      ...(spec.android && android ? [`- Android emulator (a fresh copy of ${spec.android.avd}, yours alone): serial ${android.serial} (booted; adb and Gradle pick it up from $ANDROID_SERIAL in the isobot shell).`] : []),
+    ].join("\n");
+    const bootIos = async () => {
+      udid = await this.bootSimulator(simulatorName(jobId), spec.ios!);
+      env.ISOBOT_IOS_SIMULATOR = udid;
+    };
+    const bootAndroid = async () => {
+      android = await this.bootEmulator(jobId, spec.android!.avd);
+      env.ANDROID_SERIAL = android.serial;
+      // Gradle needs the SDK too, and the runner's own environment usually doesn't name it.
+      env.ANDROID_HOME = this.sdk;
+    };
     try {
-      if (spec.ios) {
-        const udid = await this.bootSimulator(simulatorName(jobId), spec.ios);
-        releases.push(() => this.deleteSimulator(udid));
-        env.ISOBOT_IOS_SIMULATOR = udid;
-        lines.push(`- iOS simulator ${spec.ios.deviceType}: UDID ${udid} (booted; in the isobot shell it's $ISOBOT_IOS_SIMULATOR, e.g. \`xcodebuild test -destination "id=$ISOBOT_IOS_SIMULATOR"\`).`);
-      }
-      if (spec.android) {
-        const { serial, stop } = await this.bootEmulator(jobId, spec.android.avd);
-        releases.push(stop);
-        env.ANDROID_SERIAL = serial;
-        // Gradle needs the SDK too, and the runner's own environment usually doesn't name it.
-        env.ANDROID_HOME = this.sdk;
-        lines.push(`- Android emulator (a fresh copy of ${spec.android.avd}, yours alone): serial ${serial} (booted; adb and Gradle pick it up from $ANDROID_SERIAL in the isobot shell).`);
-      }
+      if (spec.ios) await bootIos();
+      if (spec.android) await bootAndroid();
     } catch (error) {
       await release();
       throw error;
     }
-    return { env, describe: () => lines.join("\n"), release };
+    /**
+     * Something outside the job can stop its devices mid-build (an idle reaper, memory pressure, a person). Checks
+     * that then can't find the device fail for a reason no code change fixes, so the runner asks before each check
+     * run: whatever is down boots again, and the answer names it.
+     */
+    const revive = async () => {
+      const revived: string[] = [];
+      if (spec.ios && udid && !(await this.simulatorBooted(udid))) {
+        const old = udid;
+        await this.deleteSimulator(old).catch(() => undefined);
+        udid = null;
+        await bootIos();
+        revived.push(`iOS simulator ${old} → ${udid}`);
+      }
+      if (spec.android && android && !(await this.emulatorUp(android.serial))) {
+        const old = android.serial;
+        await android.stop().catch(() => undefined);
+        android = null;
+        await bootAndroid();
+        revived.push(`Android emulator ${old} → ${android!.serial}`);
+      }
+      return revived;
+    };
+    return { env, describe, release, revive };
+  }
+
+  private async simulatorBooted(udid: string): Promise<boolean> {
+    const list = await this.exec("xcrun", ["simctl", "list", "devices", "-j"], 120_000);
+    // A failed listing says nothing about the device; don't reboot on it.
+    if (list.code !== 0) return true;
+    return simulatorState(list.stdout, udid) === "Booted";
+  }
+
+  private async emulatorUp(serial: string): Promise<boolean> {
+    const state = await this.exec(this.adb, ["-s", serial, "get-state"], 30_000);
+    return state.code === 0 && state.stdout.trim() === "device";
   }
 
   private async bootSimulator(name: string, ios: NonNullable<DeviceSpec["ios"]>): Promise<string> {

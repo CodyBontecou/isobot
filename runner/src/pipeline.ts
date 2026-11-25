@@ -6,7 +6,7 @@ import type { AgentRun, Builder, JobDevices, PreviousReview, Review } from "./bu
 import { isReleaseIssue } from "./dashboard.js";
 import { hasDevices, type DeviceLease, type Devices } from "./devices.js";
 import { collectMedia, mediaMarkdown, type MediaFile } from "./media.js";
-import { isTransient, UsageLimitError } from "./errors.js";
+import { isTransient, TransientError, UsageLimitError } from "./errors.js";
 import { failureFeedback, formatChecks } from "./checks.js";
 import { configuredRepos, contentPolicy, policyFor, type Environment, type RepoPolicy, type RunnerConfig } from "./config.js";
 import { contentEvidenceKey, CONTENT_BUILD_RULES } from "./content.js";
@@ -101,6 +101,8 @@ const MAX_ATTEMPTS = 5;
 const MAX_NOTE_ROUNDS = 5;
 /** Rounds a content builder gets to take back files outside the site's allowed paths before review. */
 const MAX_PATH_ROUNDS = 2;
+/** Check runs repeated because a job device stopped under them (not the code's fault, so no fix round). */
+const MAX_DEVICE_RERUNS = 2;
 /** How many times a PR left behind by main is sent back to merge it in, before the gate decides as usual. */
 const MAX_MAIN_ROUNDS = 2;
 const CI_WAIT_MS = 90 * 60_000;
@@ -144,6 +146,8 @@ interface Progress {
 /** What recover() kept of an interrupted build: its work as a commit, and where it was. */
 interface Checkpoint extends Progress {
   sha: string;
+  /** Set when a temporary problem (not a restart) stopped the build after the builder had committed: what it was. */
+  retry?: string;
 }
 
 /**
@@ -502,6 +506,9 @@ export class Pipeline {
     const mediaDir = resume?.media && existsSync(resume.media) ? resume.media : mkdtempSync(path.join(this.deps.mediaRoot ?? tmpdir(), "isobot-media-"));
     // A cloud builder can't write to this Mac, so it captures nothing.
     const builderMedia = ex.remote ? undefined : mediaDir;
+    // The builder's latest committed work. A temporary problem after this point keeps it (see the catch below),
+    // so the retry runs checks and review again instead of rebuilding from scratch.
+    let committed: Checkpoint | null = null;
     try {
       const issue = await github.issue(job.owner, job.repo, job.number);
       if (hasLabel(issue, this.labels.stop)) return this.stop(job, issue);
@@ -549,7 +556,11 @@ export class Pipeline {
         baseSha = await repo.mergeBase(mainSha, resume.sha);
         workspace = await repo.createWorkspace(branch, resume.sha);
         mainSummary = resume.main;
-        if (resume.stage === "builder") {
+        if (resume.retry) {
+          await this.deps.notifier.say(job, `♻️ Trying again after a temporary problem (${resume.retry.slice(0, 200)}). Checks and review run again on the builder's work so far.`);
+          run = { ok: true, sessionId: sessionId(), summary: resume.summary };
+          this.setProgress(job.id, { stage: "verify", summary: resume.summary, main: mainSummary, media: mediaDir });
+        } else if (resume.stage === "builder") {
           await this.feed(job, { phase: "implementing" }, "♻️ The runner restarted mid-build. The builder picks up where it left off.");
           run = await builderStep(ids => builder.revise({ cwd: workspace!, ...ids, task, feedback: "", devices, media: builderMedia, timeoutMinutes, resumed: true }));
         } else {
@@ -588,19 +599,43 @@ export class Pipeline {
       }
       const commit = async (message: string) => {
         await repo.commitPending(workspace!, message);
-        return repo.capture(workspace!, branch);
+        const captured = await repo.capture(workspace!, branch);
+        committed = { stage: "verify", sha: captured, summary: run.summary, main: mainSummary, media: mediaDir };
+        return captured;
       };
       let sha = await commit(revising ? `Apply owner feedback for #${issue.number}` : `${issue.title} (#${issue.number})\n\nImplemented by isobot for ${issue.url}`);
       if (await repo.ahead(baseSha, sha) === 0) {
-        return this.fail(job, new Error(`the builder made no changes.\n\nBuilder said:\n\n${quote(run.summary || run.error || "(nothing)")}`), false);
+        committed = null;
+        const said = run.summary || run.error || "";
+        if (alreadyDone(said)) return this.closeAlreadyDone(job, said);
+        return this.fail(job, new Error(`the builder made no changes.\n\nBuilder said:\n\n${quote(said || "(nothing)")}`), false);
       }
-      const runChecks = async (summary: string) => {
+      // Whatever stopped a job device since the last run (an idle reaper, memory pressure) boots again first.
+      const reviveDevices = async (): Promise<string[]> => {
+        if (!lease?.revive) return [];
+        const revived = await lease.revive();
+        if (revived.length) {
+          store.event(job.id, "devices_revived", revived.join("; "), { type: "devices_revived", v: 1, devices: revived });
+          await this.deps.notifier.say(job, `🔌 A test device stopped during the job (${revived.join("; ")}). isobot booted it again.`);
+        }
+        return revived;
+      };
+      let deviceReruns = 0;
+      const runChecks = async (summary: string): Promise<CheckReport> => {
+        await reviveDevices();
         await this.feed(job, { phase: "checking" }, `🔨 Builder:\n${quote(summary || "(no summary)", 15)}`);
-        const report = await ex.checks(workspace!, policy.checks, { env: lease?.env });
-        store.event(job.id, "checks", report.passed ? "passed" : "failed",
-          { type: "checks", v: 1, passed: report.passed, failed: report.results.filter(r => !r.ok).map(r => r.command) });
-        await this.deps.notifier.say(job, checksLine(report));
-        return report;
+        for (;;) {
+          const report = await ex.checks(workspace!, policy.checks, { env: lease?.env });
+          store.event(job.id, "checks", report.passed ? "passed" : "failed",
+            { type: "checks", v: 1, passed: report.passed, failed: report.results.filter(r => !r.ok).map(r => r.command) });
+          await this.deps.notifier.say(job, checksLine(report));
+          // A device that went away under the checks failed them, not the code: run them again on the revived
+          // device instead of sending the builder to fix something that isn't broken.
+          if (report.passed || !(await reviveDevices()).length) return report;
+          if (++deviceReruns > MAX_DEVICE_RERUNS) {
+            throw new TransientError(`the job's test devices kept stopping during checks (${deviceReruns} times)`);
+          }
+        }
       };
 
       // The PR describes the change itself; fix, review and note rounds are listed after it.
@@ -725,14 +760,20 @@ export class Pipeline {
       await this.conclude(job, policy, context, gate);
     } catch (error) {
       if (this.shuttingDown) return;
-      if (isTransient(error)) await this.retryLater(job, error as Error);
-      else await this.fail(job, error as Error);
+      if (isTransient(error)) {
+        const kept = committed as Checkpoint | null;
+        if (kept) {
+          store.setCursor(checkpointKey(job.id), JSON.stringify({ ...kept, retry: (error as Error).message } satisfies Checkpoint));
+        }
+        await this.retryLater(job, error as Error);
+      } else await this.fail(job, error as Error);
     } finally {
       if (lease) await lease.release().catch(error => console.warn(`[devices] ${job.id}: release failed: ${(error as Error).message}`));
       // On shutdown the workspace, captures and progress stay for recover() to pick up.
       if (!this.shuttingDown) {
         this.setProgress(job.id, null);
-        rmSync(mediaDir, { recursive: true, force: true });
+        // A kept checkpoint (above) brings its captures to the retry.
+        if (!store.cursor(checkpointKey(job.id))) rmSync(mediaDir, { recursive: true, force: true });
         if (workspace) await repo.removeWorkspace(branch).catch(() => undefined);
       }
     }
@@ -1361,11 +1402,32 @@ export class Pipeline {
     await this.feed(job, { phase: "stopped" }, "⏹ Stopped.");
   }
 
+  /**
+   * The builder found nothing to change because the issue is already done on the default branch (most often a crash
+   * fixed by other work and not yet released). That's an answer, not a failure: the issue closes as completed with the
+   * builder's explanation, and nothing waits on the owner.
+   */
+  private async closeAlreadyDone(job: Job, said: string): Promise<void> {
+    const { github, store } = this.deps;
+    store.update(job.id, { state: "closed", lastError: null });
+    store.setCursor(checkpointKey(job.id), "");
+    store.event(job.id, "already_done", said.slice(0, 1000), { type: "already_done", v: 1 });
+    await github.removeLabel(job.owner, job.repo, job.number, this.labels.building);
+    await github.comment(job.owner, job.repo, job.number,
+      `✅ isobot made no changes: this is already done on the default branch.\n\nBuilder said:\n\n${quote(said, 40)}\n\n` +
+      `Closing as completed. If it isn't actually fixed, reopen the issue and comment \`retry\` with what's still wrong.`);
+    await github.closeIssue(job.owner, job.repo, job.number, "completed");
+    await this.feed(job, { phase: "closed", detail: "Already done on the default branch" }, `✅ Nothing to change: already done on the default branch. Closed the issue.`,
+      `✅ **${job.owner}/${job.repo}#${job.number}** ${job.title}: already done on the default branch, closed`);
+  }
+
   private async fail(job: Job, error: Error, notify = true): Promise<void> {
     if (this.shuttingDown) return;
     const message = error.message.slice(0, 6000);
     console.error(`[build] ${job.id} failed: ${message}`);
     this.deps.store.update(job.id, { state: "failed", lastError: message });
+    // A retry after a failure starts from the task, not from work a temporary problem left behind.
+    this.deps.store.setCursor(checkpointKey(job.id), "");
     try {
       await this.deps.github.removeLabel(job.owner, job.repo, job.number, this.labels.building);
       await this.deps.github.addLabels(job.owner, job.repo, job.number, [this.labels.failed]);
@@ -1378,6 +1440,15 @@ export class Pipeline {
       `⚠️ isobot couldn't finish this:\n${message.slice(0, 1500)}\n\nReply \`retry\` here to try again. Anything else you say first (or in the same reply, e.g. \`retry, and use the system font\`) goes to the builder.`,
       notify ? `⚠️ **${job.id}** failed: ${message.slice(0, 300)}` : undefined);
   }
+}
+
+/**
+ * Whether a builder that changed nothing says the work is already done: the `Already done:` line BUILDER_RULES asks
+ * for, or the plain words builders used before that rule ("already fixed on `main`").
+ */
+export function alreadyDone(summary: string): boolean {
+  if (/^\W*already done\W*:/im.test(summary)) return true;
+  return /\balready (?:fixed|implemented|done|resolved|in place|handled)\b[^.\n]{0,40}\bon\s+`?(?:main|master|the (?:default|base) branch)\b/i.test(summary);
 }
 
 export function buildTask(issue: Pick<Issue, "title" | "url" | "body">, policy: RepoPolicy): string {
