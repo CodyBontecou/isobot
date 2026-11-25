@@ -44,7 +44,7 @@ const LABEL_COLORS: Record<keyof Labels, string> = {
   failed: "b60205", ship: "5319e7", stop: "000000", auto: "0b7285", cleanup: "d4c5f9", content: "bfdadc", land: "0e8a16",
 };
 
-const LABEL_DESCRIPTIONS: Record<keyof Labels, string> = {
+export const LABEL_DESCRIPTIONS: Record<keyof Labels, string> = {
   proposed: "isobot proposal: add the ready label to approve a build",
   ready: "Approved for isobot to build",
   building: "isobot is working on this",
@@ -55,7 +55,7 @@ const LABEL_DESCRIPTIONS: Record<keyof Labels, string> = {
   auto: "From the owner: isobot may take it end to end (only counts when the owner adds it)",
   cleanup: "Dismiss: isobot removes its local workspaces, strips its labels and closes the issue",
   content: "Website content from isobot's SEO research: builds and merges under the site's content policy",
-  land: "On a PR: isobot takes it over, brings it up to date, fixes checks and CI, and merges it under the usual gates",
+  land: "On a PR: isobot takes it over, updates it, fixes checks and CI, and merges under the usual gates",
 };
 
 /** The subset of GitHub the runner needs; an interface so tests can fake it. */
