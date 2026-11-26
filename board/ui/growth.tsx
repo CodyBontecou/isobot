@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Apple, ArrowDown, ArrowUp, ExternalLink, Globe, Inbox, Newspaper, Play, Search, Table2, TrendingUp, X } from 'lucide-react';
-import type { Metrics, MetricsApp, MetricsSite, PhraseRank } from './types';
+import type { AppSales, Metrics, MetricsApp, MetricsSite, PhraseRank, Proceeds } from './types';
 
 /**
  * Growth: what isobot's scheduled work measures (App Store and Play funnels, search ranks, Search Console)
@@ -280,13 +280,13 @@ function SeriesTable({ days, series, format = exact }: { days: string[]; series:
 
 // ---------- tiles ----------
 
-function Delta({ now, before, goodUp = true, format = exact }: { now: number; before: number | null; goodUp?: boolean; format?: (n: number) => string }) {
-  if (before === null) return <span className="delta muted">no earlier week</span>;
+function Delta({ now, before, goodUp = true, format = exact, vs = 'week before' }: { now: number; before: number | null; goodUp?: boolean; format?: (n: number) => string; vs?: string }) {
+  if (before === null) return <span className="delta muted">no earlier {vs.replace(/ before$/, '')}</span>;
   const diff = now - before;
-  if (diff === 0) return <span className="delta muted">same as the week before</span>;
+  if (diff === 0) return <span className="delta muted">same as the {vs}</span>;
   const good = diff > 0 === goodUp;
   const share = before > 0 ? ` (${diff > 0 ? '+' : ''}${Math.round((diff / before) * 100)}%)` : '';
-  return <span className={`delta ${good ? 'up' : 'down'}`}>{diff > 0 ? <ArrowUp size={11} /> : <ArrowDown size={11} />}{diff > 0 ? '+' : '−'}{format(Math.abs(diff))}{share} vs week before</span>;
+  return <span className={`delta ${good ? 'up' : 'down'}`}>{diff > 0 ? <ArrowUp size={11} /> : <ArrowDown size={11} />}{diff > 0 ? '+' : '−'}{format(Math.abs(diff))}{share} vs {vs}</span>;
 }
 
 function Tile({ label, value, sub, delta }: { label: string; value: string; sub?: string; delta?: ReactNode }) {
@@ -307,6 +307,199 @@ function weekTile(label: string, values: Values[], format = exact): ReactNode {
   const before = weeks.every(w => w.before !== null) ? weeks.reduce((a, w) => a + (w.before ?? 0), 0) : null;
   const end = weeks.map(w => w.end).sort()[0];
   return <Tile key={label} label={label} value={format(now)} delta={<Delta now={now} before={before} format={format} />} sub={`7 days to ${dayLabel(end)}`} />;
+}
+
+// ---------- revenue: Apple's sales reports ----------
+
+const KINDS: { id: keyof Proceeds; label: string; color: string }[] = [
+  { id: 'lifetime', label: 'Lifetime unlocks', color: 'var(--series-1)' },
+  { id: 'subscriptions', label: 'Subscriptions', color: 'var(--series-3)' },
+  { id: 'paidDownloads', label: 'Paid downloads', color: 'var(--series-2)' },
+  { id: 'other', label: 'Other', color: 'var(--text-3)' },
+];
+
+const monthLabel = (month: string, withYear = false) => new Date(`${month}-15T12:00:00`).toLocaleDateString([], { month: 'short', ...(withYear || month.endsWith('-01') ? { year: '2-digit' } : {}) });
+
+interface MonthTotal { month: string; partial: boolean; proceeds: Proceeds; total: number; downloads: number; lifetime: number; subscriptions: number; trials: number }
+
+/** The apps' months added up; a month is partial when any app's is. */
+function monthTotals(sales: AppSales[]): MonthTotal[] {
+  const out = new Map<string, MonthTotal>();
+  for (const s of sales) for (const m of s.months) {
+    const t = out.get(m.month) ?? { month: m.month, partial: false, proceeds: { lifetime: 0, subscriptions: 0, paidDownloads: 0, other: 0 }, total: 0, downloads: 0, lifetime: 0, subscriptions: 0, trials: 0 };
+    out.set(m.month, t);
+    t.partial ||= m.partial;
+    for (const k of KINDS) t.proceeds[k.id] += m.proceeds[k.id];
+    t.total += m.total; t.downloads += m.downloads; t.lifetime += m.lifetime; t.subscriptions += m.subscriptions; t.trials += m.trials;
+  }
+  return [...out.values()].sort((a, b) => a.month.localeCompare(b.month));
+}
+
+/** Monthly columns stacked by kind of revenue; a partial month is drawn lighter. */
+function StackedColumns({ months, height = 170 }: { months: MonthTotal[]; height?: number }) {
+  const [ref, width] = useWidth<HTMLDivElement>();
+  const [hover, setHover] = useState<number | null>(null);
+  const stack = (m: MonthTotal) => KINDS.map(k => Math.max(0, m.proceeds[k.id]));
+  const max = niceMax(Math.max(0, ...months.map(m => stack(m).reduce((a, b) => a + b, 0))));
+  const plotW = Math.max(10, width - PAD.left - PAD.right);
+  const plotH = height - PAD.top - PAD.bottom;
+  const band = months.length ? plotW / months.length : plotW;
+  const barW = Math.max(3, Math.min(28, band - 4));
+  const y = (v: number) => PAD.top + plotH - (v / max) * plotH;
+  const labelEvery = months.length <= 8 ? 1 : Math.ceil(months.length / 6);
+  const m = hover !== null ? months[hover] : null;
+  return (
+    <div className="chart" ref={ref} style={{ height }}>
+      {width > 0 ? (
+        <svg width={width} height={height} role="img" aria-label="Proceeds by month, by kind" onPointerLeave={() => setHover(null)}>
+          {yTicks(max).map(t => (
+            <g key={t}>
+              <line x1={PAD.left} x2={width - PAD.right} y1={y(t)} y2={y(t)} className="grid" />
+              <text x={PAD.left - 6} y={y(t)} className="tick" textAnchor="end" dominantBaseline="middle">{t ? `$${compact(t)}` : '0'}</text>
+            </g>
+          ))}
+          {months.map((month, i) => {
+            const cx = PAD.left + band * i + band / 2;
+            let base = 0;
+            const parts = stack(month);
+            return (
+              <g key={month.month} onPointerEnter={() => setHover(i)} tabIndex={0} onFocus={() => setHover(i)} onBlur={() => setHover(null)}
+                opacity={hover === null || hover === i ? (month.partial ? 0.5 : 1) : 0.35}>
+                <rect x={PAD.left + band * i} y={PAD.top} width={band} height={plotH} fill="transparent" />
+                {parts.map((v, k) => {
+                  if (v <= 0) return null;
+                  const top = y(base + v), bottom = y(base);
+                  base += v;
+                  // A 1px gap of surface between segments keeps the stack readable.
+                  return <rect key={KINDS[k].id} x={cx - barW / 2} y={top} width={barW} height={Math.max(1, bottom - top - 1)} fill={KINDS[k].color} rx={1.5} />;
+                })}
+                {i % labelEvery === 0 || i === months.length - 1 ? <text x={cx} y={height - 6} className="tick" textAnchor="middle">{monthLabel(month.month)}</text> : null}
+              </g>
+            );
+          })}
+        </svg>
+      ) : null}
+      {m ? (
+        <div className="tooltip" style={{ left: Math.min(Math.max(PAD.left + band * hover! + band / 2 + 12, 0), Math.max(0, width - 220)) }}>
+          <div className="tooltip-day">{monthLabel(m.month, true)}{m.partial ? ' · partial' : ''}</div>
+          <div className="tooltip-row"><strong>{money(m.total)}</strong><span>proceeds</span></div>
+          {KINDS.filter(k => m.proceeds[k.id]).map(k => <div key={k.id} className="tooltip-row"><i style={{ background: k.color }} /><strong>{money(m.proceeds[k.id])}</strong><span>{k.label.toLowerCase()}</span></div>)}
+          <div className="tooltip-note">{exact(m.downloads)} downloads · {exact(m.lifetime)} lifetime · {exact(m.subscriptions)} subscription charges · {exact(m.trials)} trials</div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function MonthTable({ months }: { months: MonthTotal[] }) {
+  return (
+    <div className="table-scroll">
+      <table className="table compact">
+        <thead><tr><th>Month</th>{KINDS.map(k => <th key={k.id} className="num">{k.label}</th>)}<th className="num">Total</th><th className="num">Downloads</th><th className="num">Trials</th></tr></thead>
+        <tbody>{[...months].reverse().map(m => (
+          <tr key={m.month}>
+            <td>{monthLabel(m.month, true)}{m.partial ? <span className="tone-muted"> · partial</span> : null}</td>
+            {KINDS.map(k => <td key={k.id} className="num">{m.proceeds[k.id] ? money(m.proceeds[k.id]) : '—'}</td>)}
+            <td className="num"><strong>{money(m.total)}</strong></td>
+            <td className="num">{exact(m.downloads)}</td>
+            <td className="num">{m.trials ? exact(m.trials) : '—'}</td>
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  );
+}
+
+/** Sum of daily totals between two days (inclusive), over every app. */
+function daySum(sales: AppSales[], from: string, to: string): number {
+  return sales.reduce((a, s) => a + s.days.filter(d => d.day >= from && d.day <= to).reduce((x, d) => x + d.total, 0), 0);
+}
+
+/** Every App Store app's revenue together: months by kind, run-rate, and each app's months and years. */
+function Revenue({ apps }: { apps: MetricsApp[] }) {
+  const withSales = apps.filter(a => a.sales && (a.sales.months.length || a.sales.years.length));
+  if (!withSales.length) return null;
+  const sales = withSales.map(a => a.sales!);
+  const months = monthTotals(sales);
+  const through = sales.map(s => s.through).filter((d): d is string => !!d).sort().at(-1) ?? null;
+  const monthOf = through?.slice(0, 7);
+  const thisMonth = through ? daySum(sales, `${monthOf}-01`, through) : 0;
+  // The same days of the month before (to the same day, or the month's end).
+  const prevStart = through ? toDay(new Date(parseDay(`${monthOf}-01`).getFullYear(), parseDay(`${monthOf}-01`).getMonth() - 1, 1)) : '';
+  const prevEnd = through ? toDay(new Date(parseDay(prevStart).getFullYear(), parseDay(prevStart).getMonth(), Math.min(parseDay(through).getDate(), new Date(parseDay(prevStart).getFullYear(), parseDay(prevStart).getMonth() + 1, 0).getDate()))) : '';
+  const lastMonthSoFar = through ? daySum(sales, prevStart, prevEnd) : 0;
+  const d30 = through ? daySum(sales, addDays(through, -29), through) : 0;
+  const d30before = through ? daySum(sales, addDays(through, -59), addDays(through, -30)) : 0;
+  const latestSubs = sales.map(s => s.subs.at(-1)).filter(Boolean) as AppSales['subs'];
+  const runRate = latestSubs.reduce((a, s) => a + s.monthly, 0);
+  const paid = latestSubs.reduce((a, s) => a + s.paid, 0);
+  const trials = latestSubs.reduce((a, s) => a + s.trials, 0);
+  const lastMonths = months.slice(-4).map(m => m.month);
+  const years = [...new Set(sales.flatMap(s => s.years.map(y => y.year)))].sort();
+  const full = (n: number) => n.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+  return (
+    <Section title="Revenue" action={<span className="chip muted" title="Apple's Sales and Trends reports, kept by the runner from the day Apple publishes them; proceeds are USD after Apple's commission, at the ECB's rate that day"><Apple size={11} />sales reports to {through ? dayLabel(through) : '—'}</span>}>
+      <div className="growth-body">
+        <div className="stats growth-stats revenue-stats">
+          <Tile label="This month so far" value={full(thisMonth)} sub={through ? `${dayLabel(`${monthOf}-01`)}–${dayLabel(through)}` : undefined}
+            delta={<Delta now={thisMonth} before={lastMonthSoFar} format={full} vs="same days last month" />} />
+          <Tile label="Last 30 days" value={full(d30)} delta={<Delta now={d30} before={d30before} format={full} vs="30 days before" />} sub={through ? `to ${dayLabel(through)}` : undefined} />
+          <Tile label="Recurring run-rate" value={latestSubs.length ? `${full(runRate)}/mo` : '—'} sub={latestSubs.length ? `${exact(paid)} paid · ${exact(trials)} in trial` : 'No subscription reports yet'} />
+          {years.slice(-3).map(y => {
+            const total = sales.reduce((a, s) => a + (s.years.find(x => x.year === y)?.total ?? 0), 0);
+            const partial = sales.some(s => s.years.find(x => x.year === y)?.partial);
+            return <Tile key={y} label={`${y}${partial ? ' so far' : ''}`} value={full(total)} sub={partial ? 'from daily reports' : "Apple's yearly report"} />;
+          })}
+        </div>
+        <div className="chart-grid">
+          <ChartCard title="Proceeds by month" caption="Every App Store app · USD after Apple's commission" legend={KINDS.filter(k => months.some(m => m.proceeds[k.id])).map(k => ({ id: k.id, label: k.label, color: k.color, values: new Map() }))}
+            empty={months.length ? undefined : 'No monthly sales yet'} table={() => <MonthTable months={months} />}>
+            <StackedColumns months={months} />
+          </ChartCard>
+          <div className="chart-card">
+            <div className="chart-head"><div><h3>By app</h3><div className="chart-caption">Proceeds, the last four months</div></div></div>
+            <div className="table-scroll">
+              <table className="table compact">
+                <thead><tr><th>App</th>{lastMonths.map(m => <th key={m} className="num">{monthLabel(m)}</th>)}<th className="num" title="Paid subscriptions' proceeds a month, from the newest subscription report">Run-rate</th></tr></thead>
+                <tbody>{withSales.map(a => (
+                  <tr key={a.id}>
+                    <td>{a.name.split(':')[0]}</td>
+                    {lastMonths.map(m => { const v = a.sales!.months.find(x => x.month === m); return <td key={m} className="num">{v?.total ? full(v.total) : '—'}</td>; })}
+                    <td className="num">{a.sales!.subs.at(-1)?.monthly ? `${full(a.sales!.subs.at(-1)!.monthly)}/mo` : '—'}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Section>
+  );
+}
+
+/** One app's subscriptions over the range (paid and in trial), with its plans in the table view. */
+function SubscriptionsCard({ sales, days }: { sales: AppSales; days: string[] }) {
+  const series: Series[] = [
+    { id: 'paid', label: 'Paid', color: 'var(--series-3)', values: new Map(sales.subs.map(s => [s.day, s.paid])) },
+    { id: 'trials', label: 'In free trial', color: 'var(--series-1)', values: new Map(sales.subs.map(s => [s.day, s.trials])) },
+  ];
+  const last = sales.subs.at(-1);
+  return (
+    <ChartCard title="Active subscriptions" caption={last ? `Apple's subscription report · ${money(last.monthly)}/mo from paid plans on ${dayLabel(last.day)}` : undefined} legend={series}
+      empty={sales.subs.length ? undefined : 'No subscription reports yet'}
+      table={() => (
+        <div className="table-scroll">
+          <table className="table compact">
+            <thead><tr><th>Plan</th><th className="num">Paid</th><th className="num">Trial</th><th className="num">Offer</th><th className="num">Retry</th><th className="num">A month</th></tr></thead>
+            <tbody>{sales.plans.map(p => (
+              <tr key={`${p.name}|${p.period}`}><td>{p.name} <span className="tone-muted">· {p.period}</span></td><td className="num">{p.paid}</td><td className="num">{p.trial}</td><td className="num">{p.offer || '—'}</td><td className="num">{p.retry + p.grace || '—'}</td><td className="num">{p.monthly ? money(p.monthly) : '—'}</td></tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}>
+      <LineChart days={days} series={series} markers={[]} />
+    </ChartCard>
+  );
 }
 
 // ---------- the view ----------
@@ -368,6 +561,8 @@ export function Growth({ repo, range, setRange, daily, setDaily, app: appParam, 
         <Tile label="Listing changes" value={String(changes30)} sub="isobot applied · 30 days" />
         <Tile label="Pages published" value={String(pages30)} sub="content train · 30 days" />
       </div>
+
+      {!repo ? <Revenue apps={ios} /> : null}
 
       {repos.length ? repos.map(r => (
         <RepoGrowth key={r} apps={apps.filter(a => a.repo === r)} sites={sites.filter(s => s.repo === r)} days={days} smooth={smooth} daily={daily} />
@@ -444,6 +639,13 @@ function RepoGrowth({ apps, sites, days, smooth, daily }: { apps: MetricsApp[]; 
             empty={ranks.length ? undefined : 'No rank snapshots yet'} table={() => <SeriesTable days={days} series={ranks} />}>
             <LineChart days={days} series={ranks} markers={markers} />
           </ChartCard>
+          {ios?.sales?.months.length ? (
+            <ChartCard title="Proceeds by month" caption="Apple's sales reports · USD after commission" legend={KINDS.filter(k => ios.sales!.months.some(m => m.proceeds[k.id])).map(k => ({ id: k.id, label: k.label, color: k.color, values: new Map() }))}
+              table={() => <MonthTable months={monthTotals([ios.sales!])} />}>
+              <StackedColumns months={monthTotals([ios.sales!])} />
+            </ChartCard>
+          ) : null}
+          {ios?.sales?.subs.length ? <SubscriptionsCard sales={ios.sales} days={days} /> : null}
           {ratingSeries.length ? (
             <ChartCard title="Google Play rating" caption={`Overall average, Play's ratings report${ratingThrough ? ` to ${dayLabel(ratingThrough)}` : ''}`} legend={ratingSeries}
               table={() => <SeriesTable days={days} series={ratingSeries} format={n => n.toFixed(2)} />}>

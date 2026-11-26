@@ -126,6 +126,20 @@ export interface MetricsApp {
   phrases: PhraseRank[];
   compare: { d7: string | null; d28: string | null; latest: string | null };
   changes: ListingChange[];
+  /** Apple's Sales and Trends reports (runner/src/sales.ts); App Store apps once any are stored. */
+  sales?: AppSales;
+}
+
+export interface Proceeds { lifetime: number; subscriptions: number; paidDownloads: number; other: number }
+export interface SalesPoint { downloads: number; lifetime: number; subscriptions: number; trials: number; refunds: number; proceeds: Proceeds; total: number }
+export interface PlanSnapshot { name: string; period: string; paid: number; trial: number; offer: number; retry: number; grace: number; monthly: number }
+export interface AppSales {
+  through: string | null;
+  days: ({ day: string } & SalesPoint)[];
+  months: ({ month: string; partial: boolean } & SalesPoint)[];
+  years: ({ year: string; partial: boolean } & SalesPoint)[];
+  subs: { day: string; paid: number; trials: number; retry: number; monthly: number }[];
+  plans: PlanSnapshot[];
 }
 
 export interface SearchTotals { clicks: number; impressions: number; ctr: number; position: number }

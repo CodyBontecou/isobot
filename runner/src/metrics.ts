@@ -3,6 +3,7 @@ import type { Applied, DaySnapshot, PlayApplied } from "./aso.js";
 import { asoApps, contentRepos, type RunnerConfig } from "./config.js";
 import { localDay, type SearchWeek } from "./content.js";
 import type { PlayDay } from "./playAnalytics.js";
+import { salesDaysRead, salesRead, salesRecords, subsSnapshots, sumRecords, type PlanSnapshot, type Proceeds, type SalesRecord } from "./sales.js";
 import type { Store } from "./store.js";
 
 /**
@@ -59,6 +60,34 @@ export interface MetricsApp {
   /** The days `was7` and `was28` were read from (the newest snapshot on or before them). */
   compare: { d7: string | null; d28: string | null; latest: string | null };
   changes: ListingChange[];
+  /** Apple's Sales and Trends reports (sales.ts); App Store apps only, once any have been read. */
+  sales?: AppSales;
+}
+
+/** A sales record without its per-currency detail. */
+export interface SalesPoint {
+  downloads: number;
+  lifetime: number;
+  subscriptions: number;
+  trials: number;
+  refunds: number;
+  proceeds: Proceeds;
+  total: number;
+}
+
+export interface AppSales {
+  /** The newest day with a daily sales report. */
+  through: string | null;
+  /** Daily, the last METRICS_DAYS; a day with a report and no sales for the app is all zeros. */
+  days: ({ day: string } & SalesPoint)[];
+  /** Every month the daily reports cover; `partial` when some of its days have no report (before the window). */
+  months: ({ month: string; partial: boolean } & SalesPoint)[];
+  /** Apple's yearly reports, and the current year summed from its days (`partial`). */
+  years: ({ year: string; partial: boolean } & SalesPoint)[];
+  /** Active subscriptions per day: paid, in a free trial, in billing retry or grace, and the paid ones' monthly proceeds. */
+  subs: { day: string; paid: number; trials: number; retry: number; monthly: number }[];
+  /** The newest snapshot's plans. */
+  plans: PlanSnapshot[];
 }
 
 export interface PublishedPage { at: string; number: number; title: string; prNumber: number | null }
@@ -90,6 +119,60 @@ function appleDay(m: DayMetrics): Record<string, number> {
   }
   if (v.proceeds !== undefined) v.proceeds = Math.round(v.proceeds * 100) / 100;
   return v;
+}
+
+const point = (r: SalesRecord): SalesPoint => ({ downloads: r.downloads, lifetime: r.lifetime, subscriptions: r.subscriptions, trials: r.trials, refunds: r.refunds, proceeds: r.proceeds, total: r.total });
+const ZERO: SalesPoint = { downloads: 0, lifetime: 0, subscriptions: 0, trials: 0, refunds: 0, proceeds: { lifetime: 0, subscriptions: 0, paidDownloads: 0, other: 0 }, total: 0 };
+
+/** One app's sales history, from the stored reports; null when there's none. */
+export function appSales(store: Store, appId: string, since: string, read = salesDaysRead(store), readYears = salesRead(store, "year")): AppSales | null {
+  const days = salesRecords(store, appId, "day");
+  const years = salesRecords(store, appId, "year");
+  const subs = subsSnapshots(store, appId);
+  if (!days.length && !years.length && !subs.length) return null;
+  const readDays = [...read].sort();
+  const through = readDays.at(-1) ?? null;
+  const byDay = new Map(days.map(d => [d.date, d.r]));
+
+  const months = new Map<string, SalesRecord[]>();
+  const covered = new Map<string, number>();
+  for (const day of readDays) {
+    const m = day.slice(0, 7);
+    covered.set(m, (covered.get(m) ?? 0) + 1);
+    const r = byDay.get(day);
+    if (r) months.set(m, [...(months.get(m) ?? []), r]);
+    else if (!months.has(m)) months.set(m, []);
+  }
+  const inMonth = (m: string) => new Date(Date.UTC(Number(m.slice(0, 4)), Number(m.slice(5, 7)), 0)).getUTCDate();
+  const monthList = [...months].sort((a, b) => a[0].localeCompare(b[0])).map(([month, list]) => ({
+    month,
+    // The newest month is partial too, until it ends.
+    partial: (covered.get(month) ?? 0) < inMonth(month),
+    ...point(sumRecords(list)),
+  }));
+
+  // Leading months before the app's first download or sale aren't history.
+  const first = monthList.findIndex(m => m.total || m.downloads);
+  monthList.splice(0, first < 0 ? monthList.length : first);
+
+  const yearList = years.map(y => ({ year: y.date, partial: false, ...point(y.r) }));
+  // A yearly report without the app: it sold nothing that year (only shown once the app has history).
+  for (const year of readYears) if (!yearList.some(y => y.year === year) && monthList.some(m => m.month.startsWith(year))) yearList.push({ year, partial: false, ...ZERO });
+  for (const year of new Set(monthList.map(m => m.month.slice(0, 4)))) {
+    if (yearList.some(y => y.year === year)) continue;
+    yearList.push({ year, partial: true, ...point(sumRecords(days.filter(d => d.date.startsWith(year)).map(d => d.r))) });
+  }
+  yearList.sort((a, b) => a.year.localeCompare(b.year));
+
+  const last = subs.at(-1);
+  return {
+    through,
+    days: readDays.filter(d => d >= since).map(day => ({ day, ...(byDay.has(day) ? point(byDay.get(day)!) : ZERO) })),
+    months: monthList,
+    years: yearList,
+    subs: subs.filter(s => s.day >= since).map(({ day, s }) => ({ day, paid: s.paid, trials: s.trials, retry: s.retry, monthly: s.monthly })),
+    plans: last?.s.plans ?? [],
+  };
 }
 
 function playDay(m: PlayDay): Record<string, number> {
@@ -166,13 +249,17 @@ export function buildMetrics(config: RunnerConfig, store: Store, now = new Date(
     return { storefront, ranks, ...phraseRanks(snaps) };
   };
 
+  const read = salesDaysRead(store);
+  const readYears = salesRead(store, "year");
   for (const [id, repo] of Object.entries(config.appStore?.apps ?? {})) {
+    const sales = appSales(store, id, since, read, readYears);
     apps.push({
       repo, store: "appstore", id,
       name: store.cursor(`analytics:${id}:name`) ?? repo.split("/")[1] ?? id,
       funnel: days<{ m: DayMetrics }>(store, `analytics:${id}:day:`, since).map(d => ({ day: d.day, v: appleDay(d.value.m ?? {}) })),
       ...asoOf(id),
       changes: history(id),
+      ...(sales ? { sales } : {}),
     });
   }
   for (const app of tracked.filter(a => a.store === "play")) {
