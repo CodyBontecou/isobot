@@ -43,6 +43,45 @@ Detailed reports are often empty for small apps; the runner reads only the Stand
 State is in `runner.sqlite` cursors: `analytics:<appId>:day:<date>` (kept 400 days), `…:request`, `…:reports`,
 `…:seen` (instance ids read) and `…:name` (the app name Apple reports).
 
+## Sales and Trends history
+
+The Analytics Reports above start the day a report request was made and give proceeds as one number. For revenue
+history the runner also keeps Apple's **Sales and Trends** reports (`runner/src/sales.ts`). Apple serves these only for a while:
+daily reports for 365 days, monthly for 12 months, yearly indefinitely. So each report is downloaded once and stored
+for good in `runner.sqlite`:
+
+- **Sales, daily** (`SALES SUMMARY`): per app (every app of the vendor, not only `appStore.apps`): first downloads,
+  redownloads, lifetime unlocks, subscription charges (and renewals among them), free trial starts (subscriptions
+  at a price of 0), refunds, and proceeds by kind: lifetime, subscriptions, paid downloads, other. In-app rows name
+  their app by SKU, mapped through `asc apps list` (kept a week) and the app's own rows.
+- **Sales, yearly**: whole years before the daily window (2025 for this account), converted at the mid-year rate.
+- **Subscriptions, daily** (`SUBSCRIPTION SUMMARY` 1_4): active subscriptions by plan (paid, free trial, other
+  offers, billing retry and grace) and the paid ones' monthly proceeds (weekly × 52/12, yearly ÷ 12).
+
+Proceeds are converted to USD at the ECB's reference rate for that day, from Frankfurter (`api.frankfurter.dev`, no
+key; rates cached as `fx:usd:<day>`). A few currencies the ECB doesn't publish (AED, SAR, EGP, NGN, …) use fixed
+rough rates, and the amount converted that way is kept as `approx`. Each record also keeps the proceeds in every
+currency (`local`), so they can be converted again later. A day isn't stored until its rates are out.
+
+Every 6 hours (with the analytics pass), the runner reads up to `salesPerPass` (40) sales and 40 subscription
+reports: first the last 5 days, then the oldest days Apple still has, since those expire first. Subscription days
+go newest first and stop after 14 days in a row without a report (before the first subscription). A report Apple
+doesn't have (a day without sales) is remembered and not asked again, except in the last 5 days. A first backfill
+is about 400 requests; `analytics sales sync --all` does it in one go (about 10 minutes).
+
+State: `sales:<appId>:day:<day>`, `sales:<appId>:year:<year>`, `subs:<appId>:day:<day>`, `sales:<appId>:name`,
+`sales:got:<day|subs|year>:<date>` (read or missing), `sales:skus`, `sales:synced`, `fx:usd:<day>` and
+`fx:through`. Nothing is pruned.
+
+The board's Growth view shows it ([board](board.md)): a Revenue section (proceeds by month stacked by kind,
+this month against the same days last month, the last 30 days, the recurring run-rate, yearly totals, and each
+app's last four months), and on each App Store app its proceeds by month and active subscriptions (with plans
+in the table view).
+
+It needs the vendor number (App Store Connect → Payments and Financial Reports): `analytics.vendorNumber` in the
+runner config, or `ASC_VENDOR_NUMBER` in `runner.env`. The API key needs Sales and Reports access (isobot's Admin
+key has it).
+
 ## What it doesn't cover
 
 Apple's data stops at the App Store and StoreKit: impressions, page views, downloads, purchases and subscription
@@ -56,7 +95,8 @@ nothing about what people do inside the app between install and purchase. The ap
 "analytics": {}
 ```
 
-Optional: `apps` (App Store ids, a subset of `appStore.apps`; default all) and `backfillDays` (1-180, default 35).
+Optional: `apps` (App Store ids, a subset of `appStore.apps`; default all), `backfillDays` (1-180, default 35),
+`vendorNumber` (Sales and Trends; or `ASC_VENDOR_NUMBER` in `runner.env`) and `salesPerPass` (1-400, default 40).
 
 ## Commands
 
@@ -65,6 +105,8 @@ npm run runner -- analytics sync          # download new reports now
 npm run runner -- analytics checkin       # print the check-in's App Store section
 npm run runner -- analytics vox.md 30     # an app's last 30 days as JSON
 npm run runner -- analytics               # every app's last 7 days
+npm run runner -- analytics sales         # what's stored of the Sales and Trends reports
+npm run runner -- analytics sales sync --all   # read every report still to read (a first backfill)
 ```
 
 ## Google Play

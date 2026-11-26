@@ -155,6 +155,10 @@ export interface AnalyticsLimits {
   backfillDays?: number;
   /** App Store app ids to follow; default every app in appStore.apps. */
   apps?: string[];
+  /** The vendor number for Sales and Trends reports (sales.ts); ASC_VENDOR_NUMBER in runner.env works too. */
+  vendorNumber?: string;
+  /** Sales and subscription reports read per pass, each. Default 40. */
+  salesPerPass?: number;
 }
 
 export interface CrashLimits {
@@ -469,6 +473,8 @@ export function validateConfig(config: RunnerConfig): void {
     if (!config.appStore) fail("analytics needs appStore.apps (the apps it reads)");
     if (a.backfillDays !== undefined && !(Number.isInteger(a.backfillDays) && a.backfillDays >= 1 && a.backfillDays <= 180)) fail("analytics.backfillDays must be 1-180");
     for (const id of a.apps ?? []) if (!config.appStore?.apps?.[id]) fail(`analytics.apps: ${id} isn't in appStore.apps`);
+    if (a.vendorNumber !== undefined && !/^\d{5,12}$/.test(a.vendorNumber)) fail("analytics.vendorNumber must be App Store Connect's vendor number (digits)");
+    if (a.salesPerPass !== undefined && !(Number.isInteger(a.salesPerPass) && a.salesPerPass >= 1 && a.salesPerPass <= 400)) fail("analytics.salesPerPass must be 1-400");
   }
   if (config.crashes) {
     const c = config.crashes;

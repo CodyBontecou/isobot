@@ -4,7 +4,8 @@ import { ProductionRelease, nextSlot, productionSettings } from "./production.js
 import { ReleaseTrain } from "./train.js";
 import { ContentTrain } from "./content.js";
 import { AsoTrain, type AsoClient } from "./aso.js";
-import { AppAnalytics } from "./analytics.js";
+import { AppAnalytics, failure } from "./analytics.js";
+import { AppleSales } from "./sales.js";
 import { GoogleAuth, PlayPublisher } from "./google.js";
 import { PlayAnalytics, ratingsText } from "./playAnalytics.js";
 import { CrashAudit } from "./crashes.js";
@@ -72,6 +73,8 @@ interface Runtime {
   content: ContentTrain;
   aso: AsoTrain;
   analytics: AppAnalytics;
+  /** Apple's Sales and Trends reports, kept for good (sales.ts); null without a vendor number. */
+  sales: AppleSales | null;
   /** Play Console's bulk reports for the Play apps of the ASO train; null without aso.playReportsBucket. */
   playAnalytics: PlayAnalytics | null;
   /** Crashes from Google Play, the App Store and TestFlight (crashes.ts); off without config.crashes. */
@@ -217,6 +220,44 @@ function runtime(): Runtime {
     return (data[0] === 0x1f && data[1] === 0x8b ? gunzipSync(data) : data).toString("utf8");
   };
   const analytics = new AppAnalytics({ config, store, asc: analyticsAsc, fetchGz: analyticsFetch });
+  // Sales and Trends reports are the vendor's (every app); the vendor number is in App Store Connect → Payments.
+  const vendor = config.analytics?.vendorNumber ?? process.env.ASC_VENDOR_NUMBER;
+  const sales = config.analytics && vendor ? new AppleSales({
+    store,
+    perPass: config.analytics.salesPerPass,
+    report: async (kind, date) => {
+      const dir = mkdtempSync(path.join(tmpdir(), "isobot-sales-"));
+      try {
+        const out = path.join(dir, "report.tsv.gz");
+        const type = kind === "subscriptions"
+          ? ["--type", "SUBSCRIPTION", "--subtype", "SUMMARY", "--frequency", "DAILY", "--version", "1_4"]
+          : ["--type", "SALES", "--subtype", "SUMMARY", "--frequency", kind === "sales-daily" ? "DAILY" : "YEARLY"];
+        const r = await analyticsAsc(["analytics", "sales", "--vendor", vendor, ...type, "--date", date, "--allow-missing", "--output", out]);
+        // Past Apple's retention it errors instead of answering "not available"; either way there's nothing to read.
+        if (!r.ok) {
+          if (/no longer available/i.test(`${r.stderr}\n${r.stdout}`)) return null;
+          throw failure(`asc analytics sales ${kind} ${date}`, r);
+        }
+        if ((JSON.parse(r.stdout || "{}") as { available?: boolean }).available === false || !existsSync(out)) return null;
+        const data = readFileSync(out);
+        return (data[0] === 0x1f && data[1] === 0x8b ? gunzipSync(data) : data).toString("utf8");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    // The ECB's reference rates through Frankfurter (no key): units of each currency per USD, by business day.
+    rates: async (from, to) => {
+      const response = await fetch(`https://api.frankfurter.dev/v1/${from}..${to}?base=USD`, { signal: AbortSignal.timeout(30_000) });
+      if (!response.ok) throw new Error(`Frankfurter answered HTTP ${response.status}`);
+      return ((await response.json()) as { rates?: Record<string, Record<string, number>> }).rates ?? {};
+    },
+    apps: async () => {
+      const r = await analyticsAsc(["apps", "list", "--paginate", "--output", "json"]);
+      if (!r.ok) throw failure("asc apps list", r);
+      return ((JSON.parse(r.stdout || "{}") as { data?: { id: string; attributes?: { sku?: string; name?: string } }[] }).data ?? [])
+        .map(a => ({ id: a.id, sku: a.attributes?.sku ?? "", name: a.attributes?.name ?? "" }));
+    },
+  }) : null;
   // One Google service account for Play listings and Play Console's reports; its key file stays where it is.
   const googleAuth = config.aso ? new GoogleAuth((config.aso.googleKey ?? "~/.config/isobot/play-isobot-aso.json").replace(/^~(?=\/)/, homedir())) : null;
   const playPackages = () => asoApps(config).filter(a => a.store === "play").map(a => a.aso.appId);
@@ -255,7 +296,7 @@ function runtime(): Runtime {
     config: config.prSweep, landLabel: config.labels.land, github, store,
     repos: () => configuredRepos(config).filter(r => policyFor(config, `${r.owner}/${r.repo}`).autonomy !== "off").map(r => `${r.owner}/${r.repo}`),
   });
-  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, production, content, aso, analytics, playAnalytics, crashes, playRollout, prSweep, secrets, handoff };
+  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, production, content, aso, analytics, sales, playAnalytics, crashes, playRollout, prSweep, secrets, handoff };
 }
 
 /** ASO Tracker's CLI: one JSON call per tool; it starts the tracker's daemon itself when it isn't running. */
@@ -506,6 +547,7 @@ async function loop(rt: Runtime): Promise<void> {
           // Each reads its store at most every 6 hours itself; Play's failures (a 403) are kept, not thrown.
           void (async () => {
             if (rt.analytics.apps().length) await rt.analytics.tick().catch(error => console.warn(`[analytics] failed: ${(error as Error).message}`));
+            if (rt.sales) await rt.sales.tick().catch(error => console.warn(`[sales] failed: ${(error as Error).message}`));
             if (rt.playAnalytics) await rt.playAnalytics.tick().catch(error => console.warn(`[play-analytics] failed: ${(error as Error).message}`));
           })().finally(() => { analyticsRunning = false; });
         }
@@ -812,6 +854,9 @@ const HELP = `isobot runner
   analytics play [sync | ratings]
                       Read Play Console's bulk reports now (sync), print each Play app's ratings (ratings),
                       or print each Play app's week and the reports' status
+  analytics sales [sync [--all]]
+                      Print what's stored of Apple's Sales and Trends reports, or read the next batch now
+                      (sync), or every report still to read (sync --all, for a first backfill)
   analytics [sync | checkin | <app> [days]]
                       Download new App Store analytics reports now, print the check-in's App Store section,
                       or print an app's daily numbers (default: every app's last 7 days)
@@ -1068,6 +1113,16 @@ async function main(): Promise<void> {
         for (const pkg of asoApps(rt.config).filter(a => a.store === "play").map(a => a.aso.appId)) {
           console.log(`${pkg}: ${rt.playAnalytics.weekLine(pkg) ?? `(no week yet; latest day ${rt.playAnalytics.latest(pkg) ?? "none"})`}`);
         }
+        return;
+      }
+      if (what === "sales") {
+        if (!rt.sales) {
+          console.error("Sales reports are off: set analytics.vendorNumber in the runner config (or ASC_VENDOR_NUMBER in runner.env).");
+          process.exitCode = 2;
+          return;
+        }
+        if (days === "sync") console.log(JSON.stringify(await rt.sales.tick(true, process.argv.includes("--all"))));
+        console.log(JSON.stringify(rt.sales.status(), null, 2));
         return;
       }
       if (!rt.analytics.apps().length) {
