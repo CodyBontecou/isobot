@@ -3,13 +3,15 @@ import { latestSweep, type SweepResult } from "./prSweep.js";
 import { CRASH_MARKER } from "./crashes.js";
 import { CHAT_MARKER } from "./notes.js";
 import type { BoardMetrics } from "./metrics.js";
+import type { BoardAction, BoardActionResult } from "./boardActions.js";
 import type { FollowUp, Job, Store, StoredEvent } from "./store.js";
 
 /**
  * The isobot board (bot.isolated.tech, `board/`): the runner pushes what it knows to the board Worker
  * once a minute, so its state, schedule and GitHub work can be read in one place instead of Discord.
- * The push is one-way and read-only: the board can't change anything here. GitHub credentials and
- * runner.sqlite stay on this Mac; the board only stores what is in these snapshots.
+ * GitHub credentials and runner.sqlite stay on this Mac; the board only stores what is in these snapshots.
+ * The one way back is the board's answer: task actions the owner clicked (approve, stop, retry, dismiss,
+ * boardActions.ts), which the runner checks and applies itself and reports on in its next push.
  */
 
 export const SNAPSHOT_VERSION = 1;
@@ -143,6 +145,8 @@ export interface BoardSnapshot {
   github: { at: string; items: BoardItem[]; errors: string[] } | null;
   /** The Growth view's series (metrics.ts); null when unchanged since the board last took them. */
   metrics?: BoardMetrics | null;
+  /** How the board actions from the last answer went; the board shows them on the task. */
+  actionResults?: BoardActionResult[];
 }
 
 export interface BoardGitHub {
@@ -162,7 +166,11 @@ export interface DashboardOptions {
   queued: () => number;
   /** The Growth view's series; read from runner.sqlite every `metricsEveryMs`. */
   metrics?: (now: Date) => BoardMetrics;
+  /** Applies a task action the owner clicked on the board (boardActions.ts runBoardAction). Without it, actions wait. */
+  act?: (action: BoardAction) => Promise<BoardActionResult>;
   pushEveryMs?: number;
+  /** How often `start()` asks the board for clicked actions between pushes (default 15 s). */
+  actionPollMs?: number;
   githubEveryMs?: number;
   metricsEveryMs?: number;
   fetch?: typeof fetch;
@@ -185,16 +193,60 @@ export class Dashboard {
   private metricsSent = "";
   private metricsUnsent = false;
   private failures = 0;
+  private polling = false;
+  /** Results not yet acknowledged by the board, sent with every push until one succeeds. */
+  private results: BoardActionResult[] = [];
+  /** Actions applied (or being applied) in this process, so a repeat hand-out (the board hasn't the result yet) isn't run twice. */
+  private applied = new Map<string, Promise<BoardActionResult>>();
+  /** Results the board has acknowledged. */
+  private reported = new Set<string>();
 
   constructor(private readonly o: DashboardOptions) {}
 
   /** Called every cycle; pushes when a push is due and none is running. */
   tick(): void {
-    const now = this.now().getTime();
-    if (this.pushing || now - this.lastPush < (this.o.pushEveryMs ?? 60_000)) return;
-    this.lastPush = now;
+    if (this.now().getTime() - this.lastPush < (this.o.pushEveryMs ?? 60_000)) return;
+    this.pushSoon();
+  }
+
+  /**
+   * Between pushes, asks the board every few seconds whether the owner clicked anything, so an Approve lands
+   * in seconds rather than at the next cycle. Returns a stop function.
+   */
+  start(): () => void {
+    if (!this.o.act) return () => {};
+    const timer = setInterval(() => { void this.pollActions(); }, this.o.actionPollMs ?? 15_000);
+    timer.unref?.();
+    return () => clearInterval(timer);
+  }
+
+  private pushSoon(): void {
+    if (this.pushing) return;
+    this.lastPush = this.now().getTime();
     this.pushing = true;
-    void this.push().finally(() => { this.pushing = false; });
+    void this.push().then(ok => {
+      this.pushing = false;
+      // Results from actions applied after the answer go out right away, not a cycle later.
+      if (ok && this.results.length) setTimeout(() => this.pushSoon(), 500).unref?.();
+    }, () => { this.pushing = false; });
+  }
+
+  /** One look at the board's queue; acting on it pushes the results right away. Never throws. */
+  async pollActions(): Promise<void> {
+    if (this.pushing || this.polling) return;
+    this.polling = true;
+    try {
+      const response = await (this.o.fetch ?? fetch)(`${this.o.url}/api/ingest/actions`, {
+        headers: { Authorization: `Bearer ${this.o.token}` }, signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) { await response.body?.cancel(); return; }
+      const answer = await response.json() as { actions?: unknown };
+      if (Array.isArray(answer.actions) && answer.actions.length && await this.act(answer.actions)) this.pushSoon();
+    } catch {
+      // The push loop reports board outages; a missed poll is retried in a few seconds.
+    } finally {
+      this.polling = false;
+    }
   }
 
   async push(): Promise<boolean> {
@@ -228,6 +280,8 @@ export class Dashboard {
         buildsPausedUntil: this.o.store.pausedUntil(), repos: this.o.repos(), schedule: this.o.schedule(now),
         jobs: this.o.store.all(JOBS_PER_PUSH), followUps: this.o.store.followUps(), events, github, metrics,
       });
+      const results = this.results;
+      if (results.length) snapshot.actionResults = results;
       const response = await (this.o.fetch ?? fetch)(`${this.o.url}/api/ingest`, {
         method: "POST",
         headers: { Authorization: `Bearer ${this.o.token}`, "Content-Type": "application/json" },
@@ -240,18 +294,48 @@ export class Dashboard {
         if (response.status === 409) this.boardEventId = null;
         throw new Error(`board answered ${response.status}`);
       }
-      const answer = await response.json() as { lastEventId?: unknown };
+      const answer = await response.json() as { lastEventId?: unknown; actions?: unknown };
       this.boardEventId = typeof answer.lastEventId === "number" ? answer.lastEventId : null;
+      if (results.length) {
+        this.results = this.results.filter(r => !results.includes(r));
+        for (const r of results) this.reported.add(r.id);
+      }
       if (github) this.githubUnsent = false;
       if (metrics) { this.metricsUnsent = false; this.metricsSent = JSON.stringify({ ...metrics, at: undefined }); }
       if (this.failures) console.log(`[board] pushing again after ${this.failures} failed push(es)`);
       this.failures = 0;
+      // Results and a fresh GitHub read go out with the next push, a cycle from now (or sooner, via start()).
+      await this.act(answer.actions);
       return true;
     } catch (error) {
       // Log the first failure and then every 30th, so a board outage doesn't flood the runner log.
       if (this.failures++ % 30 === 0) console.warn(`[board] push failed: ${(error as Error).message}`);
       return false;
     }
+  }
+
+  /** Applies the actions the board handed over; true when there are results for the board. */
+  private async act(raw: unknown): Promise<boolean> {
+    if (!this.o.act || !Array.isArray(raw) || !raw.length) return false;
+    for (const action of raw.slice(0, 20) as BoardAction[]) {
+      if (!action || typeof action.id !== "string") continue;
+      let running = this.applied.get(action.id);
+      if (!running) {
+        running = this.o.act(action);
+        this.applied.set(action.id, running);
+        if (this.applied.size > 500) {
+          const oldest = this.applied.keys().next().value!;
+          this.applied.delete(oldest);
+          this.reported.delete(oldest);
+        }
+      }
+      const result = await running;
+      if (!this.reported.has(result.id) && !this.results.some(r => r.id === result.id)) this.results.push(result);
+    }
+    // The labels changed: show it on the board with the results rather than at the next 5-minute read.
+    this.lastGithub = 0;
+    this.lastPush = 0;
+    return this.results.length > 0;
   }
 
   private async readGitHub(now: Date): Promise<NonNullable<BoardSnapshot["github"]>> {

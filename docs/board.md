@@ -1,7 +1,7 @@
 # isobot board
 
-[bot.isolated.tech](https://bot.isolated.tech) is a read-only view of what isobot is doing,
-so you don't have to piece it together from Discord. It is modelled on
+[bot.isolated.tech](https://bot.isolated.tech) shows what isobot is doing, so you don't have to piece it
+together from Discord, and lets you approve, stop, retry or dismiss tasks without going to Discord or GitHub. It is modelled on
 [vercel/board](https://github.com/vercel/board): a sidebar of views, filters in the URL (so every view is a
 link), and a side pane with a job's full timeline.
 
@@ -10,7 +10,7 @@ link), and a side pane with a job's full timeline.
 | Overview | Runner health, what's building, what needs you (review, failed, proposed, waiting to ship), the PRs the sweep says need you, what runs next, today's events |
 | Summary | One day, week (Mon–Sun) or month at a time, in your time zone, against the period before (or, for one still under way, the same stretch of it): PRs merged, issues opened and closed, failed builds, runner errors, activity by hour or day, what shipped, new issues by source, what the trains, content and ASO did, problems, work per repository, and store numbers, listing changes and published pages. Step with ‹ › or the arrow keys, jump with the calendar (shaded by activity) or **Today** (`t`); `d`/`w`/`m` switch period, and clicking a day in the chart opens it. `?view=summary&period=month&date=2026-11-01` links to a period |
 | Growth | What the scheduled work measures and what it changed, over 30/90/120 days: installs and listing traffic (App Store and Play), Google Play's overall rating and the days with new ratings, search phrases in the top 10, conversion, trials, proceeds, a per-phrase rank table with 7- and 28-day moves, Search Console clicks per week, OpenSEO credits. Listing changes (◆) and published pages (●) are marked on every chart |
-| Tasks | The `isobot:*` label queue as columns (proposed → ready → building → review, failed), plus work merged in the last 7 days |
+| Tasks | The `isobot:*` label queue as columns (proposed → ready → building → review, failed), plus work merged in the last 7 days. Each card has buttons for what can be done to it ([Task actions](#task-actions)) |
 | Activity | The runner's event timeline by day (7 days), split into job and runner-level events, with text search |
 | Schedule | Triage, content and ASO trains, analytics, the daily check-in, search and rank reports, release trains, and pending follow-ups |
 | Pull requests / Issues | Open items, and items merged or closed in the last 14 days, across every configured repository. Open PRs carry the PR sweep's verdict (merge, land, duplicate, superseded, stale draft) with its reason on hover, and Pull requests has a **Needs you** tab ([PR sweep](runner.md#pull-request-sweep)) |
@@ -43,13 +43,45 @@ browser ──GitHub sign-in──▶ isobot-board ──RPC──▶ AccountAut
   event counts per UTC hour, kind and repo (the browser cuts them into local days), the named events (merges,
   failures, trains, ASO, content, crash issues, `*_error`), and the items and jobs for the period; `/api/calendar`
   returns counts for the date picker. History starts when the board does, and the view says when a period predates it.
-- **The board only reads.** It has no GitHub token and can't change labels, jobs or the runner.
+- **The board has no GitHub token.** It can't change labels, jobs or the runner itself; it only queues
+  [task actions](#task-actions) for the runner to apply.
 - **Sign-in** reuses Pi's GitHub login (`cloudflare/src/account-routes.ts`) and its `AccountAuth` Durable Object
   through a cross-script binding, so the allowlist (`GITHUB_OAUTH_ALLOWED_IDS`, CodyBontecou only) and session
   rules are the same as [the console's](github-login.md). Only web sign-in, session and sign-out are served:
   no API tokens and no native-app flow. It needs its own GitHub OAuth app because GitHub allows one callback
   host per app.
 - The page shell is public and holds no data; `/api/board` and `/api/events` need a session.
+
+## Task actions
+
+Cards on the Tasks view have buttons. Each one is the same label change as the matching Discord reaction
+(`planFor` in `src/discord/approval.ts`, `planBoardAction` in `runner/src/boardActions.ts`), so the pipeline
+treats it the same way:
+
+| Button | Shown on | Labels |
+| --- | --- | --- |
+| Approve (✅) | Proposed and other unapproved tasks | `+isobot:ready`, `-isobot:proposed` |
+| Stop (🛑) | Ready, building | `+isobot:stop`, `-isobot:ready` |
+| Retry (🔁) | Failed or stopped | `-isobot:stop`, `+isobot:ready` unless a build or PR is already on it |
+| Dismiss (🧹) | Any (asks "Close it?" first) | `+isobot:cleanup` (and `+isobot:stop` if building): the runner closes the issue as not planned and cleans up |
+
+How a click travels:
+
+```
+browser ──POST /api/actions (session + CSRF)──▶ board: actions table, state pending
+runner  ──GET /api/ingest/actions every 15 s, and every push's answer──▶ pending actions
+runner: re-reads the issue, applies the label change with its own token, logs board_action on the job's timeline
+runner  ──next push (sent at once): actionResults──▶ board marks it done or failed; the card shows the result
+```
+
+- Only the signed-in owner can click (same allowlist), only on the runner's configured repositories, and the
+  runner checks the issue's current labels itself (a closed or stopped issue is refused, an approved one is a no-op).
+- One pending action per task: clicking again before the runner takes it replaces it. A click the runner doesn't
+  answer within 15 minutes is marked failed ("is it running?"). Results stay on the card for 30 minutes.
+- The labels are added with the runner's token (its own account), which is trusted, so the approval passes
+  the pipeline's "who added it" check. Approving doesn't add `isobot:auto`, like ✅ in Discord.
+- While a click waits, the page refreshes every 4 seconds; the runner pushes a fresh GitHub read with the result,
+  so the card moves columns within seconds of the runner applying it.
 
 ## Sources
 

@@ -33,6 +33,7 @@ import { Pipeline } from "./pipeline.js";
 import { runChecks } from "./checks.js";
 import { buildMetrics } from "./metrics.js";
 import { formatSweep, PrSweep } from "./prSweep.js";
+import { runBoardAction } from "./boardActions.js";
 import { Dashboard, WEEKDAYS, every, nextDailyAt, nextWeeklyAt, type ScheduleItem } from "./dashboard.js";
 import { Awake, heartbeatAge, pingHeartbeat, readHeartbeat, rotateLog, writeHeartbeat } from "./ops.js";
 import { killAllChildren, run, setGitIdentity, sh, workerEnv } from "./proc.js";
@@ -457,7 +458,12 @@ async function loop(rt: Runtime): Promise<void> {
     live: () => ({ startedAt, activeJobs: rt.pipeline.activeJobs, manuallyPaused: existsSync(pausedFile(rt.env)), lastTriageAt, lastCycleError }),
     queued: () => rt.store.inState("queued").length,
     metrics: now => buildMetrics(rt.config, rt.store, now),
+    act: action => runBoardAction(action, {
+      labels: rt.config.labels, repos: () => configuredRepos(rt.config).map(r => `${r.owner}/${r.repo}`), github: rt.github,
+      event: (jobId, text) => rt.store.event(jobId, "board_action", text),
+    }),
   }) : null;
+  board?.start();
   console.log(`[runner] started: ${configuredRepos(rt.config).map(r => `${r.owner}/${r.repo}`).join(", ")}; sources: ${rt.sources.map(s => s.name).join(", ")}`);
   await rt.notifier.discord("🟢 isobot runner started", [], { handoff: false });
   while (!stopping) {

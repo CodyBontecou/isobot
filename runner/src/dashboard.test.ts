@@ -153,3 +153,29 @@ test("metrics go with a push only when they changed, and again after the board a
   await dashboard.push();
   assert.equal(sent[4].metrics?.credits.days[0].spent, 2);
 });
+
+test("actions in the board's answer are applied once and reported in the next push", async () => {
+  const store = new Store(":memory:");
+  const sent: BoardSnapshot[] = [];
+  const action = { id: "x1", kind: "approve", repo: "o/r", number: 2, by: "me" };
+  const answers = [{ lastEventId: 0, actions: [action] }, { lastEventId: 0, actions: [action] }, { lastEventId: 0, actions: [] }];
+  const applied: string[] = [];
+  const dashboard = new Dashboard({
+    url: "https://bot.example", token: "t", runnerId: "laptop", store, github: { boardItems: async () => [] },
+    repos: () => [], schedule: () => [], live: () => ({ startedAt: "", activeJobs: [], manuallyPaused: false, lastTriageAt: null, lastCycleError: null }),
+    queued: () => 0,
+    act: async a => { applied.push(a.id); return { id: a.id, ok: true, text: "Approved" }; },
+    fetch: (async (_url: string, init: RequestInit) => {
+      sent.push(JSON.parse(String(init.body)));
+      return Response.json(answers.shift());
+    }) as typeof fetch,
+  });
+  await dashboard.push();
+  assert.equal(sent[0].actionResults, undefined);
+  // The board hands the same action out again before it has the result: it isn't applied twice.
+  await dashboard.push();
+  assert.deepEqual(sent[1].actionResults, [{ id: "x1", ok: true, text: "Approved" }]);
+  await dashboard.push();
+  assert.equal(sent[2].actionResults, undefined, "acknowledged results aren't sent again");
+  assert.deepEqual(applied, ["x1"]);
+});

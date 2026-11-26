@@ -2,7 +2,7 @@ import { createRoot } from 'react-dom/client';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   Activity, AlertTriangle, CalendarClock, CalendarRange, CircleDot, CircleX, ExternalLink, GitMerge, GitPullRequest,
-  Hammer, Inbox, KanbanSquare, LayoutDashboard, ListChecks, LogOut, Pause, RefreshCw, TrendingUp, X,
+  Check, Hammer, Inbox, KanbanSquare, LayoutDashboard, ListChecks, LogOut, Pause, RefreshCw, RotateCcw, Square, Trash2, TrendingUp, X,
 } from 'lucide-react';
 import {
   ATTENTION, Chip, Empty, getJson, ItemRow, JobLink, Labels, labelTone, prNeedsYou, rel, full, SearchBox, Section, short,
@@ -10,7 +10,7 @@ import {
 } from './common';
 import { Growth } from './growth';
 import { Summary, type Period } from './summary';
-import type { Board, BoardEvent, BoardItem, Job, RunnerState, Session, SourceKind, View } from './types';
+import type { ActionKind, Board, BoardAction, BoardEvent, BoardItem, Job, RunnerState, Session, SourceKind, View } from './types';
 import './styles.css';
 
 // ---------- URL state (like vercel/board: every filter is a link) ----------
@@ -76,7 +76,7 @@ function liveness(runner: RunnerState | undefined, now: number): { label: string
 }
 
 const COLUMNS = [
-  { label: 'isobot:proposed', title: 'Proposed', hint: 'Waiting for your ✅' },
+  { label: 'isobot:proposed', title: 'Proposed', hint: 'Waiting for your approval' },
   { label: 'isobot:ready', title: 'Ready', hint: 'Approved, queued to build' },
   { label: 'isobot:building', title: 'Building', hint: 'Claimed by the runner' },
   { label: 'isobot:review', title: 'Review', hint: 'PR open, needs your merge' },
@@ -94,6 +94,8 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [params, setParams] = useParams();
+  /** Clicks sent this session, shown until the board's own list has them. */
+  const [sent, setSent] = useState<BoardAction[]>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -124,8 +126,29 @@ function App() {
     return () => { clearInterval(timer); clearInterval(tick); document.removeEventListener('visibilitychange', onVisible); };
   }, [session?.authenticated, load]);
 
+  // While a click waits for the runner, look every few seconds so its result and the moved card show up quickly.
+  const pending = mergeActions(board?.actions ?? [], sent).some(a => a.state === 'pending');
+  useEffect(() => {
+    if (!pending) return;
+    const timer = setInterval(() => { if (document.visibilityState === 'visible') void load(); }, 4_000);
+    return () => clearInterval(timer);
+  }, [pending, load]);
+
   if (!session) return <div className="center"><span className="spinner" /></div>;
   if (!session.authenticated) return <SignIn configured={session.oauthConfigured !== false} />;
+
+  const actions = mergeActions(board?.actions ?? [], sent);
+  const act = async (item: BoardItem, kind: ActionKind) => {
+    const response = await fetch('/api/actions', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-CSRF-Token': session.csrfToken ?? '' },
+      body: JSON.stringify({ kind, repo: item.repo, number: item.number }),
+    });
+    if (response.status === 401) { setSession({ authenticated: false, oauthConfigured: true }); return; }
+    const body = await response.json().catch(() => ({})) as { action?: BoardAction; error?: string };
+    if (!response.ok || !body.action) throw new Error(body.error ?? `the board answered ${response.status}`);
+    setSent(list => [body.action!, ...list.filter(a => a.id !== body.action!.id)]);
+  };
 
   const runner = board?.runners[0];
   const items = (board?.github?.items ?? []).filter(i => !params.repo || i.repo === params.repo);
@@ -188,7 +211,7 @@ function App() {
                 date={params.date} go={(period, date) => setParams({ period: period === 'week' ? '' : period, date })} open={job => setParams({ job })} />}
               {params.view === 'growth' && <Growth repo={params.repo} range={params.range} setRange={range => setParams({ range: range === '90' ? '' : range })}
                 daily={params.daily === '1'} setDaily={daily => setParams({ daily: daily ? '1' : '' })} app={params.app} setApp={app => setParams({ app }, false)} />}
-              {params.view === 'tasks' && <Tasks items={items} jobs={jobs} now={now} open={job => setParams({ job })} />}
+              {params.view === 'tasks' && <Tasks items={items} jobs={jobs} actions={actions} act={act} now={now} open={job => setParams({ job })} />}
               {params.view === 'activity' && <ActivityView events={repoEvents} source={params.state} setSource={state => setParams({ state })} q={params.q} setQ={q => setParams({ q }, false)} open={job => setParams({ job })} />}
               {params.view === 'schedule' && <Schedule runner={runner} now={now} open={job => setParams({ job })} />}
               {params.view === 'prs' && <Items kind="pr" items={items} source={params.source} setSource={source => setParams({ source })} state={params.state || 'open'} setState={state => setParams({ state })} q={params.q} setQ={q => setParams({ q }, false)} now={now} githubAt={board.github?.at} />}
@@ -309,7 +332,7 @@ function Stat({ label, value, icon, tone, onClick }: { label: string; value: num
 
 // ---------- tasks (the label queue as a board) ----------
 
-function Tasks({ items, jobs, now, open }: { items: BoardItem[]; jobs: Job[]; now: number; open: (id: string) => void }) {
+function Tasks({ items, jobs, actions, act, now, open }: { items: BoardItem[]; jobs: Job[]; actions: BoardAction[]; act: (item: BoardItem, kind: ActionKind) => Promise<void>; now: number; open: (id: string) => void }) {
   const weekAgo = now - 7 * 86_400_000;
   const done = jobs.filter(j => ['merged', 'released', 'shipped'].includes(j.state) && Date.parse(j.updatedAt) > weekAgo);
   return (
@@ -332,6 +355,7 @@ function Tasks({ items, jobs, now, open }: { items: BoardItem[]; jobs: Job[]; no
                   </div>
                   <div className="card-source"><SourceChip item={i} link /></div>
                   {job ? <button className="card-job" onClick={() => open(job.id)}><Chip tone={STATE_TONE[job.state]}>{job.state.replace('_', ' ')}</Chip> timeline →</button> : null}
+                  <TaskActions item={i} last={lastAction(actions, i)} act={act} now={now} />
                 </div>
               );
             })}
@@ -349,6 +373,86 @@ function Tasks({ items, jobs, now, open }: { items: BoardItem[]; jobs: Job[]; no
         ))}
       </div>
     </div>
+  );
+}
+
+// ---------- task actions ----------
+
+const ACTION_LABEL: Record<ActionKind, { label: string; doing: string; icon: ReactNode; tone?: string }> = {
+  approve: { label: 'Approve', doing: 'Approving', icon: <Check size={13} />, tone: 'go' },
+  retry: { label: 'Retry', doing: 'Queuing a retry', icon: <RotateCcw size={13} /> },
+  stop: { label: 'Stop', doing: 'Stopping', icon: <Square size={12} /> },
+  dismiss: { label: 'Dismiss', doing: 'Dismissing', icon: <Trash2 size={13} />, tone: 'danger' },
+};
+
+/**
+ * What can be done to a task from its labels, the same rules the runner applies (runner/src/boardActions.ts):
+ * approve a proposal, stop a queued or running build, retry a failed or stopped one, dismiss (close and clean up) any.
+ */
+function taskActions(labels: string[]): ActionKind[] {
+  const has = (label: string) => labels.includes(`isobot:${label}`);
+  if (has('cleanup')) return [];
+  const inFlight = has('ready') || has('building') || has('review');
+  const list: ActionKind[] = [];
+  if (has('stop')) list.push('retry');
+  else if (!inFlight && has('failed')) list.push('retry');
+  else if (!inFlight) list.push('approve');
+  if (!has('stop') && (has('ready') || has('building'))) list.push('stop');
+  list.push('dismiss');
+  return list;
+}
+
+/** Board actions win over this session's copies of the same click; newest first. */
+function mergeActions(board: BoardAction[], sent: BoardAction[]): BoardAction[] {
+  const ids = new Set(board.map(a => a.id));
+  return [...sent.filter(a => !ids.has(a.id)), ...board].sort((a, b) => b.at.localeCompare(a.at));
+}
+
+function lastAction(actions: BoardAction[], item: BoardItem): BoardAction | undefined {
+  return actions.find(a => a.repo.toLowerCase() === item.repo.toLowerCase() && a.number === item.number);
+}
+
+function TaskActions({ item, last, act, now }: { item: BoardItem; last?: BoardAction; act: (item: BoardItem, kind: ActionKind) => Promise<void>; now: number }) {
+  const [busy, setBusy] = useState<ActionKind | null>(null);
+  const [confirm, setConfirm] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    if (!confirm) return;
+    const timer = setTimeout(() => setConfirm(false), 4_000);
+    return () => clearTimeout(timer);
+  }, [confirm]);
+  if (last?.state === 'pending') {
+    return <div className="task-status muted"><span className="spinner small" /> {ACTION_LABEL[last.kind].doing}… <span title={full(last.at)}>sent {rel(last.at, now)}</span></div>;
+  }
+  const run = async (kind: ActionKind) => {
+    if (kind === 'dismiss' && !confirm) { setConfirm(true); return; }
+    setConfirm(false);
+    setBusy(kind);
+    setError('');
+    try { await act(item, kind); } catch (err) { setError((err as Error).message); } finally { setBusy(null); }
+  };
+  // A result stays on the card for a while after the runner answered, so you can see it landed (or why not).
+  const recent = last?.doneAt && now - Date.parse(last.doneAt) < 30 * 60_000 ? last : undefined;
+  return (
+    <>
+      {recent ? <div className={`task-status ${recent.state === 'failed' ? 'bad' : 'ok'}`} title={full(recent.doneAt)}>
+        {recent.state === 'failed' ? <CircleX size={12} /> : <Check size={12} />} {recent.result ?? (recent.state === 'failed' ? 'Failed' : 'Done')}
+      </div> : null}
+      {error ? <div className="task-status bad"><CircleX size={12} /> {error}</div> : null}
+      <div className="task-actions">
+        {taskActions(item.labels).map(kind => {
+          const meta = ACTION_LABEL[kind];
+          const asking = kind === 'dismiss' && confirm;
+          return (
+            <button key={kind} className={`task-action ${meta.tone ?? ''} ${asking ? 'confirm' : ''}`} disabled={busy !== null}
+              title={kind === 'dismiss' ? 'Close the issue as not planned and clean up what isobot made' : undefined}
+              onClick={() => void run(kind)}>
+              {busy === kind ? <span className="spinner small" /> : meta.icon} {asking ? 'Close it?' : meta.label}
+            </button>
+          );
+        })}
+      </div>
+    </>
   );
 }
 

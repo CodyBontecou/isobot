@@ -247,6 +247,16 @@ a.chip.source:hover { background: var(--bg-hover); color: var(--text); }
 .chip.source.crash { color: var(--bad); }
 .chip.source.vox, .chip.source.email { color: var(--info); }
 .card-source { margin-top: 6px; display: flex; }
+.task-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.task-action { display: inline-flex; align-items: center; gap: 5px; min-height: 30px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 6px;
+  font-size: 12px; font-weight: 500; background: var(--bg); color: var(--text-2); }
+.task-action:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
+.task-action:disabled { opacity: .55; cursor: default; }
+.task-action.go { background: var(--ok-bg); color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, transparent); }
+.task-action.danger:hover:not(:disabled) { color: var(--bad); }
+.task-action.confirm { background: var(--bad-bg); color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); }
+.task-status { display: flex; align-items: center; gap: 6px; font-size: 11px; line-height: 1.35; }
+.task-status.muted { color: var(--text-3); } .task-status.ok { color: var(--ok); } .task-status.bad { color: var(--bad); }
 .select select { height: 30px; padding: 0 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; font-size: 13px; }
 .source-bar { height: 6px; border-radius: 3px; background: var(--accent); opacity: .5; margin-left: auto; margin-right: 10px; flex: none; }
 

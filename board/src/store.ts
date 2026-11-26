@@ -1,6 +1,7 @@
 /**
  * What the board keeps: each runner's latest snapshot, the newest GitHub read, a year of runner events,
- * and every issue, PR and job it has seen (so the Summary view can look back past the snapshot's 14 days). Runners push (runner/src/dashboard.ts); the browser only reads. Written over a minimal SQL
+ * and every issue, PR and job it has seen (so the Summary view can look back past the snapshot's 14 days). Runners push (runner/src/dashboard.ts); the browser reads,
+ * and can queue task actions (approve, stop, retry, dismiss) that the runner picks up and applies with its own token. Written over a minimal SQL
  * interface so it runs on Durable Object SQLite and, in tests, on node:sqlite.
  */
 
@@ -27,7 +28,27 @@ const RUNNER_ID = /^[\w.-]{1,64}$/;
 
 export interface BoardEvent { id: number; jobId: string | null; at: string; kind: string; text: string; runner: string }
 
-export interface IngestResult { ok: true; lastEventId: number }
+/** A task action the owner clicked, handed to the runner until it reports back (runner/src/boardActions.ts). */
+export interface QueuedAction { id: string; kind: ActionKind; repo: string; number: number; by: string }
+
+export interface BoardActionRow extends QueuedAction {
+  at: string;
+  state: "pending" | "done" | "failed";
+  result: string | null;
+  doneAt: string | null;
+}
+
+export const ACTION_KINDS = ["approve", "stop", "retry", "dismiss"] as const;
+export type ActionKind = typeof ACTION_KINDS[number];
+/** A click the runner hasn't answered in this long is given up (it may still be applied if the runner comes back). */
+const ACTION_EXPIRE_MS = 15 * 60_000;
+/** Finished actions stay this long, so the task shows how its last click went. */
+const ACTION_KEEP_MS = 2 * 86_400_000;
+const ACTION_RESULT_LIMIT = 300;
+
+export interface IngestResult { ok: true; lastEventId: number; actions: QueuedAction[] }
+
+export class BadAction extends Error {}
 
 export class BoardStore {
   constructor(private readonly sql: Sql) {
@@ -41,6 +62,61 @@ export class BoardStore {
     sql.exec(`CREATE INDEX IF NOT EXISTS items_created ON items (created_at)`);
     sql.exec(`CREATE INDEX IF NOT EXISTS items_closed ON items (closed_at)`);
     sql.exec(`CREATE TABLE IF NOT EXISTS job_history (id TEXT PRIMARY KEY, updated_at TEXT NOT NULL, data TEXT NOT NULL)`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS actions (id TEXT PRIMARY KEY, at TEXT NOT NULL, kind TEXT NOT NULL, repo TEXT NOT NULL, number INTEGER NOT NULL,
+      by TEXT NOT NULL, state TEXT NOT NULL, result TEXT, done_at TEXT)`);
+    sql.exec(`CREATE INDEX IF NOT EXISTS actions_state ON actions (state, at)`);
+  }
+
+  /**
+   * Queues a click from the board for the runner. Only the runners' configured repositories, and one pending
+   * action per task: a second click replaces the first if the runner hasn't taken it yet.
+   */
+  queueAction(input: { kind: unknown; repo: unknown; number: unknown; by: string }, now = new Date()): BoardActionRow {
+    const kind = input.kind as ActionKind;
+    if (!ACTION_KINDS.includes(kind)) throw new BadAction("unknown action");
+    if (typeof input.repo !== "string" || !Number.isSafeInteger(input.number) || (input.number as number) < 1) throw new BadAction("bad task");
+    const repos = this.repoNames();
+    const repo = repos.find(name => name.toLowerCase() === (input.repo as string).toLowerCase());
+    if (!repo) throw new BadAction("not one of the runner's repositories");
+    const number = input.number as number;
+    this.expireActions(now);
+    this.sql.exec("DELETE FROM actions WHERE repo = ? AND number = ? AND state = 'pending'", repo, number);
+    const id = crypto.randomUUID();
+    const at = now.toISOString();
+    this.sql.exec("INSERT INTO actions (id, at, kind, repo, number, by, state) VALUES (?, ?, ?, ?, ?, ?, 'pending')", id, at, kind, repo, number, input.by);
+    return { id, at, kind, repo, number, by: input.by, state: "pending", result: null, doneAt: null };
+  }
+
+  /** What the runner should apply now, oldest first. */
+  pendingActions(now = new Date()): QueuedAction[] {
+    this.expireActions(now);
+    return this.sql.exec("SELECT id, kind, repo, number, by FROM actions WHERE state = 'pending' ORDER BY at LIMIT 20").toArray()
+      .map(row => ({ id: String(row.id), kind: String(row.kind) as ActionKind, repo: String(row.repo), number: Number(row.number), by: String(row.by) }));
+  }
+
+  /** Recent actions for the board: every pending one and those finished in the last two days, newest first. */
+  actions(now = new Date()): BoardActionRow[] {
+    this.expireActions(now);
+    return this.sql.exec("SELECT * FROM actions ORDER BY at DESC LIMIT 200").toArray().map(row => ({
+      id: String(row.id), at: String(row.at), kind: String(row.kind) as ActionKind, repo: String(row.repo), number: Number(row.number),
+      by: String(row.by), state: String(row.state) as BoardActionRow["state"], result: row.result === null ? null : String(row.result),
+      doneAt: row.done_at === null ? null : String(row.done_at),
+    }));
+  }
+
+  private expireActions(now: Date): void {
+    this.sql.exec("UPDATE actions SET state = 'failed', result = 'The runner didn''t pick it up; is it running?', done_at = ? WHERE state = 'pending' AND at < ?",
+      now.toISOString(), new Date(now.getTime() - ACTION_EXPIRE_MS).toISOString());
+    this.sql.exec("DELETE FROM actions WHERE state != 'pending' AND done_at < ?", new Date(now.getTime() - ACTION_KEEP_MS).toISOString());
+  }
+
+  private repoNames(): string[] {
+    const names = new Set<string>();
+    for (const row of this.sql.exec("SELECT snapshot FROM runners").toArray()) {
+      const repos = (JSON.parse(String(row.snapshot)) as { repos?: { name?: unknown }[] }).repos ?? [];
+      for (const r of repos) if (typeof r?.name === "string") names.add(r.name);
+    }
+    return [...names];
   }
 
   /** Stores one runner push. Throws a `BadSnapshot` for anything that isn't a well-formed snapshot. */
@@ -61,7 +137,7 @@ export class BoardStore {
         runner, e.id, e.jobId, e.at, e.kind, e.text);
     }
     if (newest !== null && newest > last) last = newest;
-    const { events: _events, github, metrics, ...rest } = snapshot;
+    const { events: _events, github, metrics, actionResults: _results, ...rest } = snapshot;
     this.sql.exec(`INSERT INTO runners (id, at, snapshot, last_event_id) VALUES (?, ?, ?, ?)
       ON CONFLICT (id) DO UPDATE SET at = excluded.at, snapshot = excluded.snapshot, last_event_id = excluded.last_event_id`,
       runner, now.toISOString(), JSON.stringify(rest), last);
@@ -86,17 +162,22 @@ export class BoardStore {
       this.sql.exec(`INSERT INTO metrics (id, at, data) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET at = excluded.at, data = excluded.data`,
         metrics.at, JSON.stringify(metrics));
     }
+    for (const r of snapshot.actionResults ?? []) {
+      if (!r || typeof r !== "object" || typeof r.id !== "string" || typeof r.ok !== "boolean") continue;
+      this.sql.exec("UPDATE actions SET state = ?, result = ?, done_at = ? WHERE id = ?",
+        r.ok ? "done" : "failed", typeof r.text === "string" ? r.text.slice(0, ACTION_RESULT_LIMIT) : null, now.toISOString(), r.id);
+    }
     const cutoff = new Date(now.getTime() - KEEP_EVENTS_DAYS * 86_400_000).toISOString();
     this.sql.exec("DELETE FROM events WHERE at < ?", cutoff);
-    return { ok: true, lastEventId: last };
+    return { ok: true, lastEventId: last, actions: this.pendingActions(now) };
   }
 
-  /** Every runner's latest state (newest first) and the latest GitHub read. */
-  board(): { runners: (Record<string, unknown> & { receivedAt: string })[]; github: unknown } {
+  /** Every runner's latest state (newest first), the latest GitHub read, and recent task actions. */
+  board(now = new Date()): { runners: (Record<string, unknown> & { receivedAt: string })[]; github: unknown; actions: BoardActionRow[] } {
     const runners = this.sql.exec("SELECT at, snapshot FROM runners ORDER BY at DESC").toArray()
       .map(row => ({ ...JSON.parse(String(row.snapshot)) as Record<string, unknown>, receivedAt: String(row.at) }));
     const github = this.sql.exec("SELECT data FROM github WHERE id = 1").toArray()[0];
-    return { runners, github: github ? JSON.parse(String(github.data)) : null };
+    return { runners, github: github ? JSON.parse(String(github.data)) : null, actions: this.actions(now) };
   }
 
   /** The Growth view's series from the newest runner push that carried them (runner/src/metrics.ts), or null. */
@@ -185,6 +266,8 @@ interface CheckedSnapshot {
   github: { at: string } & Record<string, unknown> | null;
   /** Absent from runners that predate the Growth view, and null when unchanged since their last push. */
   metrics?: { at: string } & Record<string, unknown> | null;
+  /** How the actions from the board's last answer went (runners from before task actions don't send it). */
+  actionResults?: { id: unknown; ok: unknown; text?: unknown }[];
   [key: string]: unknown;
 }
 
@@ -210,6 +293,7 @@ function checkSnapshot(raw: unknown): CheckedSnapshot {
     const g = s.github as Record<string, unknown>;
     if (!g || typeof g !== "object" || typeof g.at !== "string" || !Array.isArray(g.items)) fail("bad github");
   }
+  if (s.actionResults !== undefined && !Array.isArray(s.actionResults)) fail("actionResults must be a list");
   if (s.metrics !== undefined && s.metrics !== null) {
     const m = s.metrics as Record<string, unknown>;
     if (!m || typeof m !== "object" || Array.isArray(m) || typeof m.at !== "string" || Number.isNaN(Date.parse(m.at))
