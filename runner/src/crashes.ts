@@ -3,6 +3,7 @@ import { asoApps, type RunnerConfig } from "./config.js";
 import { localDay } from "./content.js";
 import { CONTROLS, PROPOSAL_CONTROLS } from "./notify.js";
 import type { GitHubApi } from "./github.js";
+import { PUBLISHER_SCOPE } from "./google.js";
 import type { Store } from "./store.js";
 
 /**
@@ -18,7 +19,9 @@ import type { Store } from "./store.js";
  * Similar clusters are grouped (one bug Play splits by version or obfuscated frame is one group), and each group
  * that reaches `minUsers` becomes one GitHub issue in the app's repository, labelled isobot:proposed and bug, so the
  * owner approves a fix like any other proposal. Groups are remembered so they're filed once; an open issue that
- * already names the crashing method counts as filed. The daily check-in carries a line per app and flags spikes.
+ * already names the crashing method counts as filed. A Play group seen only on versions older than every release
+ * live on production isn't filed: users on an old build keep reporting crashes that a released version already
+ * fixes. It files once it shows up on a live version. The daily check-in carries a line per app and flags spikes.
  */
 
 const SYNC_EVERY_MS = 6 * 3_600_000;
@@ -30,6 +33,7 @@ const KEEP_DAYS = 120;
 const INSTANCES_PER_PASS = 8;
 export const REPORTING_SCOPE = "https://www.googleapis.com/auth/playdeveloperreporting";
 const REPORTING = "https://playdeveloperreporting.googleapis.com/v1beta1";
+const PUBLISHER = "https://androidpublisher.googleapis.com/androidpublisher/v3/applications";
 /** Play's bad-behavior thresholds (user-perceived rates over 28 days), in percent. */
 export const PLAY_THRESHOLDS = { crash: 1.09, anr: 0.47 };
 /** The marker on issues the audit opens (dashboard.ts reads it). */
@@ -134,6 +138,12 @@ export function groupIssues(issues: PlayIssue[]): CrashGroup[] {
     g.issues.sort((a, b) => int(b.distinctUsers) - int(a.distinctUsers) || int(b.errorReportCount) - int(a.errorReportCount));
   }
   return [...groups.values()].sort((a, b) => b.users - a.users || b.reports - a.reports);
+}
+
+/** Every version the group was reported on is older than `live` (a group with no versions isn't). */
+export function onlyBefore(g: Pick<CrashGroup, "versions">, live: number): boolean {
+  const codes = g.versions.map(Number).filter(Number.isFinite);
+  return codes.length > 0 && Math.max(...codes) < live;
 }
 
 /** App Crashes rows → date → totals and per-version counts. */
@@ -331,7 +341,27 @@ export class CrashAudit {
     };
     store.setCursor(`crashes:play:${pkg}:snap:${today}`, JSON.stringify(snap));
     this.prune(`crashes:play:${pkg}:snap:`);
-    return this.fileGroups(pkg, repo, month.filter(g => !g.obfuscated && g.users >= this.limits.minUsers));
+    const candidates = month.filter(g => !g.obfuscated && g.users >= this.limits.minUsers);
+    const live = await this.oldestLiveVersion(pkg).catch(error => {
+      // Without the track every candidate files, as before.
+      console.warn(`[crashes] ${pkg} production track: ${(error as Error).message.slice(0, 200)}`);
+      return null;
+    });
+    const current = live === null ? candidates : candidates.filter(g => !onlyBefore(g, live));
+    if (current.length < candidates.length) {
+      console.log(`[crashes] ${pkg}: not filing ${plural(candidates.length - current.length, "group")} seen only before version code ${live}, the oldest on production`);
+    }
+    return this.fileGroups(pkg, repo, current);
+  }
+
+  /** The lowest version code among the releases live on the production track, or null when none is. */
+  async oldestLiveVersion(pkg: string): Promise<number | null> {
+    const r = await this.deps.google!.json(PUBLISHER_SCOPE, `${PUBLISHER}/${pkg}/tracks/production/releases`) as
+      { releases?: { activeArtifacts?: { versionCode?: number | string }[]; releaseLifecycleState?: string }[] } | null;
+    const codes = (r?.releases ?? [])
+      .filter(x => x.releaseLifecycleState === "RELEASE_LIFECYCLE_STATE_PUBLISHED")
+      .flatMap(x => x.activeArtifacts ?? []).map(a => Number(a.versionCode)).filter(c => Number.isFinite(c) && c > 0);
+    return codes.length ? Math.min(...codes) : null;
   }
 
   private async syncPlayRates(pkg: string): Promise<void> {

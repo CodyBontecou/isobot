@@ -88,8 +88,18 @@ test("stackExcerpt keeps the app's frames and causes, and collapses recursion", 
 class FakeGoogle {
   issues = new Map<string, PlayIssue[]>();
   calls: string[] = [];
+  /** Version codes live on production; empty is a track with nothing released. */
+  production: number[] = [];
+  productionError: Error | null = null;
   async json(_scope: string, url: string): Promise<unknown> {
     this.calls.push(url);
+    if (url.endsWith("/tracks/production/releases")) {
+      if (this.productionError) throw this.productionError;
+      return { releases: [
+        ...this.production.map(c => ({ activeArtifacts: [{ versionCode: c }], releaseLifecycleState: "RELEASE_LIFECYCLE_STATE_PUBLISHED" })),
+        { activeArtifacts: [{ versionCode: 1 }], releaseLifecycleState: "RELEASE_LIFECYCLE_STATE_DRAFT" },
+      ] };
+    }
     const pkg = /\/apps\/([^/]+)\//.exec(url)?.[1] ?? "";
     if (url.includes("errorIssues:search")) return { errorIssues: this.issues.get(pkg) ?? [] };
     if (url.includes("errorReports:search")) return { errorReports: [{ reportText: "Exception X:\n  at com.example.Foo.bar (Foo.kt:1)", deviceModel: { marketingName: "Pixel 9" }, osVersion: { apiLevel: "36" } }] };
@@ -162,6 +172,35 @@ test("a Play pass files the biggest groups as proposals, once, capped per pass",
   const again = await t.audit.tick(true);
   assert.deepEqual(again.filed.map(f => /: (Android .*?) </.exec(f)![1]), ["Android NullPointerException in Receiver.reconcile", "Android ANR in FileManager.findExistingFile"]);
   assert.equal((await t.audit.tick(true)).filed.length, 0);
+});
+
+test("groups seen only on versions older than every live production release aren't filed", async () => {
+  const t = setup();
+  t.config.crashes = { issuesPerPass: 10 };
+  // 48 is live alongside 49: everything reported on 48 still files, only the 41-only ANR cluster is dropped.
+  t.google.issues.set(t.play.pkg, [...ISSUES.slice(0, 2), issue("b1", "APPLICATION_NOT_RESPONDING", "com.example.Old.wait", "Input dispatching timed out", 9, 4, "41")]);
+  t.google.production = [49, 48];
+  const { filed } = await t.audit.tick(true);
+  assert.deepEqual(filed.map(f => /: (Android .*?) </.exec(f)![1]), ["Android IllegalStateException in Occurrence.toWorkData", "Android OutOfMemoryError in JsonExporter"]);
+
+  // Once 52 and 53 are live, nothing reported only on 48 or older files; a group that reaches 52 does.
+  const u = setup();
+  u.config.crashes = { issuesPerPass: 10 };
+  u.google.production = [53, 52];
+  u.google.issues.set(u.play.pkg, [...ISSUES, issue("c1", "CRASH", "com.example.New.go", "java.lang.IllegalStateException", 5, 2, "48", "52")]);
+  assert.deepEqual((await u.audit.tick(true)).filed.map(f => /: (Android .*?) </.exec(f)![1]), ["Android IllegalStateException in New.go"]);
+
+  // The old groups aren't remembered as filed: if one comes back on a live version, it files then.
+  u.google.issues.set(u.play.pkg, [issue("a1", "CRASH", "com.example.scheduler.Occurrence.toWorkData", "java.lang.IllegalStateException", 70, 7, "41", "53")]);
+  assert.deepEqual((await u.audit.tick(true)).filed.map(f => /: (Android .*?) </.exec(f)![1]), ["Android IllegalStateException in Occurrence.toWorkData"]);
+});
+
+test("without the production track, every group files as before", async () => {
+  const t = setup();
+  t.config.crashes = { issuesPerPass: 10 };
+  t.google.productionError = new Error("403 forbidden");
+  t.google.issues.set(t.play.pkg, ISSUES);
+  assert.equal((await t.audit.tick(true)).filed.length, 4);
 });
 
 test("autoApprove queues crash fixes to build without waiting", async () => {
