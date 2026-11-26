@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { BadSnapshot, BoardStore, type Sql } from "./store.js";
+import { BadAction, BadSnapshot, BoardStore, type Sql } from "./store.js";
 
 /** Durable Object SQLite's exec(), over node:sqlite. */
 function sql(): Sql {
@@ -25,7 +25,7 @@ const snapshot = (overrides: Record<string, unknown> = {}) => ({
 
 test("ingest keeps the latest snapshot and accumulates events", () => {
   const store = new BoardStore(sql());
-  assert.deepEqual(store.ingest(snapshot({ events: [event(1), event(2)] }), now), { ok: true, lastEventId: 2 });
+  assert.deepEqual(store.ingest(snapshot({ events: [event(1), event(2)] }), now), { ok: true, lastEventId: 2, actions: [] });
   // A runner restart resends overlapping history; duplicates are ignored.
   assert.equal(store.ingest(snapshot({ events: [event(2), event(3)], jobs: [{ id: "o/r#1" }] }), now).lastEventId, 3);
   assert.equal(store.events({ since: "2026-11-01T00:00:00Z" }).length, 3);
@@ -107,4 +107,43 @@ test("the summary counts by hour from the comparison start and names highlights 
   assert.equal(s.eventsSince, "2026-11-18T09:10:00Z");
   assert.equal(s.itemsSince, "2026-11-06T12:00:00.000Z", "first seen, less the snapshot's 14 days of closed items");
   assert.deepEqual(store.calendar({ from: "2026-11-19T00:00:00Z", to: "2026-11-21T00:00:00Z" }).hours.map(h => h.n).reduce((a, b) => a + b), 4);
+});
+
+test("task actions queue for the runner until it reports back", () => {
+  const store = new BoardStore(sql());
+  const repos = [{ name: "Owner/App" }];
+  assert.throws(() => store.queueAction({ kind: "approve", repo: "owner/app", number: 3, by: "me" }, now), BadAction, "no runner, no repositories");
+  store.ingest(snapshot({ repos }), now);
+  assert.throws(() => store.queueAction({ kind: "merge", repo: "owner/app", number: 3, by: "me" }, now), BadAction);
+  assert.throws(() => store.queueAction({ kind: "approve", repo: "other/app", number: 3, by: "me" }, now), BadAction);
+  assert.throws(() => store.queueAction({ kind: "approve", repo: "owner/app", number: 0, by: "me" }, now), BadAction);
+
+  const first = store.queueAction({ kind: "approve", repo: "owner/app", number: 3, by: "me" }, now);
+  assert.equal(first.repo, "Owner/App", "the runner's spelling");
+  // A second click on the same task replaces the first while it waits.
+  const second = store.queueAction({ kind: "dismiss", repo: "owner/app", number: 3, by: "me" }, now);
+  const other = store.queueAction({ kind: "stop", repo: "owner/app", number: 4, by: "me" }, now);
+  const handed = store.ingest(snapshot({ repos }), now).actions;
+  assert.deepEqual(handed.map(a => a.id).sort(), [second.id, other.id].sort());
+  assert.deepEqual(store.pendingActions(now).map(a => a.id).sort(), [second.id, other.id].sort(), "handed out until answered");
+
+  store.ingest(snapshot({ repos, actionResults: [{ id: second.id, ok: true, text: "Dismissed" }, { id: other.id, ok: false, text: "it's closed" }] }), now);
+  assert.deepEqual(store.pendingActions(now), []);
+  const rows = store.board(now).actions;
+  assert.equal(rows.find(a => a.id === second.id)?.state, "done");
+  assert.equal(rows.find(a => a.id === other.id)?.result, "it's closed");
+  assert.equal("actionResults" in store.board(now).runners[0], false);
+
+  // Unanswered clicks are given up after a while; finished ones are dropped after two days.
+  const late = store.queueAction({ kind: "retry", repo: "owner/app", number: 5, by: "me" }, now);
+  const later = new Date(now.getTime() + 20 * 60_000);
+  assert.deepEqual(store.pendingActions(later), []);
+  assert.equal(store.board(later).actions.find(a => a.id === late.id)?.state, "failed");
+  assert.deepEqual(store.board(new Date(now.getTime() + 3 * 86_400_000)).actions, []);
+});
+
+test("a snapshot with malformed action results is refused", () => {
+  const store = new BoardStore(sql());
+  assert.throws(() => store.ingest(snapshot({ actionResults: "nope" }), now), BadSnapshot);
+  assert.doesNotThrow(() => store.ingest(snapshot({ actionResults: [null, { id: 1 }] }), now), "bad entries are skipped");
 });

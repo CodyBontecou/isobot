@@ -1,10 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
-import { handleAccountRequest, resolveAccountSession, type AccountEnvironment } from "../../cloudflare/src/account-routes.js";
-import { BadSnapshot, BoardStore, CALENDAR_MAX_DAYS, SUMMARY_MAX_DAYS, type IngestResult } from "./store.js";
+import { checkSessionMutation, handleAccountRequest, resolveAccountSession, type AccountEnvironment } from "../../cloudflare/src/account-routes.js";
+import { BadAction, BadSnapshot, BoardStore, CALENDAR_MAX_DAYS, SUMMARY_MAX_DAYS, type IngestResult } from "./store.js";
 
 /**
- * The isobot board at bot.isolated.tech: a read-only view of the runner (state, schedule, timeline)
- * and its GitHub work. Runners push snapshots to /api/ingest with INGEST_TOKEN; people sign in with
+ * The isobot board at bot.isolated.tech: a view of the runner (state, schedule, timeline) and its GitHub
+ * work, with task actions (approve, stop, retry, dismiss) queued here for the runner to apply. The board has
+ * no GitHub token: the runner takes the queue from its ingest answers and does the work itself. Runners push snapshots to /api/ingest with INGEST_TOKEN; people sign in with
  * GitHub through Pi's account service (the AccountAuth object in isobot-pi), so the same allowlist
  * and session code guard both. See docs/board.md.
  */
@@ -51,10 +52,12 @@ export default {
     const path = url.pathname;
     if (path === "/health") return new Response("ok", { headers: PRIVATE });
 
-    if (path === "/api/ingest") {
-      if (request.method !== "POST") return json({ error: "Use POST" }, 405);
+    if (path === "/api/ingest" || path === "/api/ingest/actions") {
       const match = /^Bearer (.+)$/.exec(request.headers.get("Authorization") ?? "");
       if (!env.INGEST_TOKEN || !match || !await sameSecret(match[1], env.INGEST_TOKEN)) return json({ error: "Unauthorized" }, 401);
+      // The runner's poll between pushes: just the queued actions.
+      if (path === "/api/ingest/actions") return request.method === "GET" ? json({ actions: await env.BOARD.getByName("board").pendingActions() }) : json({ error: "Use GET" }, 405);
+      if (request.method !== "POST") return json({ error: "Use POST" }, 405);
       const body = await readText(request, INGEST_LIMIT);
       if (body === null) return json({ error: "Snapshot too large" }, 413);
       let snapshot: unknown;
@@ -70,10 +73,20 @@ export default {
     }
 
     if (path.startsWith("/api/")) {
-      if (request.method !== "GET") return json({ error: "Read only" }, 405);
       const session = await resolveAccountSession(request, accounts(env));
       if (!session) return json({ error: "Sign in" }, 401);
       const board = env.BOARD.getByName("board");
+      if (path === "/api/actions") {
+        if (request.method !== "POST") return json({ error: "Use POST" }, 405);
+        // Same guard as Pi's console: the board's own origin and this session's CSRF secret.
+        if (!await checkSessionMutation(request, accounts(env), session)) return json({ error: "Forbidden" }, 403);
+        const body = await readText(request, 4_000);
+        let input: Record<string, unknown>;
+        try { input = JSON.parse(body ?? "") as Record<string, unknown>; } catch { return json({ error: "Invalid JSON" }, 400); }
+        const result = await board.queueAction({ kind: input?.kind, repo: input?.repo, number: input?.number, by: session.account.login });
+        return "error" in result ? json({ error: result.error }, 400) : json({ action: result });
+      }
+      if (request.method !== "GET") return json({ error: "Read only" }, 405);
       if (path === "/api/board") return json(await board.board());
       if (path === "/api/metrics") return json({ metrics: await board.metrics() });
       if (path === "/api/events") {
@@ -126,6 +139,18 @@ export class BoardState extends DurableObject<Env> {
   }
 
   board() { return this.store.board(); }
+
+  pendingActions() { return this.store.pendingActions(); }
+
+  /** A bad click comes back as `{ error }` rather than an exception across RPC. */
+  queueAction(input: { kind: unknown; repo: unknown; number: unknown; by: string }) {
+    try {
+      return this.store.queueAction(input);
+    } catch (error) {
+      if (error instanceof BadAction) return { error: error.message };
+      throw error;
+    }
+  }
 
   metrics() { return this.store.metrics(); }
 

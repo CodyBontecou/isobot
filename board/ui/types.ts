@@ -84,6 +84,22 @@ export interface RunnerState {
 export interface Board {
   runners: RunnerState[];
   github: { at: string; items: BoardItem[]; errors: string[] } | null;
+  /** Task actions clicked on the board (board/src/store.ts); missing before the board had them. */
+  actions?: BoardAction[];
+}
+
+export type ActionKind = 'approve' | 'stop' | 'retry' | 'dismiss';
+
+export interface BoardAction {
+  id: string;
+  at: string;
+  kind: ActionKind;
+  repo: string;
+  number: number;
+  by: string;
+  state: 'pending' | 'done' | 'failed';
+  result: string | null;
+  doneAt: string | null;
 }
 
 export interface BoardEvent { id: number; jobId: string | null; at: string; kind: string; text: string; runner: string }
