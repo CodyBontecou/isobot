@@ -190,6 +190,8 @@ export function Summary({ runner, repo, setRepo, period, date, go, open }: {
   );
 }
 
+const GROWTH_COLUMNS = ['Installs', 'Visits', 'Proceeds'];
+
 // ---------- the calendar control ----------
 
 function CalendarPicker({ span, repo, pick }: { span: Span; repo: string; pick: (day: string) => void }) {
@@ -372,7 +374,7 @@ function SummaryBody({ summary, metrics, span, runner, repo, setRepo, open, dril
       </div>
 
       <Section title={span.period === 'day' ? 'Activity by hour' : 'Activity by day'}
-        action={span.period !== 'day' ? <span className="meta">Click a day to open it</span> : undefined}>
+        action={span.period !== 'day' ? <span className="meta">Pick a day to open it</span> : undefined}>
         <div className="summary-chart">
           <ColumnChart points={chart} color="var(--series-1)" label="events" height={160}
             onSelect={span.period === 'day' ? undefined : day => { if ((parseDay(day) ?? new Date()) <= new Date()) drill(day); }} />
@@ -581,21 +583,21 @@ function GrowthPeriod({ metrics, span, repo }: { metrics: Metrics | null; span: 
   return (
     <Section title="Growth">
       {rowsOut.length ? (
-        <table className="table compact">
-          <thead><tr><th>App</th>{['Installs', 'Visits', 'Proceeds'].map(h => <th key={h} className="num">{h}</th>)}<th className="num">Days in</th></tr></thead>
+        <table className="table compact stack">
+          <thead><tr><th>App</th>{GROWTH_COLUMNS.map(h => <th key={h} className="num">{h}</th>)}<th className="num">Days in</th></tr></thead>
           <tbody>{rowsOut.map(({ app, reported, values }) => (
             <tr key={`${app.store}:${app.id}`}>
-              <td>{app.store === 'play' ? <Play size={12} className="tone-muted" /> : <Apple size={12} className="tone-muted" />} {app.name}</td>
+              <td className="lead">{app.store === 'play' ? <Play size={12} className="tone-muted" /> : <Apple size={12} className="tone-muted" />} {app.name}</td>
               {[0, 1, 2].map(i => {
                 const v = values[i];
-                if (!v) return <td key={i} className="num tone-muted">—</td>;
+                if (!v) return <td key={i} className="num tone-muted" data-label={GROWTH_COLUMNS[i].toLowerCase()}>—</td>;
                 const f = v.money ? money : (n: number) => n.toLocaleString();
                 const diff = v.before === null ? null : v.now - v.before;
-                return <td key={i} className="num" title={v.before === null ? 'No matching days before' : `was ${f(v.before)}`}>
+                return <td key={i} className="num" data-label={GROWTH_COLUMNS[i].toLowerCase()} title={v.before === null ? 'No matching days before' : `was ${f(v.before)}`}>
                   {reported ? f(v.now) : '—'}{diff ? <span className={`delta ${diff > 0 ? 'up' : 'down'}`}> {diff > 0 ? '+' : '−'}{f(Math.abs(diff))}</span> : null}
                 </td>;
               })}
-              <td className="num tone-muted" title="Store reports arrive a day or more late">{reported}/{days.length}</td>
+              <td className="num tone-muted" data-label="days in" title="Store reports arrive a day or more late">{reported}/{days.length}</td>
             </tr>
           ))}</tbody>
         </table>
