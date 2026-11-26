@@ -401,15 +401,15 @@ function Schedule({ runner, now, open }: { runner: RunnerState; now: number; ope
   return (
     <>
       <Section title="Scheduled work">
-        <table className="table">
+        <table className="table stack">
           <thead><tr><th>Task</th><th>Cadence</th><th>Last run</th><th>Next</th><th /></tr></thead>
           <tbody>
             {runner.schedule.map(s => (
               <tr key={s.id}>
-                <td><strong>{s.name}</strong>{s.detail ? <div className="sub">{s.detail}</div> : null}</td>
+                <td className="lead"><strong>{s.name}</strong>{s.detail ? <div className="sub">{s.detail}</div> : null}</td>
                 <td>{s.cadence}</td>
-                <td title={full(s.lastAt)}>{s.lastAt ? rel(s.lastAt, now) : <span className="tone-muted">since start</span>}</td>
-                <td title={full(s.nextAt)}>{s.running ? '—' : rel(s.nextAt, now)}</td>
+                <td data-label="last" title={full(s.lastAt)}>{s.lastAt ? rel(s.lastAt, now) : <span className="tone-muted">since start</span>}</td>
+                <td data-label="next" title={full(s.nextAt)}>{s.running ? '—' : rel(s.nextAt, now)}</td>
                 <td>{s.running ? <Chip tone="info">running</Chip> : <Chip>scheduled</Chip>}</td>
               </tr>
             ))}
@@ -419,10 +419,10 @@ function Schedule({ runner, now, open }: { runner: RunnerState; now: number; ope
       </Section>
       <Section title="Follow-ups">
         {runner.followUps.length === 0 ? <Empty title="No follow-ups pending" /> : (
-          <table className="table">
+          <table className="table stack">
             <thead><tr><th>Job</th><th>Waiting for</th><th>Since</th><th>Next check</th></tr></thead>
             <tbody>{runner.followUps.map(f => (
-              <tr key={`${f.jobId}:${f.kind}`}><td><JobLink id={f.jobId} open={open} /></td><td>{f.text}</td><td>{rel(f.createdAt, now)}</td><td>{rel(f.dueAt, now)}</td></tr>
+              <tr key={`${f.jobId}:${f.kind}`}><td><JobLink id={f.jobId} open={open} /></td><td className="lead">{f.text}</td><td data-label="since">{rel(f.createdAt, now)}</td><td data-label="next check">{rel(f.dueAt, now)}</td></tr>
             ))}</tbody>
           </table>
         )}
@@ -470,15 +470,15 @@ function Jobs({ jobs, q, setQ, now, open }: { jobs: Job[]; q: string; setQ: (q: 
   return (
     <>
       <div className="toolbar"><SearchBox q={q} setQ={setQ} placeholder="Filter jobs…" /><span className="meta">{shown.length} of the runner’s latest {jobs.length} jobs</span></div>
-      <table className="table clickable">
+      <table className="table clickable stack">
         <thead><tr><th>State</th><th>Job</th><th>Kind</th><th>Attempts</th><th>PR</th><th>Updated</th></tr></thead>
         <tbody>{shown.map(j => (
           <tr key={j.id} onClick={() => open(j.id)}>
             <td><Chip tone={STATE_TONE[j.state]}>{j.state.replace('_', ' ')}</Chip></td>
-            <td><strong>{j.title}</strong><div className="sub">{j.id}{j.lastError ? <span className="tone-bad"> · {j.lastError.split('\n')[0]}</span> : null}</div></td>
+            <td className="lead"><strong>{j.title}</strong><div className="sub">{j.id}{j.lastError ? <span className="tone-bad"> · {j.lastError.split('\n')[0]}</span> : null}</div></td>
             <td>{j.kind}</td>
-            <td>{j.attempts}</td>
-            <td>{j.prNumber ? <a href={`https://github.com/${j.owner}/${j.repo}/pull/${j.prNumber}`} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}>#{j.prNumber}</a> : '—'}</td>
+            <td data-label="attempts">{j.attempts}</td>
+            <td data-label="PR">{j.prNumber ? <a href={`https://github.com/${j.owner}/${j.repo}/pull/${j.prNumber}`} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}>#{j.prNumber}</a> : '—'}</td>
             <td title={full(j.updatedAt)}>{rel(j.updatedAt, now)}</td>
           </tr>
         ))}</tbody>

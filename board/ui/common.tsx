@@ -109,7 +109,7 @@ export function AttentionChip({ item }: { item: BoardItem }) {
   const a = item.attention;
   if (!a?.action) return null;
   const known = ATTENTION[a.status] ?? { label: a.status, tone: 'muted' };
-  return <Chip tone={known.tone} title={`${a.reason} → ${a.action}`}>{known.label}</Chip>;
+  return <span className="attention"><Chip tone={known.tone} title={`${a.reason} → ${a.action}`}>{known.label}</Chip></span>;
 }
 
 export function ItemRow({ item, now }: { item: BoardItem; now: number }) {
