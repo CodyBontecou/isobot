@@ -106,7 +106,21 @@ export interface BoardEvent { id: number; jobId: string | null; at: string; kind
 
 export interface Session { authenticated: boolean; oauthConfigured?: boolean; user?: { id: string; login: string; name: string | null }; csrfToken?: string }
 
-export type View = 'overview' | 'summary' | 'growth' | 'tasks' | 'activity' | 'schedule' | 'prs' | 'issues' | 'jobs' | 'agents';
+export type View = 'overview' | 'summary' | 'growth' | 'vox' | 'tasks' | 'activity' | 'schedule' | 'prs' | 'issues' | 'jobs' | 'agents';
+
+// Mirrors runner/src/voxNotebook.ts: the Vox notebook, served by /api/vox.
+
+export interface VoxNote { path: string; kind: string; title: string; captured: string | null; updated: string; status: string; projects: string[]; links: string[]; source: string | null; body: string }
+export interface VoxAction { project: string; text: string; done: boolean; notes: string[] }
+export interface Vox {
+  at: string;
+  notes: VoxNote[];
+  actions: VoxAction[];
+  themes: { title: string; body: string }[];
+  review: string[];
+  lastRun: { at: string; text: string } | null;
+  privateCount: number;
+}
 
 // Mirrors board/src/agent.ts: agent conversations, served by /api/agent.
 

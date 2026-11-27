@@ -24,7 +24,7 @@ import { BOARD_RULES, chatAllowlist, claudeChatModel, StaffChat } from "./chat.j
 import { ChatToolServer } from "./chatMcp.js";
 import { DiscordApi } from "./discordApi.js";
 import { CloudRepo, HttpSandboxApi, remoteChecks, remoteExec } from "./cloud.js";
-import { asoApps, cloudRepos, configuredRepos, contentRepos, LIVE_ROOT, loadConfig, loadEnvironment, policyFor, type Environment, type RunnerConfig } from "./config.js";
+import { asoApps, cloudRepos, configuredRepos, contentRepos, LIVE_ROOT, loadConfig, loadEnvironment, policyFor, voxNotebookDir, type Environment, type RunnerConfig } from "./config.js";
 import { Repo } from "./git.js";
 import { GitHub } from "./github.js";
 import { TERMINAL_MARKER } from "./notes.js";
@@ -34,6 +34,7 @@ import { HANDOFF, Notifier } from "./notify.js";
 import { Pipeline } from "./pipeline.js";
 import { runChecks } from "./checks.js";
 import { buildMetrics } from "./metrics.js";
+import { readNotebook } from "./voxNotebook.js";
 import { formatSweep, PrSweep } from "./prSweep.js";
 import { runBoardAction } from "./boardActions.js";
 import { Dashboard, WEEKDAYS, every, nextDailyAt, nextWeeklyAt, type ScheduleItem } from "./dashboard.js";
@@ -513,6 +514,7 @@ async function loop(rt: Runtime): Promise<void> {
     live: () => ({ startedAt, activeJobs: rt.pipeline.activeJobs, manuallyPaused: existsSync(pausedFile(rt.env)), lastTriageAt, lastCycleError }),
     queued: () => rt.store.inState("queued").length,
     metrics: now => buildMetrics(rt.config, rt.store, now),
+    vox: now => readNotebook(voxNotebookDir(rt.config), now),
     act: action => runBoardAction(action, {
       labels: rt.config.labels, repos: () => configuredRepos(rt.config).map(r => `${r.owner}/${r.repo}`), github: rt.github,
       event: (jobId, text) => rt.store.event(jobId, "board_action", text),

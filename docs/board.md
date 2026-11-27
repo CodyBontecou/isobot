@@ -10,6 +10,7 @@ link), and a side pane with a job's full timeline.
 | Overview | Runner health, what's building, what needs you (review, failed, proposed, waiting to ship), the PRs the sweep says need you, what runs next, today's events |
 | Summary | One day, week (Mon–Sun) or month at a time, in your time zone, against the period before (or, for one still under way, the same stretch of it): PRs merged, issues opened and closed, failed builds, runner errors, activity by hour or day, what shipped, new issues by source, what the trains, content and ASO did, problems, work per repository, and store numbers, listing changes and published pages. Step with ‹ › or the arrow keys, jump with the calendar (shaded by activity) or **Today** (`t`); `d`/`w`/`m` switch period, and clicking a day in the chart opens it. `?view=summary&period=month&date=2026-11-01` links to a period |
 | Growth | What the scheduled work measures and what it changed, over 30/90/120 days: installs and listing traffic (App Store and Play), Google Play's overall rating and the days with new ratings, search phrases in the top 10, conversion, trials, proceeds, a Revenue section from Apple's Sales and Trends reports (proceeds by month by kind, this month against last, the recurring run-rate, trial conversion, yearly totals, each app's last four months and trials and cancellations; per app its proceeds by month, active subscriptions by plan, and trials, conversion, renewals and cancellations by week), a per-phrase rank table with 7- and 28-day moves, Search Console clicks per week, OpenSEO credits. Listing changes (◆) and published pages (●) are marked on every chart |
+| Vox notes | Your Vox.md voice notes as the vox-inbox task files them ([how](#how-it-works)): notes by day with kind (idea, bug, goal, theory, history, misc), project and status filters and search, each opening in a side pane with its text, linked issues (with their state) and actions; the action checklist by project; recurring themes; what the notebook is waiting on you for, and its latest run. The repository filter narrows to that project's notes. `?view=vox&note=notes/ideas/…md` links to a note |
 | Tasks | The `isobot:*` label queue as columns (proposed → ready → building → review, failed), plus work merged in the last 7 days. Each card has buttons for what can be done to it ([Task actions](#task-actions)) |
 | Activity | The runner's event timeline by day (7 days), split into job and runner-level events, with text search |
 | Schedule | Triage, content and ASO trains, analytics, the daily check-in, search and rank reports, release trains, and pending follow-ups |
@@ -39,6 +40,12 @@ browser ──GitHub sign-in──▶ isobot-board ──RPC──▶ AccountAut
   The runner rebuilds them every 15 minutes and sends them only when they changed; the board keeps the latest set
   and serves it at `/api/metrics`. Rank snapshots fill in over the day, so each phrase counts at its newest reading
   from the last 7 days, and the rank trend uses the app's main storefront (`aso.storefront`, default US).
+- **Vox notes** (`runner/src/voxNotebook.ts`) come from the Vox notebook on the runner's Mac (`vox.notebook` in the
+  runner config, default `~/dev/vox-notebook`), which an agents-cron task keeps from the iCloud Vox folder. The runner
+  reads its `notes/`, `ACTIONS.md`, `THEMES.md`, `INBOX-REVIEW.md` and `state/last-summary.md` every 5 minutes and sends
+  them only when they changed; the board keeps the latest copy and serves it at `/api/vox`. Following the notebook's own
+  rules, `journal/` entries (and actions or review items pointing into it) and every note's place stay on the Mac: the
+  `place:` names are also taken out of all the text, since entries mention them in passing. Raw iCloud captures are never read.
 - **History for the Summary view**: the board keeps runner events for 400 days, and every issue, PR and job it has
   seen (newest copy), so periods older than a snapshot's 14 days of closed items still count. `/api/summary` returns
   event counts per UTC hour, kind and repo (the browser cuts them into local days), the named events (merges,

@@ -376,6 +376,8 @@ export interface VoxConfig {
   maxProposalsPerNote?: number;
   /** How the owner's product names come out of speech-to-text, for the triage model. */
   hints?: string;
+  /** The Vox notebook the vox-inbox task keeps, shown on the board's Vox view. "~/" is expanded. Default ~/dev/vox-notebook. */
+  notebook?: string;
 }
 
 export interface Labels {
@@ -456,6 +458,7 @@ export function validateConfig(config: RunnerConfig): void {
     if (min !== undefined && !(min > 0 && min <= 1)) fail("vox.minAutoApproveConfidence must be in (0, 1]");
     const most = config.vox.maxProposalsPerNote;
     if (most !== undefined && !(Number.isInteger(most) && most >= 1 && most <= 10)) fail("vox.maxProposalsPerNote must be 1-10");
+    if (config.vox.notebook !== undefined && (typeof config.vox.notebook !== "string" || !config.vox.notebook.trim())) fail("vox.notebook must be a path");
   }
   if (config.autoApprove) {
     const a = config.autoApprove;
@@ -801,4 +804,10 @@ function boardEnv(env: NodeJS.ProcessEnv): Environment["board"] {
   if (!url || !token) throw new Error("ISOBOT_BOARD_URL and ISOBOT_BOARD_TOKEN go together");
   if (!/^https:\/\//.test(url) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(url)) throw new Error("ISOBOT_BOARD_URL must use HTTPS");
   return { url, token };
+}
+
+/** Where the board's Vox view reads the notebook (vox.notebook, default ~/dev/vox-notebook). */
+export function voxNotebookDir(config: RunnerConfig): string {
+  const dir = config.vox?.notebook ?? "~/dev/vox-notebook";
+  return dir === "~" ? homedir() : dir.startsWith("~/") ? path.join(homedir(), dir.slice(2)) : path.resolve(dir);
 }

@@ -154,6 +154,39 @@ test("metrics go with a push only when they changed, and again after the board a
   assert.equal(sent[4].metrics?.credits.days[0].spent, 2);
 });
 
+test("the Vox notebook goes with a push when it changed, and not at all when there is none", async () => {
+  const store = new Store(":memory:");
+  const sent: BoardSnapshot[] = [];
+  let clock = Date.parse("2026-11-20T12:00:00Z");
+  let notes = 1;
+  let present = true;
+  const vox = (now: Date) => present
+    ? { at: now.toISOString(), notes: Array.from({ length: notes }, (_, i) => ({ path: `notes/ideas/${i}.md`, kind: "idea", title: `${i}`, captured: null, updated: "2026-11-20T00:00:00Z", status: "open", projects: [], links: [], source: null, body: "" })), actions: [], themes: [], review: [], lastRun: null, privateCount: 0 }
+    : null;
+  const dashboard = new Dashboard({
+    url: "https://bot.example", token: "t", runnerId: "laptop", store, github: { boardItems: async () => [] },
+    repos: () => [], schedule: () => [], live: () => ({ startedAt: "", activeJobs: [], manuallyPaused: false, lastTriageAt: null, lastCycleError: null }),
+    queued: () => 0, vox, voxEveryMs: 60_000, now: () => new Date(clock),
+    fetch: (async (_url: string, init: RequestInit) => { sent.push(JSON.parse(String(init.body))); return Response.json({ lastEventId: 0 }); }) as typeof fetch,
+  });
+  await dashboard.push();
+  assert.equal(sent[0].vox?.notes.length, 1);
+  assert.equal(sent[0].metrics, null, "no metrics source, no metrics");
+  clock += 60_000;
+  await dashboard.push();
+  assert.equal(sent[1].vox, null, "unchanged");
+  notes = 2;
+  await dashboard.push();
+  assert.equal(sent[2].vox, null, "not due yet");
+  clock += 60_000;
+  await dashboard.push();
+  assert.equal(sent[3].vox?.notes.length, 2);
+  present = false;
+  clock += 60_000;
+  await dashboard.push();
+  assert.equal(sent[4].vox, null, "a notebook that went away leaves the board's copy alone");
+});
+
 test("actions in the board's answer are applied once and reported in the next push", async () => {
   const store = new Store(":memory:");
   const sent: BoardSnapshot[] = [];

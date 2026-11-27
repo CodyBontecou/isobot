@@ -497,8 +497,17 @@ export function AgentsView({ agent, openThread, newThread, session }: { agent: A
 
 // ---------- a small, safe Markdown ----------
 
-/** Paragraphs, lists, fenced code, `code`, **bold**, *italic* and links; everything else is text. Never HTML. */
-export function Markdown({ text }: { text: string }) {
+/**
+ * Links to something the board shows itself (a Vox note's `notes/…` path): the href and click handler to use,
+ * or null to show the label as plain text.
+ */
+export type LocalLink = (target: string) => { href: string; onClick: () => void } | null;
+
+/**
+ * Headings, paragraphs, lists, quotes, fenced code, `code`, **bold**, *italic* and links; everything else is
+ * text. Never HTML. With `local`, relative links (`[note](notes/ideas/x.md)`) go through it.
+ */
+export function Markdown({ text, local }: { text: string; local?: LocalLink }) {
   const blocks: ReactNode[] = [];
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   let i = 0;
@@ -522,21 +531,27 @@ export function Markdown({ text }: { text: string }) {
         items.push(item);
       }
       const List = ordered ? 'ol' : 'ul';
-      blocks.push(<List key={blocks.length}>{items.map((t, n) => <li key={n}><Inline text={t} /></li>)}</List>);
+      blocks.push(<List key={blocks.length}>{items.map((t, n) => <li key={n}><Inline text={t.replace(/^\[([ xX])\]\s+/, (_, x: string) => x === ' ' ? '☐ ' : '☑ ')} local={local} /></li>)}</List>);
       continue;
     }
-    if (/^#{1,6}\s/.test(line)) { blocks.push(<p key={blocks.length}><strong><Inline text={line.replace(/^#+\s/, '')} /></strong></p>); i++; continue; }
+    if (/^>\s?/.test(line)) {
+      const quote: string[] = [];
+      while (i < lines.length && /^>\s?/.test(lines[i])) quote.push(lines[i++].replace(/^>\s?/, ''));
+      blocks.push(<blockquote key={blocks.length}><Markdown text={quote.join('\n')} local={local} /></blockquote>);
+      continue;
+    }
+    if (/^#{1,6}\s/.test(line)) { blocks.push(<p key={blocks.length} className="md-h"><strong><Inline text={line.replace(/^#+\s/, '')} local={local} /></strong></p>); i++; continue; }
     if (!line.trim()) { i++; continue; }
     const para: string[] = [];
-    while (i < lines.length && lines[i].trim() && !/^```/.test(lines[i]) && !/^\s*([-*•]|\d+[.)])\s+/.test(lines[i]) && !/^#{1,6}\s/.test(lines[i])) para.push(lines[i++]);
-    blocks.push(<p key={blocks.length}>{para.map((l, n) => <Fragment key={n}>{n ? <br /> : null}<Inline text={l} /></Fragment>)}</p>);
+    while (i < lines.length && lines[i].trim() && !/^```/.test(lines[i]) && !/^\s*([-*•]|\d+[.)])\s+/.test(lines[i]) && !/^#{1,6}\s/.test(lines[i]) && !/^>/.test(lines[i])) para.push(lines[i++]);
+    blocks.push(<p key={blocks.length}>{para.map((l, n) => <Fragment key={n}>{n ? <br /> : null}<Inline text={l} local={local} /></Fragment>)}</p>);
   }
   return <div className="md">{blocks}</div>;
 }
 
-function Inline({ text }: { text: string }) {
+export function Inline({ text, local }: { text: string; local?: LocalLink }) {
   const out: ReactNode[] = [];
-  const pattern = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\[[^\]]+\]\(https?:\/\/[^\s)]+\))|(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])|(\*[^*\s][^*]*\*)/g;
+  const pattern = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\[[^\]]+\]\(https?:\/\/[^\s)]+\))|(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])|(\*[^*\s][^*]*\*)|(\[[^\]]+\]\([^\s)]+\))/g;
   let last = 0;
   for (const match of text.matchAll(pattern)) {
     const at = match.index ?? 0;
@@ -549,7 +564,11 @@ function Inline({ text }: { text: string }) {
       const [, label, href] = /^\[([^\]]+)\]\((.+)\)$/.exec(token)!;
       out.push(<a key={key} href={href} target="_blank" rel="noreferrer">{label}</a>);
     } else if (match[4]) out.push(<a key={key} href={token} target="_blank" rel="noreferrer">{token}</a>);
-    else out.push(<em key={key}>{token.slice(1, -1)}</em>);
+    else if (match[6]) {
+      const [, label, target] = /^\[([^\]]+)\]\((.+)\)$/.exec(token)!;
+      const link = local?.(target);
+      out.push(link ? <a key={key} href={link.href} onClick={e => { if (e.metaKey || e.ctrlKey || e.altKey) return; e.preventDefault(); link.onClick(); }}>{label}</a> : label);
+    } else out.push(<em key={key}>{token.slice(1, -1)}</em>);
     last = at + token.length;
   }
   if (last < text.length) out.push(text.slice(last));

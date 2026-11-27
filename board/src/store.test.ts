@@ -64,6 +64,19 @@ test("malformed snapshots are refused", () => {
   }
 });
 
+test("the Vox notebook is kept apart from the runner snapshot and survives pushes without it", () => {
+  const store = new BoardStore(sql());
+  assert.equal(store.vox(), null);
+  const vox = { at: now.toISOString(), notes: [{ path: "notes/ideas/a.md" }], actions: [], themes: [], review: [], lastRun: null, privateCount: 0 };
+  store.ingest(snapshot({ vox }), now);
+  assert.deepEqual(store.vox(), vox);
+  assert.equal("vox" in store.board().runners[0], false, "the notebook is served on its own");
+  store.ingest(snapshot({ vox: null }), now);
+  store.ingest(snapshot({}), now);
+  assert.deepEqual(store.vox(), vox);
+  assert.throws(() => store.ingest(snapshot({ vox: { at: now.toISOString(), notes: {}, actions: [], themes: [], review: [] } }), now), BadSnapshot);
+});
+
 test("metrics are kept apart from the runner snapshot and survive pushes without them", () => {
   const store = new BoardStore(sql());
   assert.equal(store.metrics(), null);
