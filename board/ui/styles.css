@@ -524,8 +524,16 @@ a.changes-row:hover { background: var(--bg-hover); }
 @media (max-width: 760px) {
   .shell.with-agent { grid-template-columns: minmax(0, 1fr); }
   .agent { top: auto; left: 0; width: auto; height: 62dvh; border-left: 0; border-top: 1px solid var(--border); border-radius: 14px 14px 0 0; }
-  .agent .sheet-grab { display: block; width: 36px; height: 4px; border-radius: 2px; background: var(--border-strong); margin: 8px auto 0; flex: none; }
-  .agent-head { padding: 6px 8px 8px 16px; }
+  .agent { overflow: hidden; transition: height .22s cubic-bezier(.2, .8, .2, 1); }
+  .agent.sheet-full { height: calc(100dvh - 48px); }
+  .agent.sheet-peek { height: auto; }
+  .agent.sheet-peek .agent-switch, .agent.sheet-peek .agent-context, .agent.sheet-peek .agent-log { display: none; }
+  .agent.sheet-dragging { transition: none; }
+  .agent.sheet-dragging .agent-log { overflow: hidden; }
+  /* The handle is drawn 4px tall but takes touches across a 24px band; it and the header drag the sheet. */
+  .agent .sheet-grab { display: block; position: relative; height: 20px; margin: 0; flex: none; touch-action: none; cursor: grab; }
+  .agent .sheet-grab::before { content: ""; position: absolute; left: 50%; top: 8px; width: 36px; height: 4px; margin-left: -18px; border-radius: 2px; background: var(--border-strong); }
+  .agent-head { padding: 0 8px 8px 16px; touch-action: none; }
   .agent-context { padding: 8px 16px; }
   .agent-hint { display: none; }
   .agent-log { padding: 12px 16px; }
@@ -534,7 +542,7 @@ a.changes-row:hover { background: var(--bg-hover); }
   .composer-tools .meta { display: none; }
   .agent-toggle { display: none; }
   .agent-fab { position: fixed; right: 16px; bottom: calc(20px + env(safe-area-inset-bottom)); z-index: 18; display: inline-flex; align-items: center; gap: 8px; height: 44px; padding: 0 16px; border-radius: 22px; background: var(--text); color: var(--bg); font-weight: 500; box-shadow: var(--shadow); }
-  .shell.with-agent .content { padding-bottom: 64dvh; }
+  .shell.with-agent .content { padding-bottom: calc(var(--agent-sheet-h, 62dvh) + 2dvh); }
   .agent-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .agent-kanban { grid-template-columns: minmax(0, 1fr); }
   .agent-links, .kbd { display: none; }

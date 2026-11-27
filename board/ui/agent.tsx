@@ -233,6 +233,85 @@ export function threadTone(t: AgentThread): 'warn' | 'accent' | 'muted' {
   return t.open ? 'warn' : t.state !== 'idle' ? 'accent' : 'muted';
 }
 
+// ---------- the phone sheet ----------
+
+/**
+ * On phones the dock is a bottom sheet: drag its handle or header to resize it between three stops (just the
+ * composer, half the screen, nearly all of it), or flick it down past the lowest stop to close it. The page
+ * behind keeps room for whatever height it ends at (--agent-sheet-h).
+ */
+type Snap = 'peek' | 'half' | 'full';
+const SNAPS: Snap[] = ['peek', 'half', 'full'];
+const PHONE = '(max-width: 760px)';
+
+function useSheet(open: boolean, close: () => void) {
+  const ref = useRef<HTMLElement>(null);
+  const [snap, setSnapState] = useState<Snap>(() => {
+    const s = stored.get('agent:sheet') as Snap | null;
+    return s && SNAPS.includes(s) ? s : 'half';
+  });
+  const [dragH, setDragH] = useState<number | null>(null);
+  const drag = useRef<{ id: number; y0: number; h0: number; y: number; t: number; v: number; moved: boolean } | null>(null);
+  const setSnap = (s: Snap) => { setSnapState(s); stored.set('agent:sheet', s); };
+
+  // Keep the page's bottom padding the sheet's real height, so the end of a view can scroll above it.
+  useEffect(() => {
+    const el = ref.current;
+    if (!open || !el) return;
+    const root = document.documentElement;
+    const ro = new ResizeObserver(() => root.style.setProperty('--agent-sheet-h', `${Math.round(el.getBoundingClientRect().height)}px`));
+    ro.observe(el);
+    return () => { ro.disconnect(); root.style.removeProperty('--agent-sheet-h'); };
+  }, [open]);
+
+  const heights = (): Record<Snap, number> => {
+    const el = ref.current!;
+    const head = el.querySelector<HTMLElement>('.agent-head');
+    const composer = el.querySelector<HTMLElement>('.composer');
+    const vh = window.visualViewport?.height ?? window.innerHeight;
+    const peek = (head ? head.offsetTop + head.offsetHeight : 56) + (composer?.offsetHeight ?? 90);
+    return { peek, half: Math.max(peek, vh * 0.62), full: Math.max(peek, vh - 48) };
+  };
+
+  const onPointerDown = (e: React.PointerEvent<HTMLElement>) => {
+    if (!window.matchMedia(PHONE).matches || !ref.current || e.button !== 0) return;
+    if ((e.target as Element).closest('button, a, input, textarea')) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const h0 = ref.current.getBoundingClientRect().height;
+    drag.current = { id: e.pointerId, y0: e.clientY, h0, y: e.clientY, t: e.timeStamp, v: 0, moved: false };
+  };
+  const onPointerMove = (e: React.PointerEvent<HTMLElement>) => {
+    const d = drag.current;
+    if (!d || d.id !== e.pointerId) return;
+    if (!d.moved && Math.abs(e.clientY - d.y0) < 4) return;
+    d.moved = true;
+    const dt = Math.max(1, e.timeStamp - d.t);
+    d.v = 0.7 * ((d.y - e.clientY) / dt) + 0.3 * d.v; // px/ms, up is positive
+    d.y = e.clientY; d.t = e.timeStamp;
+    setDragH(Math.max(0, Math.min(heights().full, d.h0 + d.y0 - e.clientY)));
+  };
+  const onPointerUp = (e: React.PointerEvent<HTMLElement>) => {
+    const d = drag.current;
+    if (!d || d.id !== e.pointerId) return;
+    drag.current = null;
+    setDragH(null);
+    if (!d.moved) {
+      // A tap on the handle steps between the lowest stop and half.
+      if ((e.target as Element).closest('.sheet-grab')) setSnap(snap === 'peek' ? 'half' : 'peek');
+      return;
+    }
+    const hs = heights();
+    const h = d.h0 + d.y0 - e.clientY;
+    const aim = h + d.v * 180; // where a flick would carry it
+    // Close only when pulled well below the lowest stop, or flicked down from it; a fast pull from higher up stops there.
+    if (h < hs.peek * 0.6 || (d.h0 <= hs.peek + 8 && aim < hs.peek * 0.6)) { close(); return; }
+    setSnap(SNAPS.reduce((best, s) => Math.abs(hs[s] - aim) < Math.abs(hs[best] - aim) ? s : best, 'half'));
+  };
+  const handlers = { onPointerDown, onPointerMove, onPointerUp, onPointerCancel: onPointerUp };
+  const className = `sheet-${dragH !== null ? 'dragging' : snap}`;
+  return { ref, handlers, className, style: dragH !== null ? { height: `${dragH}px` } : undefined };
+}
+
 // ---------- the dock ----------
 
 export function AgentDock({ session, agent, open, close, page, goAgents }: {
@@ -255,6 +334,7 @@ export function AgentDock({ session, agent, open, close, page, goAgents }: {
   const input = useRef<HTMLTextAreaElement>(null);
   const log = useRef<HTMLDivElement>(null);
   const live = (data?.threads ?? []).filter(t => !t.archived);
+  const sheet = useSheet(open, close);
 
   const setDraft = (text: string) => setDrafts(d => {
     const next = { ...d, [draftKey]: text };
@@ -316,9 +396,9 @@ export function AgentDock({ session, agent, open, close, page, goAgents }: {
   if (thread && !tabs.some(t => t.id === thread.id)) tabs.unshift(thread);
 
   return (
-    <aside className="agent" aria-label="isobot agent">
-      <div className="sheet-grab" aria-hidden="true" />
-      <div className="agent-head">
+    <aside className={`agent ${sheet.className}`} aria-label="isobot agent" ref={sheet.ref} style={sheet.style}>
+      <div className="sheet-grab" aria-hidden="true" {...sheet.handlers} />
+      <div className="agent-head" {...sheet.handlers}>
         <span className={`dot ${thread ? threadTone(thread) : 'accent'}`} />
         <h2 title={thread?.title}>{thread?.title ?? 'New conversation'}</h2>
         <div className="agent-head-actions">
