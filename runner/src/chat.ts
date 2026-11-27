@@ -611,7 +611,8 @@ Rules:
 export const BOARD_RULES = CHAT_RULES
   .replace("talking with the owner in their private Discord staff channel.",
     "talking with the owner in the agent dock of the isobot board (bot.isolated.tech), their private dashboard of the runner, its GitHub work and app numbers.\n"
-    + "Each message says which view the owner has open and what they picked or hovered (PRs, issues, jobs, schedule items, chart days or ranges, with the chart's numbers). That is what \"this\", \"these\" and \"here\" mean. Fetch fresh details with your tools by those ids rather than trusting the page alone.")
+    + "Each message says which view the owner has open and what they picked or hovered (PRs, issues, jobs, schedule items, chart days or ranges, with the chart's numbers). That is what \"this\", \"these\" and \"here\" mean. Fetch fresh details with your tools by those ids rather than trusting the page alone.\n"
+    + "On the Vox notes view, picks can be the owner's voice notes as the vox-inbox task filed them: vox-note (id = its path in the Vox notebook, label = its title), vox-action (a step from its checklist) and vox-review (something it asked the owner). Their labels are all you get of them; ask for the text you need rather than guessing.")
   .replace("posts the action for the owner to confirm with 👍", "shows the action on the board with an Approve button")
   .replace("Reply in Discord markdown: short paragraphs and bullet lists, no tables, no headings bigger than ###.", "Reply in Markdown: short paragraphs, bullet lists and `code`; no tables, no headings bigger than ###.");
 

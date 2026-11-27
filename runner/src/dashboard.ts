@@ -3,6 +3,7 @@ import { latestSweep, type SweepResult } from "./prSweep.js";
 import { CRASH_MARKER } from "./crashes.js";
 import { CHAT_MARKER } from "./notes.js";
 import type { BoardMetrics } from "./metrics.js";
+import type { BoardVox } from "./voxNotebook.js";
 import type { BoardAction, BoardActionResult } from "./boardActions.js";
 import type { FollowUp, Job, Store, StoredEvent } from "./store.js";
 
@@ -145,6 +146,8 @@ export interface BoardSnapshot {
   github: { at: string; items: BoardItem[]; errors: string[] } | null;
   /** The Growth view's series (metrics.ts); null when unchanged since the board last took them. */
   metrics?: BoardMetrics | null;
+  /** The Vox view's notebook (voxNotebook.ts); null when unchanged since the board last took it. */
+  vox?: BoardVox | null;
   /** How the board actions from the last answer went; the board shows them on the task. */
   actionResults?: BoardActionResult[];
 }
@@ -166,6 +169,8 @@ export interface DashboardOptions {
   queued: () => number;
   /** The Growth view's series; read from runner.sqlite every `metricsEveryMs`. */
   metrics?: (now: Date) => BoardMetrics;
+  /** The Vox notebook; read every `voxEveryMs`. Null when there is no notebook. */
+  vox?: (now: Date) => BoardVox | null;
   /** Applies a task action the owner clicked on the board (boardActions.ts runBoardAction). Without it, actions wait. */
   act?: (action: BoardAction) => Promise<BoardActionResult>;
   pushEveryMs?: number;
@@ -173,9 +178,42 @@ export interface DashboardOptions {
   actionPollMs?: number;
   githubEveryMs?: number;
   metricsEveryMs?: number;
+  voxEveryMs?: number;
   fetch?: typeof fetch;
   now?: () => Date;
 }
+
+/**
+ * Something read every so often (the Growth series, the Vox notebook) that goes to the board only when it
+ * changed. A board that asks for a resync gets the last read again.
+ */
+class Changing<T extends { at: string }> {
+  private last = Number.NEGATIVE_INFINITY;
+  private cache: T | null = null;
+  /** As last sent, without its `at`, to send only what changed. */
+  private sent = "";
+  private unsent = false;
+
+  constructor(private readonly name: string, private readonly read: ((now: Date) => T | null) | undefined, private readonly everyMs: number) {}
+
+  refresh(now: Date): void {
+    if (!this.read || now.getTime() - this.last < this.everyMs) return;
+    this.last = now.getTime();
+    try {
+      const value = this.read(now);
+      if (value && key(value) !== this.sent) { this.cache = value; this.unsent = true; }
+    } catch (error) {
+      console.warn(`[board] ${this.name} failed: ${(error as Error).message}`);
+    }
+  }
+
+  take(resync: boolean): T | null { return this.unsent || resync ? this.cache : null; }
+
+  delivered(value: T | null): void {
+    if (value) { this.unsent = false; this.sent = key(value); }
+  }
+}
+const key = (value: { at: string }) => JSON.stringify({ ...value, at: undefined });
 
 /** Pushes snapshots to the board. Never throws: the board must never slow or stop the runner. */
 export class Dashboard {
@@ -187,11 +225,8 @@ export class Dashboard {
   private githubCache: BoardSnapshot["github"] = null;
   /** The last GitHub read hasn't reached the board yet. */
   private githubUnsent = false;
-  private lastMetrics = 0;
-  private metricsCache: BoardMetrics | null = null;
-  /** The series as last sent (without their `at`), to send only what changed. */
-  private metricsSent = "";
-  private metricsUnsent = false;
+  private readonly metrics: Changing<BoardMetrics>;
+  private readonly vox: Changing<BoardVox>;
   private failures = 0;
   private polling = false;
   /** Results not yet acknowledged by the board, sent with every push until one succeeds. */
@@ -201,7 +236,10 @@ export class Dashboard {
   /** Results the board has acknowledged. */
   private reported = new Set<string>();
 
-  constructor(private readonly o: DashboardOptions) {}
+  constructor(private readonly o: DashboardOptions) {
+    this.metrics = new Changing("metrics", o.metrics, o.metricsEveryMs ?? 15 * 60_000);
+    this.vox = new Changing("vox notebook", o.vox, o.voxEveryMs ?? 5 * 60_000);
+  }
 
   /** Called every cycle; pushes when a push is due and none is running. */
   tick(): void {
@@ -257,19 +295,12 @@ export class Dashboard {
         this.githubCache = await this.readGitHub(now);
         this.githubUnsent = true;
       }
-      if (this.o.metrics && now.getTime() - this.lastMetrics >= (this.o.metricsEveryMs ?? 15 * 60_000)) {
-        this.lastMetrics = now.getTime();
-        try {
-          const metrics = this.o.metrics(now);
-          const body = JSON.stringify({ ...metrics, at: undefined });
-          if (body !== this.metricsSent) { this.metricsCache = metrics; this.metricsUnsent = true; }
-        } catch (error) {
-          console.warn(`[board] metrics failed: ${(error as Error).message}`);
-        }
-      }
+      this.metrics.refresh(now);
+      this.vox.refresh(now);
       // A failed push, or a board that hasn't answered yet, gets the last read again rather than a new one.
       const github = this.githubUnsent || this.boardEventId === null ? this.githubCache : null;
-      const metrics = this.metricsUnsent || this.boardEventId === null ? this.metricsCache : null;
+      const metrics = this.metrics.take(this.boardEventId === null);
+      const vox = this.vox.take(this.boardEventId === null);
       const last = this.o.store.lastEventId();
       const after = this.boardEventId === null || this.boardEventId > last
         ? Math.max(0, last - EVENT_BACKFILL)
@@ -278,7 +309,7 @@ export class Dashboard {
       const snapshot = buildSnapshot({
         now, runnerId: this.o.runnerId, live: this.o.live(), queued: this.o.queued(),
         buildsPausedUntil: this.o.store.pausedUntil(), repos: this.o.repos(), schedule: this.o.schedule(now),
-        jobs: this.o.store.all(JOBS_PER_PUSH), followUps: this.o.store.followUps(), events, github, metrics,
+        jobs: this.o.store.all(JOBS_PER_PUSH), followUps: this.o.store.followUps(), events, github, metrics, vox,
       });
       const results = this.results;
       if (results.length) snapshot.actionResults = results;
@@ -301,7 +332,8 @@ export class Dashboard {
         for (const r of results) this.reported.add(r.id);
       }
       if (github) this.githubUnsent = false;
-      if (metrics) { this.metricsUnsent = false; this.metricsSent = JSON.stringify({ ...metrics, at: undefined }); }
+      this.metrics.delivered(metrics);
+      this.vox.delivered(vox);
       if (this.failures) console.log(`[board] pushing again after ${this.failures} failed push(es)`);
       this.failures = 0;
       // Results and a fresh GitHub read go out with the next push, a cycle from now (or sooner, via start()).
@@ -371,6 +403,7 @@ export interface SnapshotInput {
   events: StoredEvent[];
   github: BoardSnapshot["github"];
   metrics?: BoardMetrics | null;
+  vox?: BoardVox | null;
 }
 
 export function buildSnapshot(input: SnapshotInput): BoardSnapshot {
@@ -387,6 +420,7 @@ export function buildSnapshot(input: SnapshotInput): BoardSnapshot {
     events: input.events.map(e => ({ id: e.id, jobId: e.jobId, at: e.at, kind: e.kind, text: clip(describeEvent(e.kind, e.detail, e.data), EVENT_TEXT_LIMIT) })),
     github: input.github,
     metrics: input.metrics ?? null,
+    vox: input.vox ?? null,
   };
 }
 

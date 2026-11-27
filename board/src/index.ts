@@ -114,6 +114,7 @@ export default {
       }
       if (path === "/api/board") return json(await board.board());
       if (path === "/api/metrics") return json({ metrics: await board.metrics() });
+      if (path === "/api/vox") return json({ vox: await board.vox() });
       if (path === "/api/events") {
         const days = Math.min(Math.max(Number(url.searchParams.get("days") ?? 7) || 7, 1), 30);
         const job = url.searchParams.get("job");
@@ -283,6 +284,8 @@ export class BoardState extends DurableObject<Env> {
   }
 
   metrics() { return this.store.metrics(); }
+
+  vox() { return this.store.vox(); }
 
   events(options: { since: string; jobId?: string; limit?: number }) { return this.store.events(options); }
 

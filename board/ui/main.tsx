@@ -2,7 +2,7 @@ import { createRoot } from 'react-dom/client';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   Activity, AlertTriangle, Bot, CalendarClock, CalendarRange, CircleDot, CircleX, ExternalLink, GitMerge, GitPullRequest,
-  Check, Hammer, Inbox, KanbanSquare, LayoutDashboard, ListChecks, LogOut, Pause, RefreshCw, RotateCcw, Square, Trash2, TrendingUp, X,
+  Check, Hammer, Inbox, KanbanSquare, LayoutDashboard, ListChecks, LogOut, Mic, Pause, RefreshCw, RotateCcw, Square, Trash2, TrendingUp, X,
 } from 'lucide-react';
 import {
   ATTENTION, Chip, Empty, getJson, ItemRow, JobLink, Labels, labelTone, prNeedsYou, refAttrs, rel, full, SearchBox, Section, short,
@@ -10,6 +10,7 @@ import {
 } from './common';
 import { AgentDock, AgentsView, FocusProvider, threadTone, useAgent, useFocus, type Agent } from './agent';
 import { Growth } from './growth';
+import { Vox } from './vox';
 import { Summary, type Period } from './summary';
 import type { ActionKind, Board, BoardAction, BoardEvent, BoardItem, Job, RunnerState, Session, SourceKind, View } from './types';
 import './styles.css';
@@ -21,6 +22,7 @@ const VIEWS: { id: View; label: string; icon: typeof Activity }[] = [
   { id: 'agents', label: 'Agents', icon: Bot },
   { id: 'summary', label: 'Summary', icon: CalendarRange },
   { id: 'growth', label: 'Growth', icon: TrendingUp },
+  { id: 'vox', label: 'Vox notes', icon: Mic },
   { id: 'tasks', label: 'Tasks', icon: KanbanSquare },
   { id: 'activity', label: 'Activity', icon: Activity },
   { id: 'schedule', label: 'Schedule', icon: CalendarClock },
@@ -29,12 +31,12 @@ const VIEWS: { id: View; label: string; icon: typeof Activity }[] = [
   { id: 'jobs', label: 'Jobs', icon: ListChecks },
 ];
 
-type Params = { view: View; repo: string; q: string; state: string; job: string; source: string; range: string; daily: string; app: string; period: string; date: string };
+type Params = { view: View; repo: string; q: string; state: string; job: string; source: string; range: string; daily: string; app: string; period: string; date: string; kind: string; project: string; status: string; note: string };
 
 function readParams(): Params {
   const p = new URLSearchParams(location.search);
   const view = (p.get('view') ?? 'overview') as View;
-  return { view: VIEWS.some(v => v.id === view) ? view : 'overview', repo: p.get('repo') ?? '', q: p.get('q') ?? '', state: p.get('state') ?? '', job: p.get('job') ?? '', source: p.get('source') ?? '', range: p.get('range') ?? '', daily: p.get('daily') ?? '', app: p.get('app') ?? '', period: p.get('period') ?? '', date: p.get('date') ?? '' };
+  return { view: VIEWS.some(v => v.id === view) ? view : 'overview', repo: p.get('repo') ?? '', q: p.get('q') ?? '', state: p.get('state') ?? '', job: p.get('job') ?? '', source: p.get('source') ?? '', range: p.get('range') ?? '', daily: p.get('daily') ?? '', app: p.get('app') ?? '', period: p.get('period') ?? '', date: p.get('date') ?? '', kind: p.get('kind') ?? '', project: p.get('project') ?? '', status: p.get('status') ?? '', note: p.get('note') ?? '' };
 }
 
 function useParams(): [Params, (next: Partial<Params>, push?: boolean) => void] {
@@ -188,7 +190,7 @@ function App() {
     setSession({ authenticated: false, oauthConfigured: true });
   };
 
-  const pageLabel = [VIEWS.find(v => v.id === params.view)?.label ?? params.view, params.repo ? short(params.repo) : '', params.app ? params.app : '', params.job ? `job ${params.job}` : '']
+  const pageLabel = [VIEWS.find(v => v.id === params.view)?.label ?? params.view, params.repo ? short(params.repo) : '', params.app ? params.app : '', params.job ? `job ${params.job}` : '', params.note ? `note ${params.note}` : '']
     .filter(Boolean).join(' · ');
   const pageUrl = location.search || '?view=overview';
   const openThread = (id: string | null) => { agent.setActive(id); setDockOpen(true); setTimeout(() => document.getElementById('agent-input')?.focus(), 0); };
@@ -201,7 +203,7 @@ function App() {
         <nav>
           {VIEWS.map(({ id, label, icon: Icon }) => (
             <a key={id} href={`?view=${id}`} className={params.view === id ? 'active' : ''}
-              onClick={e => { e.preventDefault(); setParams({ view: id, state: '', q: '', source: '', app: '', period: '', date: '' }); }}>
+              onClick={e => { e.preventDefault(); setParams({ view: id, state: '', q: '', source: '', app: '', period: '', date: '', kind: '', project: '', status: '', note: '' }); }}>
               <Icon size={15} /> <span>{label}</span>{counts[id] ? <em>{counts[id]}</em> : null}
             </a>
           ))}
@@ -241,6 +243,9 @@ function App() {
                 date={params.date} go={(period, date) => setParams({ period: period === 'week' ? '' : period, date })} open={job => setParams({ job })} />}
               {params.view === 'growth' && <Growth repo={params.repo} range={params.range} setRange={range => setParams({ range: range === '90' ? '' : range })}
                 daily={params.daily === '1'} setDaily={daily => setParams({ daily: daily ? '1' : '' })} app={params.app} setApp={app => setParams({ app }, false)} />}
+              {params.view === 'vox' && <Vox repo={params.repo} items={board?.github?.items ?? []} now={now}
+                params={{ tab: params.state, kind: params.kind, project: params.project, status: params.status, q: params.q, note: params.note }}
+                set={(next, push) => { const { tab, ...rest } = next; setParams({ ...rest, ...(tab !== undefined ? { state: tab, note: '' } : {}) }, push); }} />}
               {params.view === 'tasks' && <Tasks items={items} jobs={jobs} actions={actions} act={act} now={now} open={job => setParams({ job })} />}
               {params.view === 'activity' && <ActivityView events={repoEvents} source={params.state} setSource={state => setParams({ state })} q={params.q} setQ={q => setParams({ q }, false)} open={job => setParams({ job })} />}
               {params.view === 'schedule' && <Schedule runner={runner} now={now} open={job => setParams({ job })} />}
@@ -251,7 +256,7 @@ function App() {
       </main>
 
       <AgentDock session={session} agent={agent} open={dockOpen} close={() => setDockOpen(false)} page={{ label: pageLabel, url: pageUrl }}
-        goAgents={() => setParams({ view: 'agents', state: '', q: '', source: '', app: '', period: '', date: '' })} />
+        goAgents={() => setParams({ view: 'agents', state: '', q: '', source: '', app: '', period: '', date: '', kind: '', project: '', status: '', note: '' })} />
       {!dockOpen ? <AgentFab agent={agent} open={() => openThread(agent.active)} /> : null}
 
       {params.job && runner ? <JobPane id={params.job} runner={runner} items={board?.github?.items ?? []} now={now} close={() => setParams({ job: '' })} /> : null}
