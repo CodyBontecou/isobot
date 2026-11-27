@@ -5,8 +5,9 @@ import path from "node:path";
 import { test } from "node:test";
 import { runChecks } from "./checks.js";
 import { sandboxProfile } from "./sandbox.js";
+import { canSandbox } from "./testing.js";
 
-const mac = process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec");
+const mac = canSandbox;
 
 test("sandboxed checks can work in the workspace but not read secrets, the keychain or write elsewhere", { skip: !mac }, async () => {
   const workspace = mkdtempSync(path.join(tmpdir(), "isobot-sbx-ws-"));

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { ChatConfig } from "./chat.js";
 import type { DeviceSpec } from "./devices.js";
 import type { DeploySignal } from "./github.js";
+import type { SelfUpdateConfig } from "./selfUpdate.js";
 
 /**
  * Autonomy ladder for one repository. Policy lives in the isobot repo, never in
@@ -331,6 +332,8 @@ export interface RunnerConfig {
   prSweep?: PrSweepConfig;
   /** 💻 on isobot's Discord messages opens the conversation in the owner's local Herdr (handoff.ts). */
   handoff?: HandoffConfig;
+  /** Keep the live checkout on the isobot repo's main: pull, rebuild, deploy and restart (selfUpdate.ts). Off without this block. */
+  selfUpdate?: SelfUpdateConfig;
   defaults: RepoPolicy;
   repos: Record<string, Partial<RepoPolicy>>;
 }
@@ -419,6 +422,8 @@ export interface Environment {
 }
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+/** The checkout of the isobot repository the runner runs from (the folder holding runner/). */
+export const LIVE_ROOT = path.resolve(ROOT, "..");
 
 export function loadConfig(file = process.env.ISOBOT_RUNNER_CONFIG ?? path.join(ROOT, "config", "isobot.json")): RunnerConfig {
   const raw = JSON.parse(readFileSync(file, "utf8")) as RunnerConfig;

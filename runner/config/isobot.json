@@ -120,6 +120,7 @@
       "in"
     ]
   },
+  "selfUpdate": { "deploy": { "board": "npm --prefix board run deploy" } },
   "defaults": {
     "autonomy": "merge",
     "checks": [],
@@ -486,6 +487,16 @@
           "storeUrl": "https://apps.apple.com/us/app/voxboard/id6758967337"
         }
       }
+    },
+    "codybontecou/isobot": {
+      "autonomy": "pr",
+      "ownerAutonomy": "pr",
+      "checks": [
+        "npm ci --no-audit --no-fund && npm ci --prefix runner --no-audit --no-fund && npm ci --prefix cloudflare --no-audit --no-fund && npm ci --prefix bridge --no-audit --no-fund && npm ci --prefix watchdog --no-audit --no-fund && npm ci --prefix sandbox --no-audit --no-fund && npm ci --prefix board --no-audit --no-fund",
+        "npm run typecheck && npm run runner:typecheck && npm run agent:typecheck && npm run bridge:typecheck && npm run watchdog:typecheck && npm run sandbox:typecheck && npm run board:typecheck",
+        "npm test"
+      ],
+      "notes": "This is isobot itself: the runner (runner/), its staff chat and board chat tools (runner/src/chatTools.ts, chat.ts, boardChat.ts), the board Worker and UI (board/), the Pi Worker (cloudflare/), the Discord bridge (bridge/), the watchdog and the build sandbox. The checks mirror .github/workflows/ci.yml. Keep the chat's safety model: chat tools stay read-only and every action goes through propose and the owner's confirmation. Never loosen policy (runner/config/isobot.json autonomy, protectedPaths, grants) unless the issue asks for exactly that. Update docs/ when behaviour changes. After the owner merges, the live runner pulls, rebuilds, deploys the board and restarts itself (runner/src/selfUpdate.ts); other Workers are deployed by hand, so say in the PR when one changes."
     }
   }
 }
