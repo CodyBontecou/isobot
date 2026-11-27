@@ -1,4 +1,5 @@
-import { writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { AgentRun, Builder, JobDevices, PreviousReview, Review, TriageItem, TriageResult } from "./builder.js";
 import { loadConfig, type Labels, type RunnerConfig } from "./config.js";
@@ -11,6 +12,13 @@ import type { RepoOps } from "./pipeline.js";
  * The shipped config with every repo at "pr" autonomy (owner-only merge where a train needs it), so tests
  * opt into merging themselves instead of following whatever the live config allows.
  */
+/**
+ * Whether sandbox-exec can confine a command here: macOS, and not already inside a sandbox (isobot's own checks
+ * run in the check sandbox, which can't apply another profile; GitHub CI's macOS job runs these tests).
+ */
+export const canSandbox = process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec")
+  && spawnSync("/usr/bin/sandbox-exec", ["-p", "(version 1)(allow default)", "/usr/bin/true"]).status === 0;
+
 export function testConfig(): RunnerConfig {
   const config = loadConfig();
   config.defaults.autonomy = "pr";

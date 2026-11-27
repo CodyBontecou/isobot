@@ -24,7 +24,7 @@ import { BOARD_RULES, chatAllowlist, claudeChatModel, StaffChat } from "./chat.j
 import { ChatToolServer } from "./chatMcp.js";
 import { DiscordApi } from "./discordApi.js";
 import { CloudRepo, HttpSandboxApi, remoteChecks, remoteExec } from "./cloud.js";
-import { asoApps, cloudRepos, configuredRepos, contentRepos, loadConfig, loadEnvironment, policyFor, type Environment, type RunnerConfig } from "./config.js";
+import { asoApps, cloudRepos, configuredRepos, contentRepos, LIVE_ROOT, loadConfig, loadEnvironment, policyFor, type Environment, type RunnerConfig } from "./config.js";
 import { Repo } from "./git.js";
 import { GitHub } from "./github.js";
 import { TERMINAL_MARKER } from "./notes.js";
@@ -38,7 +38,8 @@ import { formatSweep, PrSweep } from "./prSweep.js";
 import { runBoardAction } from "./boardActions.js";
 import { Dashboard, WEEKDAYS, every, nextDailyAt, nextWeeklyAt, type ScheduleItem } from "./dashboard.js";
 import { Awake, heartbeatAge, pingHeartbeat, readHeartbeat, rotateLog, writeHeartbeat } from "./ops.js";
-import { killAllChildren, run, setGitIdentity, sh, workerEnv } from "./proc.js";
+import { killAllChildren, run, runningChildren, setGitIdentity, sh, workerEnv } from "./proc.js";
+import { SelfUpdate } from "./selfUpdate.js";
 import { sandboxProfile } from "./sandbox.js";
 import { ensureShims } from "./shims.js";
 import { hasDevices, LocalDevices } from "./devices.js";
@@ -518,6 +519,11 @@ async function loop(rt: Runtime): Promise<void> {
     }),
   }) : null;
   board?.start();
+  // Merged isobot changes reach this runner: pulled, built, deployed, then a restart once idle.
+  const selfUpdate = rt.config.selfUpdate ? new SelfUpdate({
+    root: LIVE_ROOT, config: rt.config.selfUpdate, notify: text => rt.notifier.discord(text, [], { handoff: false }),
+  }) : null;
+  let selfUpdating = false;
   console.log(`[runner] started: ${configuredRepos(rt.config).map(r => `${r.owner}/${r.repo}`).join(", ")}; sources: ${rt.sources.map(s => s.name).join(", ")}`);
   await rt.notifier.discord("🟢 isobot runner started", [], { handoff: false });
   while (!stopping) {
@@ -526,7 +532,8 @@ async function loop(rt: Runtime): Promise<void> {
       cycleStartedAt = Date.now();
       try {
         await rt.pipeline.discover();
-        rt.pipeline.startQueued();
+        // A built update waiting to restart: let running builds finish, start no new ones.
+        if (!selfUpdate?.pending) rt.pipeline.startQueued();
         await rt.pipeline.followUp();
         await rt.pipeline.cleanUp();
         await rt.train.tick();
@@ -608,6 +615,17 @@ async function loop(rt: Runtime): Promise<void> {
         }
       }
       cycleStartedAt = null;
+    }
+    if (selfUpdate && !selfUpdating) {
+      selfUpdating = true;
+      // git and builds take a while: beside the cycle. It reports its own failures.
+      void selfUpdate.tick().finally(() => { selfUpdating = false; });
+    }
+    if (selfUpdate?.readyToRestart(rt.pipeline.activeJobs.length, runningChildren())) {
+      await rt.notifier.discord(`♻️ isobot restarting into ${selfUpdate.pending!.sha.slice(0, 10)}`, [], { handoff: false }).catch(() => null);
+      // launchd (KeepAlive) starts the new build.
+      shutdown("self-update");
+      break;
     }
     awake.update(rt.pipeline.activeJobs.length > 0);
     try { rotateLog(logFile); } catch { /* logging must never stop the runner */ }

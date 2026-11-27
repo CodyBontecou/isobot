@@ -2,13 +2,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { configuredRepos, loadConfig, loadEnvironment, policyFor, validateConfig, type RunnerConfig } from "./config.js";
 
-test("the shipped config is valid and lets every repo merge behind its checks", () => {
+test("the shipped config is valid and lets every app repo merge behind its checks", () => {
   const config = loadConfig();
   const repos = configuredRepos(config);
-  assert.ok(repos.length >= 6);
+  assert.ok(repos.length >= 7);
   for (const { owner, repo } of repos) {
     const policy = policyFor(config, `${owner}/${repo}`);
-    assert.equal(policy.autonomy, "merge");
+    // isobot itself only opens PRs: the owner merges every change to the runner.
+    assert.equal(policy.autonomy, repo === "isobot" ? "pr" : "merge");
+    if (repo === "isobot") assert.equal(policy.ownerAutonomy, "pr");
     assert.ok(policy.checks.length > 0);
     assert.ok(policy.requireCi);
   }

@@ -188,6 +188,12 @@ Attach screenshots or logs and it reads them.
   | "rename #chat to #feedback", "move #updates into STAFF", "set the topic" | edit_channel | renames, sets the topic, or moves it; a moved channel takes its new category's permissions (the proposal says whether that's private) |
   | "give #vox-inbox a webhook" | create_webhook | creates it and saves its URL to `webhooks/<channel>-<name>.url` in the runner's home (mode 600), never posting it |
 
+- **Changing isobot itself:** isobot's own code is a configured repository (`codybontecou/isobot`,
+  autonomy `pr`), so "let the issues tool read closed issues" or "add a tool for X" works like any
+  other fix. isobot checks out its own code, proposes create_issue with build, and the builder opens a
+  PR. The PR never merges by itself, whoever asked for it: you merge it (say "merge it" and approve).
+  The live runner then [updates itself](#self-update) within about five minutes.
+
 - **App Store Connect:** it reads App Store Connect with the runner's `asc` CLI (review and submission
   state, builds, TestFlight, customer reviews, metadata, sales and analytics) with `ASC_READ_ONLY=1`,
   so asc itself refuses any change. Changes are `asc` proposals: the confirmation shows the literal
@@ -233,6 +239,23 @@ Send Messages, Read Message History, Create Public Threads, Send Messages in Thr
 Reactions and Attach Files there, and View Channel, Read Message History and Add Reactions wherever
 you want to mention it. The runner finds new messages by reading the server's channel list and active
 threads every 5 seconds, then only the channels that changed.
+
+## Self-update
+
+With a `selfUpdate` block in the runner config, the runner keeps its own checkout (the folder holding
+`runner/`, normally `~/dev/isobot`) on `origin/main`. Every five minutes (`everyMinutes`) it fetches.
+When main has moved, it fast-forwards the checkout and runs `npm ci` wherever a `package-lock.json`
+changed. If anything under `runner/` changed, it runs `npm --prefix runner run build`. It then runs
+each `deploy` command whose folder changed (the shipped config deploys `board/` with
+`npm --prefix board run deploy`) and posts what it did to Discord.
+
+After a runner build, new builds wait and running ones finish. Once nothing is building and no
+chat turn or triage pass is running (or after `maxWaitMinutes`, default 30, of waiting on those),
+the runner says ♻️ and exits, and launchd starts the new build. A build that fails leaves the old
+runner running, and is reported once. The next merge tries again. The runner leaves the checkout
+alone if it has uncommitted changes, is on another branch, or has commits that aren't on
+origin/main, and says so once. So don't work in `~/dev/isobot`; use a worktree (see AGENTS.md).
+The Pi Worker, bridge, watchdog and sandbox Workers still deploy by hand.
 
 ## Follow-ups
 

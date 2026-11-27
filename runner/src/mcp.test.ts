@@ -6,9 +6,10 @@ import { test } from "node:test";
 import { handle, type ShellToolConfig } from "./mcp.js";
 import { workerEnv } from "./proc.js";
 import { sandboxProfile } from "./sandbox.js";
+import { canSandbox } from "./testing.js";
 
 // The shell tool runs commands under sandbox-exec, which only macOS has (CI runs these in its macOS job).
-const mac = process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec");
+const mac = canSandbox;
 
 const workspace = mkdtempSync(path.join(tmpdir(), "isobot-mcp-test-"));
 // Before the profile: it resolves /var → /private/var for paths that exist.
