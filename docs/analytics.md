@@ -57,26 +57,33 @@ for good in `runner.sqlite`:
 - **Sales, yearly**: whole years before the daily window (2025 for this account), converted at the mid-year rate.
 - **Subscriptions, daily** (`SUBSCRIPTION SUMMARY` 1_4): active subscriptions by plan (paid, free trial, other
   offers, billing retry and grace) and the paid ones' monthly proceeds (weekly × 52/12, yearly ÷ 12).
+- **Subscription events, daily** (`SUBSCRIPTION_EVENT SUMMARY` 1_3): free trials started, converted to paid and
+  cancelled (auto-renew turned off before the first charge), paid subscriptions cancelled, renewed (by paid period:
+  2 = first renewal), reactivated, refunded, in billing retry or recovered from it, and plan changes. Kept per app and
+  plan, with subscribers on an older price (Apple's preserved pricing) apart, plus every event by Apple's name and
+  the cancellation reasons. Apple has them from about Oct 19, 2026 for this account.
 
 Proceeds are converted to USD at the ECB's reference rate for that day, from Frankfurter (`api.frankfurter.dev`, no
 key; rates cached as `fx:usd:<day>`). A few currencies the ECB doesn't publish (AED, SAR, EGP, NGN, …) use fixed
 rough rates, and the amount converted that way is kept as `approx`. Each record also keeps the proceeds in every
 currency (`local`), so they can be converted again later. A day isn't stored until its rates are out.
 
-Every 6 hours (with the analytics pass), the runner reads up to `salesPerPass` (40) sales and 40 subscription
-reports: first the last 5 days, then the oldest days Apple still has, since those expire first. Subscription days
+Every 6 hours (with the analytics pass), the runner reads up to `salesPerPass` (40) sales, 40 subscription and 40 event
+reports: first the last 5 days, then the oldest days Apple still has, since those expire first. Subscription and event days
 go newest first and stop after 14 days in a row without a report (before the first subscription). A report Apple
 doesn't have (a day without sales) is remembered and not asked again, except in the last 5 days. A first backfill
 is about 400 requests; `analytics sales sync --all` does it in one go (about 10 minutes).
 
-State: `sales:<appId>:day:<day>`, `sales:<appId>:year:<year>`, `subs:<appId>:day:<day>`, `sales:<appId>:name`,
-`sales:got:<day|subs|year>:<date>` (read or missing), `sales:skus`, `sales:synced`, `fx:usd:<day>` and
+State: `sales:<appId>:day:<day>`, `sales:<appId>:year:<year>`, `subs:<appId>:day:<day>`, `subev:<appId>:day:<day>`,
+`sales:<appId>:name`, `sales:got:<day|subs|events|year>:<date>` (read or missing), `sales:skus`, `sales:synced`, `fx:usd:<day>` and
 `fx:through`. Nothing is pruned.
 
 The board's Growth view shows it ([board](board.md)): a Revenue section (proceeds by month stacked by kind,
-this month against the same days last month, the last 30 days, the recurring run-rate, yearly totals, and each
-app's last four months), and on each App Store app its proceeds by month and active subscriptions (with plans
-in the table view).
+this month against the same days last month, the last 30 days, the recurring run-rate, trial conversion over 28
+days, yearly totals, each app's last four months, and each app's trials and cancellations over 28 days), and on each
+App Store app its proceeds by month, active subscriptions (with plans in the table view), and trials, conversion,
+renewals and cancellations by week (by plan and price in the table view). Conversion is converted ÷ (converted +
+trial cancels).
 
 It needs the vendor number (App Store Connect → Payments and Financial Reports): `analytics.vendorNumber` in the
 runner config, or `ASC_VENDOR_NUMBER` in `runner.env`. The API key needs Sales and Reports access (isobot's Admin

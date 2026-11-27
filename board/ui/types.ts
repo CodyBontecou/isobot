@@ -140,7 +140,12 @@ export interface AppSales {
   years: ({ year: string; partial: boolean } & SalesPoint)[];
   subs: { day: string; paid: number; trials: number; retry: number; monthly: number }[];
   plans: PlanSnapshot[];
+  /** Subscription events per day (older runners don't send them). */
+  events?: ({ day: string } & EventCounts)[];
+  recentEvents?: (EventCounts & { from: string; to: string; cancelReasons: Record<string, number>; plans: PlanEvents[] }) | null;
 }
+export interface EventCounts { trialStarts: number; converted: number; trialCancels: number; paidCancels: number; renewals: number; newPaid: number; reactivated: number; retry: number; recovered: number; refunds: number; changes: number }
+export interface PlanEvents extends EventCounts { name: string; period: string; oldPrice: boolean; renewByPeriod: Record<string, number> }
 
 export interface SearchTotals { clicks: number; impressions: number; ctr: number; position: number }
 

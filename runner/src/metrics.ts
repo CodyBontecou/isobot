@@ -3,7 +3,7 @@ import type { Applied, DaySnapshot, PlayApplied } from "./aso.js";
 import { asoApps, contentRepos, type RunnerConfig } from "./config.js";
 import { localDay, type SearchWeek } from "./content.js";
 import type { PlayDay } from "./playAnalytics.js";
-import { salesDaysRead, salesRead, salesRecords, subsSnapshots, sumRecords, type PlanSnapshot, type Proceeds, type SalesRecord } from "./sales.js";
+import { blankCounts, EVENT_COUNTS, eventDays, salesDaysRead, salesRead, salesRecords, subsSnapshots, sumRecords, type EventCounts, type PlanEvents, type PlanSnapshot, type Proceeds, type SalesRecord } from "./sales.js";
 import type { Store } from "./store.js";
 
 /**
@@ -88,6 +88,10 @@ export interface AppSales {
   subs: { day: string; paid: number; trials: number; retry: number; monthly: number }[];
   /** The newest snapshot's plans. */
   plans: PlanSnapshot[];
+  /** Subscription events per day (trials started, converted, cancelled; renewals, …). */
+  events: ({ day: string } & EventCounts)[];
+  /** The last 28 days of events, by plan and old or current price, with cancellation reasons. */
+  recentEvents: (EventCounts & { from: string; to: string; cancelReasons: Record<string, number>; plans: PlanEvents[] }) | null;
 }
 
 export interface PublishedPage { at: string; number: number; title: string; prNumber: number | null }
@@ -129,7 +133,8 @@ export function appSales(store: Store, appId: string, since: string, read = sale
   const days = salesRecords(store, appId, "day");
   const years = salesRecords(store, appId, "year");
   const subs = subsSnapshots(store, appId);
-  if (!days.length && !years.length && !subs.length) return null;
+  const events = eventDays(store, appId);
+  if (!days.length && !years.length && !subs.length && !events.length) return null;
   const readDays = [...read].sort();
   const through = readDays.at(-1) ?? null;
   const byDay = new Map(days.map(d => [d.date, d.r]));
@@ -172,7 +177,34 @@ export function appSales(store: Store, appId: string, since: string, read = sale
     years: yearList,
     subs: subs.filter(s => s.day >= since).map(({ day, s }) => ({ day, paid: s.paid, trials: s.trials, retry: s.retry, monthly: s.monthly })),
     plans: last?.s.plans ?? [],
+    events: events.filter(e => e.day >= since).map(({ day, e }) => ({ day, ...pick(e) })),
+    recentEvents: recentEvents(events),
   };
+}
+
+const pick = (e: EventCounts): EventCounts => Object.fromEntries(EVENT_COUNTS.map(k => [k, e[k] ?? 0])) as unknown as EventCounts;
+
+/** The 28 days of events up to the newest one, summed, by plan. */
+function recentEvents(events: { day: string; e: import("./sales.js").SubEvents }[]): AppSales["recentEvents"] {
+  const to = events.at(-1)?.day;
+  if (!to) return null;
+  const from = new Date(Date.parse(`${to}T12:00:00Z`) - 27 * 86_400_000).toISOString().slice(0, 10);
+  const total = { ...blankCounts(), from, to, cancelReasons: {} as Record<string, number>, plans: [] as PlanEvents[] };
+  const plans = new Map<string, PlanEvents>();
+  for (const { day, e } of events) {
+    if (day < from) continue;
+    for (const k of EVENT_COUNTS) total[k] += e[k] ?? 0;
+    for (const [r, n] of Object.entries(e.cancelReasons ?? {})) total.cancelReasons[r] = (total.cancelReasons[r] ?? 0) + n;
+    for (const p of e.plans ?? []) {
+      const key = `${p.name}|${p.period}|${p.oldPrice}`;
+      const t = plans.get(key) ?? { name: p.name, period: p.period, oldPrice: p.oldPrice, ...blankCounts(), renewByPeriod: {} };
+      plans.set(key, t);
+      for (const k of EVENT_COUNTS) t[k] += p[k] ?? 0;
+      for (const [n, c] of Object.entries(p.renewByPeriod ?? {})) t.renewByPeriod[n] = (t.renewByPeriod[n] ?? 0) + c;
+    }
+  }
+  total.plans = [...plans.values()].sort((a, b) => a.name.localeCompare(b.name) || a.period.localeCompare(b.period) || Number(a.oldPrice) - Number(b.oldPrice));
+  return total;
 }
 
 function playDay(m: PlayDay): Record<string, number> {
