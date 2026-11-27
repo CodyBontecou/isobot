@@ -106,7 +106,22 @@ export interface BoardEvent { id: number; jobId: string | null; at: string; kind
 
 export interface Session { authenticated: boolean; oauthConfigured?: boolean; user?: { id: string; login: string; name: string | null }; csrfToken?: string }
 
-export type View = 'overview' | 'summary' | 'growth' | 'tasks' | 'activity' | 'schedule' | 'prs' | 'issues' | 'jobs';
+export type View = 'overview' | 'summary' | 'growth' | 'tasks' | 'activity' | 'schedule' | 'prs' | 'issues' | 'jobs' | 'agents';
+
+// Mirrors board/src/agent.ts: agent conversations, served by /api/agent.
+
+export interface AgentRef { kind: string; id: string; label: string; focus?: 'picked' | 'hover'; data?: string }
+export interface AgentContext { url: string; view: string; refs: AgentRef[] }
+export interface AgentThread { id: string; title: string; createdAt: string; updatedAt: string; state: 'idle' | 'queued' | 'working'; status: string | null; archived: boolean; open: number; last: string | null }
+export interface AgentMessage { seq: number; threadId: string; at: string; role: 'you' | 'isobot' | 'note'; text: string; by: string | null; context: AgentContext | null }
+export interface AgentProposal { id: string; threadId: string; at: string; summary: string; state: 'open' | 'approved' | 'running' | 'done' | 'failed' | 'dismissed' | 'expired'; result: string | null; decidedBy: string | null }
+export interface AgentData {
+  version: number;
+  /** Whether the runner's connection is open: without it, messages wait. */
+  runner: boolean;
+  threads: AgentThread[];
+  conversation: { thread: AgentThread; messages: AgentMessage[]; proposals: AgentProposal[] } | null;
+}
 
 // Mirrors runner/src/metrics.ts: the Growth view's series, served by /api/metrics.
 

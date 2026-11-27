@@ -23,6 +23,11 @@ export async function getJson<T>(path: string, signal?: AbortSignal): Promise<T>
 }
 export class SignedOut extends Error {}
 
+/** The data-* attributes that make a row or card something the owner can pick for the agent dock (agent.tsx). */
+export function refAttrs(kind: string, id: string, label?: string): Record<string, string> {
+  return { 'data-ref-kind': kind, 'data-ref-id': id, ...(label ? { 'data-ref-label': label } : {}) };
+}
+
 export const STATE_TONE: Record<string, string> = {
   queued: 'muted', blocked: 'warn', building: 'info', awaiting_ci: 'info', pr_open: 'accent', merged: 'ok', released: 'ok',
   awaiting_ship: 'warn', shipped: 'ok', closed: 'muted', failed: 'bad', stopped: 'muted',
@@ -115,7 +120,7 @@ export function AttentionChip({ item }: { item: BoardItem }) {
 export function ItemRow({ item, now }: { item: BoardItem; now: number }) {
   const why = item.state === 'open' && item.attention?.action ? ` · ${item.attention.reason} → ${item.attention.action}` : '';
   return (
-    <a className="row" href={item.url} target="_blank" rel="noreferrer">
+    <a className="row" href={item.url} target="_blank" rel="noreferrer" {...refAttrs(item.kind, `${item.repo}#${item.number}`, `${short(item.repo)}#${item.number} ${item.title}`)}>
       <ItemIcon item={item} />
       <span className="row-main">
         <span className="row-title">{item.title}</span>

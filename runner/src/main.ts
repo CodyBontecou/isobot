@@ -19,7 +19,8 @@ import { gunzipSync } from "node:zlib";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { builderSettings, ClaudeCodeBuilder } from "./builder.js";
-import { chatAllowlist, claudeChatModel, StaffChat } from "./chat.js";
+import { BoardChat } from "./boardChat.js";
+import { BOARD_RULES, chatAllowlist, claudeChatModel, StaffChat } from "./chat.js";
 import { ChatToolServer } from "./chatMcp.js";
 import { DiscordApi } from "./discordApi.js";
 import { CloudRepo, HttpSandboxApi, remoteChecks, remoteExec } from "./cloud.js";
@@ -45,7 +46,7 @@ import { removeDerivedData } from "./cleanup.js";
 import { Store } from "./store.js";
 import { explainGrants } from "./grants.js";
 import { followUpLines, inspect } from "./inspect.js";
-import type { LiveStatus } from "./chatTools.js";
+import type { ChatToolDeps, LiveStatus } from "./chatTools.js";
 import { AppStoreSource, DiscordSource, EmailSource, GitHubSource, VoxSource, triage, type Source } from "./triage.js";
 
 function loadEnvFiles(): void {
@@ -431,6 +432,9 @@ async function loop(rt: Runtime): Promise<void> {
   const chat = await startChat(rt, () => ({ activeJobs: rt.pipeline.activeJobs, lastCycleError, lastTriageAt, manuallyPaused: existsSync(pausedFile(rt.env)) }))
     .catch(error => { console.warn(`[chat] not started: ${(error as Error).message}`); return null; });
   process.once("exit", () => chat?.stop());
+  const boardChat = await startBoardChat(rt, () => ({ activeJobs: rt.pipeline.activeJobs, lastCycleError, lastTriageAt, manuallyPaused: existsSync(pausedFile(rt.env)) }))
+    .catch(error => { console.warn(`[boardchat] not started: ${(error as Error).message}`); return null; });
+  process.once("exit", () => boardChat?.stop());
   const handoff = await startHandoff(rt).catch(error => { console.warn(`[handoff] not started: ${(error as Error).message}`); return null; });
   process.once("exit", () => handoff?.stop());
   const startedAt = new Date().toISOString();
@@ -660,6 +664,27 @@ async function startHandoff(rt: Runtime): Promise<Handoff | null> {
   return handoff;
 }
 
+/** The staff chat's tools, shared by the Discord chat and the board's agent dock. */
+function chatToolDeps(rt: Runtime, live: () => LiveStatus, chatDir: string, discord?: { api: DiscordApi; guildId: string }): ChatToolDeps {
+  return {
+    config: rt.config, store: rt.store, github: rt.github, home: rt.env.home, chatDir, live,
+    // Checkouts go under the chat's directory, the only place its Read tool can reach.
+    repoFor: (owner, repo) => new Repo(rt.env.home, owner, repo, rt.env.githubToken, undefined, path.join(chatDir, "checkouts")),
+    setPaused: paused => paused ? writeFileSync(pausedFile(rt.env), new Date().toISOString()) : rmSync(pausedFile(rt.env), { force: true }),
+    card: id => rt.notifier.card({ id }),
+    analytics: rt.analytics,
+    crashes: rt.crashes.enabled() ? rt.crashes : undefined,
+    playRatings: rt.playAnalytics ?? undefined,
+    ...(discord ? { discord: { api: discord.api, guildId: discord.guildId, webhookDir: path.join(rt.env.home, "webhooks") } } : {}),
+    asc: async (args, { readOnly }) => {
+      const result = await run("asc", args, {
+        cwd: chatDir, env: workerEnv(readOnly ? { ASC_READ_ONLY: "1" } : {}), timeoutMs: (readOnly ? 3 : 15) * 60_000, maxBytes: 400_000,
+      });
+      return { ok: result.code === 0 && !result.timedOut, output: `${result.stdout}\n${result.stderr}`.trim() };
+    },
+  };
+}
+
 /** Starts the staff chat when the bot is configured and chat isn't switched off. */
 async function startChat(rt: Runtime, live: () => LiveStatus): Promise<StaffChat | null> {
   if (!rt.env.discordBot || rt.config.chat?.enabled === false) return null;
@@ -678,26 +703,36 @@ async function startChat(rt: Runtime, live: () => LiveStatus): Promise<StaffChat
   const chat = new StaffChat({
     discord, channelId, guildId: channel.guild_id, botId: me.id, allowed, store: rt.store, server, config, handoff: rt.handoff,
     model: claudeChatModel({ bin: rt.env.claudeBin, config, chatDir, settingsJson: JSON.stringify(builderSettings({}, { secrets: rt.secrets, noWrite: [] })) }),
-    tools: {
-      config: rt.config, store: rt.store, github: rt.github, home: rt.env.home, chatDir, live,
-      // Checkouts go under the chat's directory, the only place its Read tool can reach.
-      repoFor: (owner, repo) => new Repo(rt.env.home, owner, repo, rt.env.githubToken, undefined, path.join(chatDir, "checkouts")),
-      setPaused: paused => paused ? writeFileSync(pausedFile(rt.env), new Date().toISOString()) : rmSync(pausedFile(rt.env), { force: true }),
-      card: id => rt.notifier.card({ id }),
-      analytics: rt.analytics,
-      crashes: rt.crashes.enabled() ? rt.crashes : undefined,
-      playRatings: rt.playAnalytics ?? undefined,
-      ...(channel.guild_id ? { discord: { api: discord, guildId: channel.guild_id, webhookDir: path.join(rt.env.home, "webhooks") } } : {}),
-      asc: async (args, { readOnly }) => {
-        const result = await run("asc", args, {
-          cwd: chatDir, env: workerEnv(readOnly ? { ASC_READ_ONLY: "1" } : {}), timeoutMs: (readOnly ? 3 : 15) * 60_000, maxBytes: 400_000,
-        });
-        return { ok: result.code === 0 && !result.timedOut, output: `${result.stdout}\n${result.stderr}`.trim() };
-      },
-    },
+    tools: chatToolDeps(rt, live, chatDir, channel.guild_id ? { api: discord, guildId: channel.guild_id } : undefined),
   });
   void chat.run();
   console.log(`[chat] listening for ${allowed.size} user(s): answers in channel ${channelId}, mentions from anywhere in the server`);
+  return chat;
+}
+
+/**
+ * Starts the board's agent dock (boardChat.ts) when the board is configured and chat isn't switched off. It uses the
+ * Discord server's tools (channels, webhooks) when the bot is configured too.
+ */
+async function startBoardChat(rt: Runtime, live: () => LiveStatus): Promise<BoardChat | null> {
+  if (!rt.env.board || rt.config.chat?.enabled === false) return null;
+  const chatDir = path.join(rt.env.home, "chat");
+  mkdirSync(chatDir, { recursive: true });
+  let discord: { api: DiscordApi; guildId: string } | undefined;
+  if (rt.env.discordBot) {
+    const api = new DiscordApi(rt.env.discordBot.token);
+    const channel = await api.request<{ guild_id?: string }>("GET", `/channels/${rt.env.chatChannelId ?? rt.env.discordBot.channelId}`).catch(() => null);
+    if (channel?.guild_id) discord = { api, guildId: channel.guild_id };
+  }
+  const server = new ChatToolServer();
+  await server.start();
+  const config = rt.config.chat ?? {};
+  const chat = new BoardChat({
+    url: rt.env.board.url, token: rt.env.board.token, store: rt.store, server, config,
+    model: claudeChatModel({ bin: rt.env.claudeBin, config, chatDir, rules: BOARD_RULES, settingsJson: JSON.stringify(builderSettings({}, { secrets: rt.secrets, noWrite: [] })) }),
+    tools: chatToolDeps(rt, live, chatDir, discord),
+  });
+  chat.start();
   return chat;
 }
 

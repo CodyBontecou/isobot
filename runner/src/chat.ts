@@ -582,7 +582,7 @@ export function split(text: string, max = 1900): string[] {
   return out;
 }
 
-const CHAT_RULES = `You are isobot, the owner's always-on engineering assistant, talking with the owner in their private Discord staff channel.
+export const CHAT_RULES = `You are isobot, the owner's always-on engineering assistant, talking with the owner in their private Discord staff channel.
 The owner is a solo developer; isobot (the runner on their Mac) triages feedback, builds approved GitHub issues with Claude Code, reviews, merges and releases them.
 
 What you can do:
@@ -603,8 +603,19 @@ Rules:
 - Never reveal tokens, secrets or credentials, and don't go looking for them.
 - Reply in Discord markdown: short paragraphs and bullet lists, no tables, no headings bigger than ###. Be brief and direct; lead with the answer. Refer to work as repo#number.`;
 
+/**
+ * The same rules for the board's agent dock (boardChat.ts): there the owner writes from bot.isolated.tech while
+ * looking at a view, proposals show an Approve button instead of 👍, and answers render as Markdown.
+ */
+export const BOARD_RULES = CHAT_RULES
+  .replace("talking with the owner in their private Discord staff channel.",
+    "talking with the owner in the agent dock of the isobot board (bot.isolated.tech), their private dashboard of the runner, its GitHub work and app numbers.\n"
+    + "Each message says which view the owner has open and what they picked or hovered (PRs, issues, jobs, schedule items, chart days or ranges, with the chart's numbers). That is what \"this\", \"these\" and \"here\" mean. Fetch fresh details with your tools by those ids rather than trusting the page alone.")
+  .replace("posts the action for the owner to confirm with 👍", "shows the action on the board with an Approve button")
+  .replace("Reply in Discord markdown: short paragraphs and bullet lists, no tables, no headings bigger than ###.", "Reply in Markdown: short paragraphs, bullet lists and `code`; no tables, no headings bigger than ###.");
+
 /** Claude Code as the chat model: read tools, web search, the isobot MCP server and nothing else. */
-export function claudeChatModel(options: { bin: string; config: ChatConfig; chatDir: string; settingsJson: string }): ChatModel {
+export function claudeChatModel(options: { bin: string; config: ChatConfig; chatDir: string; settingsJson: string; rules?: string }): ChatModel {
   return async ({ prompt, sessionId, mcpConfig }) => {
     mkdirSync(options.chatDir, { recursive: true });
     const args = [
@@ -614,7 +625,7 @@ export function claudeChatModel(options: { bin: string; config: ChatConfig; chat
       // WebSearch but not WebFetch: fetching arbitrary URLs could carry private code or issue text off the machine.
       "--tools", "Read,Grep,Glob,WebSearch", "--allowedTools", "mcp__isobot,WebSearch", "--permission-mode", "dontAsk",
       "--setting-sources", "user", "--settings", options.settingsJson,
-      "--append-system-prompt", CHAT_RULES,
+      "--append-system-prompt", options.rules ?? CHAT_RULES,
       ...(sessionId ? ["--resume", sessionId] : []),
     ];
     const timeoutMs = (options.config.timeoutMinutes ?? 15) * 60_000;

@@ -1,13 +1,14 @@
 import { createRoot } from 'react-dom/client';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
-  Activity, AlertTriangle, CalendarClock, CalendarRange, CircleDot, CircleX, ExternalLink, GitMerge, GitPullRequest,
+  Activity, AlertTriangle, Bot, CalendarClock, CalendarRange, CircleDot, CircleX, ExternalLink, GitMerge, GitPullRequest,
   Check, Hammer, Inbox, KanbanSquare, LayoutDashboard, ListChecks, LogOut, Pause, RefreshCw, RotateCcw, Square, Trash2, TrendingUp, X,
 } from 'lucide-react';
 import {
-  ATTENTION, Chip, Empty, getJson, ItemRow, JobLink, Labels, labelTone, prNeedsYou, rel, full, SearchBox, Section, short,
+  ATTENTION, Chip, Empty, getJson, ItemRow, JobLink, Labels, labelTone, prNeedsYou, refAttrs, rel, full, SearchBox, Section, short,
   SignedOut, SourceChip, SOURCES, sourceOf, STATE_TONE,
 } from './common';
+import { AgentDock, AgentsView, FocusProvider, threadTone, useAgent, useFocus, type Agent } from './agent';
 import { Growth } from './growth';
 import { Summary, type Period } from './summary';
 import type { ActionKind, Board, BoardAction, BoardEvent, BoardItem, Job, RunnerState, Session, SourceKind, View } from './types';
@@ -17,6 +18,7 @@ import './styles.css';
 
 const VIEWS: { id: View; label: string; icon: typeof Activity }[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'agents', label: 'Agents', icon: Bot },
   { id: 'summary', label: 'Summary', icon: CalendarRange },
   { id: 'growth', label: 'Growth', icon: TrendingUp },
   { id: 'tasks', label: 'Tasks', icon: KanbanSquare },
@@ -96,6 +98,25 @@ function App() {
   const [params, setParams] = useParams();
   /** Clicks sent this session, shown until the board's own list has them. */
   const [sent, setSent] = useState<BoardAction[]>([]);
+  const signedOut = useCallback(() => setSession({ authenticated: false, oauthConfigured: true }), []);
+  const agent = useAgent(session, signedOut);
+  const [dockOpen, setDockOpenState] = useState(() => { try { return localStorage.getItem('agent:open') === '1'; } catch { return false; } });
+  const setDockOpen = useCallback((open: boolean) => {
+    setDockOpenState(open);
+    try { localStorage.setItem('agent:open', open ? '1' : '0'); } catch { /* private mode */ }
+  }, []);
+  // ⌘J (Ctrl+J): open the dock and put the cursor in it; again from inside it closes it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== 'j' || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      e.preventDefault();
+      const inDock = document.activeElement?.closest('.agent');
+      if (inDock) setDockOpen(false);
+      else { setDockOpen(true); setTimeout(() => document.getElementById('agent-input')?.focus(), 0); }
+    };
+    addEventListener('keydown', onKey);
+    return () => removeEventListener('keydown', onKey);
+  }, [setDockOpen]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -167,8 +188,14 @@ function App() {
     setSession({ authenticated: false, oauthConfigured: true });
   };
 
+  const pageLabel = [VIEWS.find(v => v.id === params.view)?.label ?? params.view, params.repo ? short(params.repo) : '', params.app ? params.app : '', params.job ? `job ${params.job}` : '']
+    .filter(Boolean).join(' · ');
+  const pageUrl = location.search || '?view=overview';
+  const openThread = (id: string | null) => { agent.setActive(id); setDockOpen(true); setTimeout(() => document.getElementById('agent-input')?.focus(), 0); };
+
   return (
-    <div className="shell">
+    <FocusProvider resetKey={`${params.view}|${params.repo}|${params.app}`}>
+    <div className={`shell ${dockOpen ? 'with-agent' : ''}`}>
       <aside className="sidebar">
         <div className="brand"><span className={`dot ${live.tone}`} /> isobot</div>
         <nav>
@@ -179,6 +206,7 @@ function App() {
             </a>
           ))}
         </nav>
+        <AgentLinks agent={agent} openThread={openThread} />
         <div className="sidebar-section">Repositories</div>
         <div className="repo-list">
           <button className={!params.repo ? 'active' : ''} onClick={() => setParams({ repo: '' })}>All repositories</button>
@@ -199,6 +227,7 @@ function App() {
             <span className={`pill ${live.tone}`}><span className={`dot ${live.tone}`} />{live.label}</span>
             {runner ? <span className="meta" title={full(runner.receivedAt)}>{runner.runnerId} · updated {rel(runner.receivedAt, now)}</span> : null}
             <button className="icon" onClick={() => void load()} title="Refresh" disabled={loading}><RefreshCw size={14} className={loading ? 'spin' : ''} /></button>
+            {!dockOpen ? <AgentToggle agent={agent} open={() => openThread(agent.active)} /> : null}
           </div>
         </header>
         {error ? <div className="banner bad"><AlertTriangle size={14} /> {error}</div> : null}
@@ -206,6 +235,7 @@ function App() {
         {!board ? <div className="center"><span className="spinner" /></div>
           : !runner ? <Empty title="No runner has reported yet" body="Set ISOBOT_BOARD_URL and ISOBOT_BOARD_TOKEN in runner.env and restart the runner." />
           : <div className="content">
+              {params.view === 'agents' && <AgentsView agent={agent} session={session} openThread={id => openThread(id)} newThread={() => openThread(null)} />}
               {params.view === 'overview' && <Overview runner={runner} items={items} jobs={jobs} events={repoEvents} now={now} open={job => setParams({ job })} go={view => setParams({ view })} goSource={source => setParams({ view: 'issues', state: 'open', source, q: '' })} goPrs={() => setParams({ view: 'prs', state: 'needs', source: '', q: '' })} />}
               {params.view === 'summary' && <Summary runner={runner} repo={params.repo} setRepo={repo => setParams({ repo })} period={(['day', 'week', 'month'].includes(params.period) ? params.period : 'week') as Period}
                 date={params.date} go={(period, date) => setParams({ period: period === 'week' ? '' : period, date })} open={job => setParams({ job })} />}
@@ -220,8 +250,56 @@ function App() {
             </div>}
       </main>
 
+      <AgentDock session={session} agent={agent} open={dockOpen} close={() => setDockOpen(false)} page={{ label: pageLabel, url: pageUrl }}
+        goAgents={() => setParams({ view: 'agents', state: '', q: '', source: '', app: '', period: '', date: '' })} />
+      {!dockOpen ? <AgentFab agent={agent} open={() => openThread(agent.active)} /> : null}
+
       {params.job && runner ? <JobPane id={params.job} runner={runner} items={board?.github?.items ?? []} now={now} close={() => setParams({ job: '' })} /> : null}
     </div>
+    </FocusProvider>
+  );
+}
+
+// ---------- agent entry points ----------
+
+/** The topbar's way into the dock: how many things are picked, and whether a proposal waits. */
+function AgentToggle({ agent, open }: { agent: Agent; open: () => void }) {
+  const { picked } = useFocus();
+  const waiting = (agent.data?.threads ?? []).filter(t => !t.archived && t.open).length;
+  return (
+    <button className="button agent-toggle" onClick={open} title="Ask isobot about this page (⌘J)">
+      <Bot size={13} />Ask isobot{picked.length ? <span className="count">{picked.length}</span> : null}{waiting ? <span className="dot sm warn" title={`${waiting} waiting for you`} /> : null}
+    </button>
+  );
+}
+
+/** On phones the topbar has no room: a floating button opens the dock as a sheet. */
+function AgentFab({ agent, open }: { agent: Agent; open: () => void }) {
+  const { picked } = useFocus();
+  const waiting = (agent.data?.threads ?? []).some(t => !t.archived && t.open);
+  return (
+    <button className="agent-fab" onClick={open} aria-label="Ask isobot">
+      <Bot size={16} />Ask isobot{picked.length ? <span className="count">{picked.length}</span> : waiting ? <span className="dot sm warn" /> : null}
+    </button>
+  );
+}
+
+/** The sidebar's live conversations, newest first. */
+function AgentLinks({ agent, openThread }: { agent: Agent; openThread: (id: string | null) => void }) {
+  const live = (agent.data?.threads ?? []).filter(t => !t.archived).slice(0, 6);
+  if (!live.length) return null;
+  return (
+    <>
+      <div className="sidebar-section">Conversations</div>
+      <nav className="agent-links">
+        {live.map(t => (
+          <a key={t.id} href="#" className={t.id === agent.active ? 'active' : ''} onClick={e => { e.preventDefault(); openThread(t.id); }} title={t.title}>
+            <span className={`dot sm ${threadTone(t)}`} /> <span className="agent-link-title">{t.title}</span>
+            {t.open ? <em>needs you</em> : t.state !== 'idle' ? <em>working</em> : null}
+          </a>
+        ))}
+      </nav>
+    </>
   );
 }
 
@@ -283,7 +361,7 @@ function Overview({ runner, items, jobs, events, now, open, go, goSource, goPrs 
       <div className="grid">
         <Section title="Needs you">
           {needs.length + shipping.length === 0 ? <Empty title="Nothing waiting on you" /> : <div className="list">
-            {shipping.map(j => <button key={j.id} className="row" onClick={() => open(j.id)}><CircleDot size={15} className="tone-warn" /><span className="row-main"><span className="row-title">{j.title}</span><span className="row-sub">{short(j.repo)}#{j.number} · waiting for isobot:ship</span></span><Chip tone="warn">ship</Chip></button>)}
+            {shipping.map(j => <button key={j.id} className="row" onClick={() => open(j.id)} {...refAttrs('job', j.id, `${short(j.repo)}#${j.number} ${j.title}`)}><CircleDot size={15} className="tone-warn" /><span className="row-main"><span className="row-title">{j.title}</span><span className="row-sub">{short(j.repo)}#{j.number} · waiting for isobot:ship</span></span><Chip tone="warn">ship</Chip></button>)}
             {needs.map(i => <ItemRow key={`${i.repo}#${i.number}`} item={i} now={now} />)}
           </div>}
         </Section>
@@ -298,14 +376,14 @@ function Overview({ runner, items, jobs, events, now, open, go, goSource, goPrs 
           {active.length === 0 ? <Empty title="Idle" body={runner.runner.queued ? `${runner.runner.queued} queued` : 'Nothing queued'} /> : <div className="list">
             {active.map(j => {
               const latest = events.find(e => e.jobId === j.id);
-              return <button key={j.id} className="row" onClick={() => open(j.id)}><span className="spinner small" /><span className="row-main"><span className="row-title">{j.title}</span><span className="row-sub">{short(j.repo)}#{j.number}{latest ? ` · ${latest.text}` : ''}</span></span><span className="row-time">{rel(latest?.at ?? j.updatedAt, now)}</span></button>;
+              return <button key={j.id} className="row" onClick={() => open(j.id)} {...refAttrs('job', j.id, `${short(j.repo)}#${j.number} ${j.title}`)}><span className="spinner small" /><span className="row-main"><span className="row-title">{j.title}</span><span className="row-sub">{short(j.repo)}#{j.number}{latest ? ` · ${latest.text}` : ''}</span></span><span className="row-time">{rel(latest?.at ?? j.updatedAt, now)}</span></button>;
             })}
           </div>}
         </Section>
 
         <Section title="Coming up" action={<button className="link" onClick={() => go('schedule')}>Schedule →</button>}>
           <div className="list">
-            {upcoming.map(s => <div key={s.id} className="row static"><CalendarClock size={15} className="tone-muted" /><span className="row-main"><span className="row-title">{s.name}</span><span className="row-sub">{s.cadence}{s.detail ? ` · ${s.detail}` : ''}</span></span>{s.running ? <Chip tone="info">running</Chip> : <span className="row-time" title={full(s.nextAt)}>{rel(s.nextAt, now)}</span>}</div>)}
+            {upcoming.map(s => <div key={s.id} className="row static" {...refAttrs('schedule', s.id, s.name)}><CalendarClock size={15} className="tone-muted" /><span className="row-main"><span className="row-title">{s.name}</span><span className="row-sub">{s.cadence}{s.detail ? ` · ${s.detail}` : ''}</span></span>{s.running ? <Chip tone="info">running</Chip> : <span className="row-time" title={full(s.nextAt)}>{rel(s.nextAt, now)}</span>}</div>)}
           </div>
         </Section>
 
@@ -347,7 +425,7 @@ function Tasks({ items, jobs, actions, act, now, open }: { items: BoardItem[]; j
               const jobId = `${i.repo}#${i.number}`;
               const job = jobs.find(j => `${j.owner}/${j.repo}#${j.number}`.toLowerCase() === jobId.toLowerCase());
               return (
-                <div key={jobId} className="card">
+                <div key={jobId} className="card" {...refAttrs(i.kind, jobId, `${short(i.repo)}#${i.number} ${i.title}`)}>
                   <a href={i.url} target="_blank" rel="noreferrer" className="card-title">{i.title}</a>
                   <div className="card-meta">
                     <span>{short(i.repo)}#{i.number}</span>
@@ -366,7 +444,7 @@ function Tasks({ items, jobs, actions, act, now, open }: { items: BoardItem[]; j
         <div className="column-head"><Chip tone="ok">Done</Chip><em>{done.length}</em></div>
         <div className="column-hint">Merged in the last 7 days</div>
         {done.map(j => (
-          <button key={j.id} className="card" onClick={() => open(j.id)}>
+          <button key={j.id} className="card" onClick={() => open(j.id)} {...refAttrs('job', j.id, `${short(j.repo)}#${j.number} ${j.title}`)}>
             <span className="card-title">{j.title}</span>
             <div className="card-meta"><span>{short(j.repo)}#{j.number}</span><span>{rel(j.updatedAt, now)}</span></div>
           </button>
@@ -509,7 +587,7 @@ function Schedule({ runner, now, open }: { runner: RunnerState; now: number; ope
           <thead><tr><th>Task</th><th>Cadence</th><th>Last run</th><th>Next</th><th /></tr></thead>
           <tbody>
             {runner.schedule.map(s => (
-              <tr key={s.id}>
+              <tr key={s.id} {...refAttrs('schedule', s.id, s.name)}>
                 <td className="lead"><strong>{s.name}</strong>{s.detail ? <div className="sub">{s.detail}</div> : null}</td>
                 <td>{s.cadence}</td>
                 <td data-label="last" title={full(s.lastAt)}>{s.lastAt ? rel(s.lastAt, now) : <span className="tone-muted">since start</span>}</td>
@@ -577,7 +655,7 @@ function Jobs({ jobs, q, setQ, now, open }: { jobs: Job[]; q: string; setQ: (q: 
       <table className="table clickable stack">
         <thead><tr><th>State</th><th>Job</th><th>Kind</th><th>Attempts</th><th>PR</th><th>Updated</th></tr></thead>
         <tbody>{shown.map(j => (
-          <tr key={j.id} onClick={() => open(j.id)}>
+          <tr key={j.id} onClick={() => open(j.id)} {...refAttrs('job', j.id, `${short(j.repo)}#${j.number} ${j.title}`)}>
             <td><Chip tone={STATE_TONE[j.state]}>{j.state.replace('_', ' ')}</Chip></td>
             <td className="lead"><strong>{j.title}</strong><div className="sub">{j.id}{j.lastError ? <span className="tone-bad"> · {j.lastError.split('\n')[0]}</span> : null}</div></td>
             <td>{j.kind}</td>

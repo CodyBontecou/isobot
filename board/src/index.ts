@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { checkSessionMutation, handleAccountRequest, resolveAccountSession, type AccountEnvironment } from "../../cloudflare/src/account-routes.js";
+import { AgentStore, BadAgentInput } from "./agent.js";
 import { BadAction, BadSnapshot, BoardStore, CALENDAR_MAX_DAYS, SUMMARY_MAX_DAYS, type IngestResult } from "./store.js";
 
 /**
@@ -7,7 +8,9 @@ import { BadAction, BadSnapshot, BoardStore, CALENDAR_MAX_DAYS, SUMMARY_MAX_DAYS
  * work, with task actions (approve, stop, retry, dismiss) queued here for the runner to apply. The board has
  * no GitHub token: the runner takes the queue from its ingest answers and does the work itself. Runners push snapshots to /api/ingest with INGEST_TOKEN; people sign in with
  * GitHub through Pi's account service (the AccountAuth object in isobot-pi), so the same allowlist
- * and session code guard both. See docs/board.md.
+ * and session code guard both. Agent conversations (agent.ts) go over WebSockets the Durable Object holds with
+ * hibernation: the runner keeps one open to take the owner's messages, browsers keep one to hear about changes.
+ * See docs/board.md.
  */
 
 interface Env {
@@ -31,6 +34,7 @@ const PAGE_HEADERS = {
   "Referrer-Policy": "no-referrer",
   "X-Content-Type-Options": "nosniff",
 };
+const AGENT_WRITES = new Set(["/api/agent/messages", "/api/agent/decide", "/api/agent/rename", "/api/agent/archive"]);
 /** The only account routes the board serves: web sign-in, its session, and sign-out. No API tokens or native app. */
 const AUTH_ROUTES = new Set(["/auth/github/login", "/auth/github/callback", "/auth/logout", "/api/auth/session"]);
 
@@ -52,10 +56,12 @@ export default {
     const path = url.pathname;
     if (path === "/health") return new Response("ok", { headers: PRIVATE });
 
-    if (path === "/api/ingest" || path === "/api/ingest/actions") {
+    if (path === "/api/ingest" || path === "/api/ingest/actions" || path === "/api/ingest/agent") {
       const match = /^Bearer (.+)$/.exec(request.headers.get("Authorization") ?? "");
       if (!env.INGEST_TOKEN || !match || !await sameSecret(match[1], env.INGEST_TOKEN)) return json({ error: "Unauthorized" }, 401);
       // The runner's poll between pushes: just the queued actions.
+      // The runner's agent connection: a WebSocket the Durable Object holds (BoardState.fetch).
+      if (path === "/api/ingest/agent") return upgrade(request, env, "runner");
       if (path === "/api/ingest/actions") return request.method === "GET" ? json({ actions: await env.BOARD.getByName("board").pendingActions() }) : json({ error: "Use GET" }, 405);
       if (request.method !== "POST") return json({ error: "Use POST" }, 405);
       const body = await readText(request, INGEST_LIMIT);
@@ -86,7 +92,26 @@ export default {
         const result = await board.queueAction({ kind: input?.kind, repo: input?.repo, number: input?.number, by: session.account.login });
         return "error" in result ? json({ error: result.error }, 400) : json({ action: result });
       }
+      if (path === "/api/agent/live") {
+        // A browser's change feed. WebSocket upgrades carry no CSRF header, so the Origin must be the board's own.
+        if (request.headers.get("Origin") !== url.origin) return json({ error: "Forbidden" }, 403);
+        return upgrade(request, env, "browser");
+      }
+      if (AGENT_WRITES.has(path)) {
+        if (request.method !== "POST") return json({ error: "Use POST" }, 405);
+        if (!await checkSessionMutation(request, accounts(env), session)) return json({ error: "Forbidden" }, 403);
+        const body = await readText(request, 40_000);
+        let input: Record<string, unknown>;
+        try { input = JSON.parse(body ?? "") as Record<string, unknown>; } catch { return json({ error: "Invalid JSON" }, 400); }
+        if (!input || typeof input !== "object") return json({ error: "Invalid JSON" }, 400);
+        const result = await board.agentWrite(path, input, session.account.login) as Record<string, unknown>;
+        return typeof result.error === "string" ? json({ error: result.error }, 400) : json(result);
+      }
       if (request.method !== "GET") return json({ error: "Read only" }, 405);
+      if (path === "/api/agent") {
+        const thread = url.searchParams.get("thread");
+        return json(await board.agent(thread && /^[\w-]{1,64}$/.test(thread) ? thread : null));
+      }
       if (path === "/api/board") return json(await board.board());
       if (path === "/api/metrics") return json({ metrics: await board.metrics() });
       if (path === "/api/events") {
@@ -120,12 +145,117 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
+/** Hands a WebSocket upgrade to the board's Durable Object, saying who it is (checked by the caller). */
+function upgrade(request: Request, env: Env, role: "runner" | "browser"): Promise<Response> | Response {
+  if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return json({ error: "Expected a WebSocket" }, 426);
+  const headers = new Headers(request.headers);
+  headers.set("X-Agent-Role", role);
+  return env.BOARD.getByName("board").fetch(new Request(request, { headers }));
+}
+
 export class BoardState extends DurableObject<Env> {
   private readonly store: BoardStore;
+  private readonly agentStore: AgentStore;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.store = new BoardStore(ctx.storage.sql);
+    this.agentStore = new AgentStore(ctx.storage.sql);
+    // Keep-alives answered without waking the object.
+    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+  }
+
+  /** WebSocket upgrades only, from upgrade() above: the worker has already checked who this is. */
+  async fetch(request: Request): Promise<Response> {
+    const role = request.headers.get("X-Agent-Role");
+    if (role !== "runner" && role !== "browser") return new Response("Not found", { status: 404 });
+    const { 0: client, 1: server } = new WebSocketPair();
+    if (role === "runner") {
+      // One runner connection: a reconnect replaces the old one.
+      for (const old of this.ctx.getWebSockets("runner")) { try { old.close(4000, "replaced"); } catch { /* already gone */ } }
+    } else if (this.ctx.getWebSockets("browser").length >= 20) {
+      return new Response("Too many connections", { status: 429 });
+    }
+    this.ctx.acceptWebSocket(server, [role]);
+    if (role === "runner") {
+      this.flushWork();
+      this.tellBrowsers();
+    } else {
+      server.send(JSON.stringify({ type: "changed", version: this.agentStore.version(), runner: this.runnerConnected() }));
+    }
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (!this.ctx.getTags(ws).includes("runner") || typeof message !== "string") return;
+    let parsed: { type?: unknown; update?: unknown };
+    try { parsed = JSON.parse(message) as typeof parsed; } catch { return; }
+    if (parsed.type === "update") {
+      try { this.agentStore.apply(parsed.update); } catch (error) {
+        if (!(error instanceof BadAgentInput)) throw error;
+        ws.send(JSON.stringify({ type: "error", error: error.message }));
+        return;
+      }
+      this.tellBrowsers();
+    }
+    // The runner says it's ready for more after every update, and on connect.
+    if (parsed.type === "update" || parsed.type === "ready") this.flushWork();
+  }
+
+  async webSocketClose(ws: WebSocket, code: number): Promise<void> {
+    try { ws.close(code === 1005 || code === 1006 ? 1000 : code, "bye"); } catch { /* already closed */ }
+    if (this.ctx.getTags(ws).includes("runner")) this.tellBrowsers(ws);
+  }
+
+  async webSocketError(ws: WebSocket): Promise<void> {
+    if (this.ctx.getTags(ws).includes("runner")) this.tellBrowsers(ws);
+  }
+
+  private runnerConnected(except?: WebSocket): boolean {
+    return this.ctx.getWebSockets("runner").some(ws => ws !== except && ws.readyState === WebSocket.OPEN);
+  }
+
+  /** Sends the runner whatever waits for it; if the send fails, it waits for the next connection. */
+  private flushWork(): void {
+    const runner = this.ctx.getWebSockets("runner").filter(ws => ws.readyState === WebSocket.OPEN).at(-1);
+    if (!runner || !this.agentStore.hasWork()) return;
+    const work = this.agentStore.takeWork();
+    try {
+      runner.send(JSON.stringify({ type: "work", work }));
+    } catch {
+      this.agentStore.untake(work);
+    }
+    this.tellBrowsers();
+  }
+
+  private tellBrowsers(closing?: WebSocket): void {
+    const note = JSON.stringify({ type: "changed", version: this.agentStore.version(), runner: this.runnerConnected(closing) });
+    for (const ws of this.ctx.getWebSockets("browser")) { try { ws.send(note); } catch { /* closed; the browser reconnects */ } }
+  }
+
+  /** The Agents list, and one conversation when asked for. */
+  agent(threadId: string | null) {
+    return {
+      version: this.agentStore.version(), runner: this.runnerConnected(), threads: this.agentStore.threads(),
+      conversation: threadId ? this.agentStore.conversation(threadId) : null,
+    };
+  }
+
+  /** The owner's writes: a message, a decision on a proposal, a rename or an archive. Bad input comes back as `{ error }`. */
+  agentWrite(path: string, input: Record<string, unknown>, by: string) {
+    try {
+      let result: Record<string, unknown>;
+      if (path === "/api/agent/messages") result = this.agentStore.send({ threadId: input.threadId, text: input.text, context: input.context, by });
+      else if (path === "/api/agent/decide") result = { proposal: this.agentStore.decide({ proposalId: input.proposalId, decision: input.decision, by }) };
+      else if (path === "/api/agent/rename") result = { thread: this.agentStore.rename({ threadId: input.threadId, title: input.title }) };
+      else result = { thread: this.agentStore.archive({ threadId: input.threadId, archived: input.archived }) };
+      this.flushWork();
+      this.tellBrowsers();
+      return result;
+    } catch (error) {
+      if (error instanceof BadAgentInput) return { error: error.message };
+      throw error;
+    }
   }
 
   /** A malformed snapshot comes back as `{ error }` rather than an exception across RPC. */
