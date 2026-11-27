@@ -128,7 +128,23 @@ export interface MetricsApp {
   changes: ListingChange[];
   /** Apple's Sales and Trends reports (runner/src/sales.ts); App Store apps once any are stored. */
   sales?: AppSales;
+  /** Play's sales and subscriptions reports (runner/src/playAnalytics.ts); Play apps once any are stored. */
+  playSales?: PlaySales;
 }
+
+export interface PlaySales {
+  through: string | null;
+  subsThrough: string | null;
+  /** Days with orders; a day without one up to `through` (or the report's update) had none. Proceeds are USD estimates. */
+  days: { day: string; orders: number; newOrders: number; lifetime: number; subscriptions: number; refunds: number; proceeds: number }[];
+  subs: { day: string; active: number; new: number; cancelled: number }[];
+  products: { id: string; active: number }[];
+  approx: boolean;
+  salesUpdatedAt: string | null;
+}
+
+/** When the runner last read each store (hourly). Older runners don't send it. */
+export interface StoreChecks { appleAnalytics: string | null; appleSales: string | null; play: string | null; playError: string | null }
 
 export interface Proceeds { lifetime: number; subscriptions: number; paidDownloads: number; other: number }
 export interface SalesPoint { downloads: number; lifetime: number; subscriptions: number; trials: number; refunds: number; proceeds: Proceeds; total: number }
@@ -158,6 +174,7 @@ export interface MetricsSite {
 
 export interface Metrics {
   at: string;
+  checks?: StoreChecks;
   apps: MetricsApp[];
   sites: MetricsSite[];
   credits: { days: { day: string; spent: number }[]; balance: number | null };

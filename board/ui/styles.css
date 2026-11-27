@@ -443,3 +443,8 @@ a.changes-row:hover { background: var(--bg-hover); }
   .link { padding: 8px 0; }
   .card-job { padding: 6px 0; }
 }
+
+/* growth: latest from the stores */
+.latest-checks { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.latest-checks .chip svg { margin-right: 3px; }
+.latest-table td.lead svg { vertical-align: -1px; color: var(--text-3); }

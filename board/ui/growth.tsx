@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Apple, ArrowDown, ArrowUp, ExternalLink, Globe, Inbox, Newspaper, Play, Search, Table2, TrendingUp, X } from 'lucide-react';
 import type { AppSales, EventCounts, Metrics, MetricsApp, MetricsSite, PhraseRank, Proceeds } from './types';
+import { Latest } from './latest';
 
 /**
  * Growth: what isobot's scheduled work measures (App Store and Play funnels, search ranks, Search Console)
@@ -280,7 +281,7 @@ function SeriesTable({ days, series, format = exact }: { days: string[]; series:
 
 // ---------- tiles ----------
 
-function Delta({ now, before, goodUp = true, format = exact, vs = 'week before' }: { now: number; before: number | null; goodUp?: boolean; format?: (n: number) => string; vs?: string }) {
+export function Delta({ now, before, goodUp = true, format = exact, vs = 'week before' }: { now: number; before: number | null; goodUp?: boolean; format?: (n: number) => string; vs?: string }) {
   if (before === null) return <span className="delta muted">no earlier {vs.replace(/ before$/, '')}</span>;
   const diff = now - before;
   if (diff === 0) return <span className="delta muted">same as the {vs}</span>;
@@ -289,7 +290,7 @@ function Delta({ now, before, goodUp = true, format = exact, vs = 'week before' 
   return <span className={`delta ${good ? 'up' : 'down'}`}>{diff > 0 ? <ArrowUp size={11} /> : <ArrowDown size={11} />}{diff > 0 ? '+' : '−'}{format(Math.abs(diff))}{share} vs {vs}</span>;
 }
 
-function Tile({ label, value, sub, delta }: { label: string; value: string; sub?: string; delta?: ReactNode }) {
+export function Tile({ label, value, sub, delta }: { label: string; value: string; sub?: string; delta?: ReactNode }) {
   return (
     <div className="stat growth-stat">
       <span className="stat-label">{label}</span>
@@ -627,6 +628,8 @@ export function Growth({ repo, range, setRange, daily, setDaily, app: appParam, 
         <span className="meta" title={new Date(metrics.at).toLocaleString()}>Series from {new Date(metrics.at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
       </div>
 
+      <Latest apps={apps} checks={metrics.checks} />
+
       <div className="stats growth-stats">
         {weekTile('App Store first downloads', ios.map(a => funnelValues(a, 'firstDownloads')))}
         {weekTile('Play installs', play.map(a => funnelValues(a, 'userInstalls')))}
@@ -877,6 +880,6 @@ function WebSearch({ sites, since, credits, today }: { sites: MetricsSite[]; sin
   );
 }
 
-function Section({ title, action, children }: { title: string; action?: ReactNode; children: ReactNode }) {
+export function Section({ title, action, children }: { title: string; action?: ReactNode; children: ReactNode }) {
   return <section className="section"><div className="section-head"><h2>{title}</h2>{action}</div>{children}</section>;
 }

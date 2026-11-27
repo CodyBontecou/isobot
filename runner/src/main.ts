@@ -366,8 +366,8 @@ function acquireLock(env: Environment): void {
 const CONTENT_EVERY_MS = 5 * 60_000;
 const ASO_EVERY_MS = 60 * 60_000;
 const ASO_POLL_MS = 5 * 60_000;
-/** How often analytics looks for new reports; it reads App Store Connect at most every 6 hours itself. */
-const ANALYTICS_EVERY_MS = 30 * 60_000;
+/** How often the store reports are looked at; each source reads its store at most hourly itself. */
+const ANALYTICS_EVERY_MS = 5 * 60_000;
 /** How often the crash audit looks; it reads the stores at most every 6 hours itself. */
 const CRASHES_EVERY_MS = 30 * 60_000;
 /** How often the PR sweep looks; it sweeps every prSweep.everyHours itself. */
@@ -457,7 +457,14 @@ async function loop(rt: Runtime): Promise<void> {
       if (weekday !== null) items.push({ id: "aso-report", name: "ASO rank report", cadence: `weekly, ${WEEKDAYS[weekday]}`,
         lastAt: null, nextAt: nextWeeklyAt(now, weekday, (limits?.hours ?? [8, 22])[0]).toISOString(), running: false });
     }
-    if (rt.analytics.apps().length) items.push(every("analytics", "App Store analytics", ANALYTICS_EVERY_MS, lastAnalytics, analyticsRunning));
+    if (rt.analytics.apps().length || rt.playAnalytics) {
+      // The loop only looks every few minutes; the stores are read when a source's own hour is up.
+      const checks = ["analytics:synced", "sales:synced", "playstats:synced"].map(k => rt.store.cursor(k)).filter((v): v is string => !!v).map(Date.parse);
+      items.push({ id: "analytics", name: "Store numbers", cadence: "hourly", running: analyticsRunning,
+        lastAt: checks.length ? new Date(Math.max(...checks)).toISOString() : null,
+        nextAt: analyticsRunning ? null : new Date(checks.length ? Math.min(...checks) + 3_600_000 : now.getTime()).toISOString(),
+        detail: "App Store analytics, sales and subscription reports; Play installs, orders and subscriptions" });
+    }
     if (rt.crashes.enabled()) items.push(every("crashes", "Crash audit", CRASHES_EVERY_MS, lastCrashes, crashesRunning,
       `${rt.crashes.playApps().length} Play, ${rt.crashes.iosApps().length} App Store apps; stores read every 6 h`));
     if (rt.playRollout?.enabled()) items.push(every("play-rollout", "Play rollouts", CRASHES_EVERY_MS, lastRollout, rolloutRunning,
@@ -546,7 +553,7 @@ async function loop(rt: Runtime): Promise<void> {
           lastAnalytics = Date.now();
           analyticsRunning = true;
           // Downloads take a while on a first backfill: beside the cycle, one pass at a time.
-          // Each reads its store at most every 6 hours itself; Play's failures (a 403) are kept, not thrown.
+          // Each reads its store at most hourly itself; Play's failures (a 403) are kept, not thrown.
           void (async () => {
             if (rt.analytics.apps().length) await rt.analytics.tick().catch(error => console.warn(`[analytics] failed: ${(error as Error).message}`));
             if (rt.sales) await rt.sales.tick().catch(error => console.warn(`[sales] failed: ${(error as Error).message}`));
