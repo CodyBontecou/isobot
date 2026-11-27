@@ -231,6 +231,8 @@ function runtime(): Runtime {
         const out = path.join(dir, "report.tsv.gz");
         const type = kind === "subscriptions"
           ? ["--type", "SUBSCRIPTION", "--subtype", "SUMMARY", "--frequency", "DAILY", "--version", "1_4"]
+          : kind === "events"
+          ? ["--type", "SUBSCRIPTION_EVENT", "--subtype", "SUMMARY", "--frequency", "DAILY", "--version", "1_3"]
           : ["--type", "SALES", "--subtype", "SUMMARY", "--frequency", kind === "sales-daily" ? "DAILY" : "YEARLY"];
         const r = await analyticsAsc(["analytics", "sales", "--vendor", vendor, ...type, "--date", date, "--allow-missing", "--output", out]);
         // Past Apple's retention it errors instead of answering "not available"; either way there's nothing to read.

@@ -12,6 +12,8 @@ import type { Store } from "./store.js";
  *   - Sales, yearly: totals for whole years before the daily window (and a check on the days of later years).
  *   - Subscriptions, daily (SUBSCRIPTION SUMMARY 1_4): the subscriptions active that day by plan (paid, in a free
  *     trial, in billing retry) and what the paid ones bring in a month.
+ *   - Subscription events, daily (SUBSCRIPTION_EVENT SUMMARY 1_3): free trials started, converted to paid and
+ *     cancelled, paid subscriptions cancelled, renewed, refunded and in billing retry, per app and plan.
  *
  * A first pass reads the newest days and then works back from the oldest one Apple still has, at most `perPass`
  * reports each pass, so the API key the runner shares with releases and the ASO train keeps room. Days Apple has no
@@ -20,7 +22,7 @@ import type { Store } from "./store.js";
  */
 
 /** A sales report: its rows, or null when Apple has none for that date. */
-export type ReportFetch = (kind: "sales-daily" | "sales-yearly" | "subscriptions", date: string) => Promise<string | null>;
+export type ReportFetch = (kind: "sales-daily" | "sales-yearly" | "subscriptions" | "events", date: string) => Promise<string | null>;
 /** Rates as units of each currency per USD, for business days in [from, to]. */
 export type RatesFetch = (from: string, to: string) => Promise<Record<string, Record<string, number>>>;
 
@@ -80,6 +82,100 @@ export interface SubsSnapshot {
   retry: number;
   monthly: number;
   plans: PlanSnapshot[];
+}
+
+/** Counts of a day's subscription events. */
+export interface EventCounts {
+  /** Free trials started. */
+  trialStarts: number;
+  /** Free trials that turned into a paid subscription. */
+  converted: number;
+  /** Auto-renew turned off during a free trial: the trial ends unpaid. */
+  trialCancels: number;
+  /** Auto-renew turned off after at least one paid period. */
+  paidCancels: number;
+  renewals: number;
+  /** Paid subscriptions started without a trial. */
+  newPaid: number;
+  /** Auto-renew turned back on. */
+  reactivated: number;
+  /** Payments that failed and went into billing retry. */
+  retry: number;
+  /** Payments recovered from billing retry. */
+  recovered: number;
+  refunds: number;
+  /** Moves to another plan (crossgrade, upgrade, downgrade). */
+  changes: number;
+}
+
+export interface PlanEvents extends EventCounts {
+  name: string;
+  period: string;
+  /** Subscribers kept on an older, lower price (Apple's preserved pricing). */
+  oldPrice: boolean;
+  /** Renewals by the number of paid periods so far (2 = the first renewal). */
+  renewByPeriod: Record<string, number>;
+}
+
+export interface SubEvents extends EventCounts {
+  /** Every event by Apple's name. */
+  events: Record<string, number>;
+  /** Cancellations by Apple's reason. */
+  cancelReasons: Record<string, number>;
+  plans: PlanEvents[];
+}
+
+export const EVENT_COUNTS: (keyof EventCounts)[] = ["trialStarts", "converted", "trialCancels", "paidCancels", "renewals", "newPaid", "reactivated", "retry", "recovered", "refunds", "changes"];
+export const blankCounts = (): EventCounts => Object.fromEntries(EVENT_COUNTS.map(k => [k, 0])) as unknown as EventCounts;
+
+/** Which count an Apple subscription event adds to, if any. */
+export function eventCount(event: string, offerType: string, paidPeriods: number): keyof EventCounts | null {
+  const e = event.trim().toLowerCase();
+  if (/from billing retry/.test(e)) return "recovered";
+  if (/^billing retry/.test(e)) return "retry";
+  if (/^start introductory offer/.test(e)) return /free trial/i.test(offerType) ? "trialStarts" : null;
+  if (/^paid subscription from introductory offer/.test(e)) return "converted";
+  if (e === "cancel") return paidPeriods > 0 ? "paidCancels" : "trialCancels";
+  if (/^renew/.test(e)) return "renewals";
+  if (e === "subscribe") return "newPaid";
+  if (/^reactivate/.test(e)) return "reactivated";
+  if (/^refund/.test(e)) return "refunds";
+  if (/^(crossgrade|upgrade|downgrade)/.test(e)) return "changes";
+  return null;
+}
+
+/** A SUBSCRIPTION_EVENT report's rows summed per app and plan. */
+export function aggregateEvents(rows: Record<string, string>[]): Map<string, SubEvents> {
+  const apps = new Map<string, { total: SubEvents; plans: Map<string, PlanEvents> }>();
+  for (const row of rows) {
+    const appId = row["App Apple ID"]?.trim();
+    const event = row["Event"]?.trim();
+    if (!appId || !event) continue;
+    const app = apps.get(appId) ?? { total: { ...blankCounts(), events: {} as Record<string, number>, cancelReasons: {} as Record<string, number>, plans: [] as PlanEvents[] }, plans: new Map<string, PlanEvents>() };
+    apps.set(appId, app);
+    const qty = num(row["Quantity"]) || 1;
+    const paidPeriods = num(row["Consecutive Paid Periods"]);
+    const name = row["Subscription Name"]?.trim() || "?";
+    const period = row["Standard Subscription Duration"]?.trim() || "";
+    const oldPrice = /^yes$/i.test(row["Preserved Pricing"]?.trim() ?? "");
+    const key = `${name}|${period}|${oldPrice}`;
+    const plan = app.plans.get(key) ?? { name, period, oldPrice, ...blankCounts(), renewByPeriod: {} };
+    app.plans.set(key, plan);
+    app.total.events[event] = (app.total.events[event] ?? 0) + qty;
+    const count = eventCount(event, row["Subscription Offer Type"] ?? "", paidPeriods);
+    if (count) { app.total[count] += qty; plan[count] += qty; }
+    if (count === "renewals" && paidPeriods) plan.renewByPeriod[paidPeriods] = (plan.renewByPeriod[paidPeriods] ?? 0) + qty;
+    if (event.toLowerCase() === "cancel") {
+      const reason = row["Cancellation Reason"]?.trim() || "Unknown";
+      app.total.cancelReasons[reason] = (app.total.cancelReasons[reason] ?? 0) + qty;
+    }
+  }
+  const out = new Map<string, SubEvents>();
+  for (const [appId, { total, plans }] of apps) {
+    total.plans = [...plans.values()].sort((a, b) => a.name.localeCompare(b.name) || a.period.localeCompare(b.period) || Number(a.oldPrice) - Number(b.oldPrice));
+    out.set(appId, total);
+  }
+  return out;
 }
 
 const SYNC_EVERY_MS = 6 * 3_600_000;
@@ -248,7 +344,9 @@ export function sumRecords(records: SalesRecord[]): SalesRecord {
   return t;
 }
 
-type Kind = "day" | "subs" | "year";
+type Kind = "day" | "subs" | "events" | "year";
+/** Daily reports that start with the first subscription and are walked back newest first. */
+type SubsKind = "subs" | "events";
 /** A report read ("ok"), or found missing ("none" and when), for a date. */
 interface Got { s: "ok" | "none"; at: string }
 
@@ -271,7 +369,7 @@ export class AppleSales {
   private yesterday(): string { return addDays(localDay(this.now()), -1); }
 
   /** Dates of a daily report still to read: recent missing ones first, then the oldest Apple still has. */
-  todo(kind: "day" | "subs"): string[] {
+  todo(kind: "day" | SubsKind): string[] {
     const newest = this.yesterday();
     const recent: string[] = [];
     const older: string[] = [];
@@ -285,7 +383,7 @@ export class AppleSales {
         // A missing report is asked again only while it's recent and was last asked more than 6 hours after the day.
         if (i < RECENT_DAYS && Date.parse(got.at) < this.now().getTime() - 5 * 3_600_000) recent.push(day);
         else if (i >= RECENT_DAYS) gap++;
-        if (kind === "subs" && seenOk && gap >= SUBS_GAP) break;
+        if (kind !== "day" && seenOk && gap >= SUBS_GAP) break;
         continue;
       }
       gap = 0;
@@ -361,36 +459,37 @@ export class AppleSales {
   }
 
   /** One pass, at most every 6 hours unless forced; `all` keeps going until nothing is left (a first backfill by hand). */
-  async tick(force = false, all = false): Promise<{ days: number; subs: number; years: number }> {
+  async tick(force = false, all = false): Promise<{ days: number; subs: number; events: number; years: number }> {
     const last = this.store.cursor("sales:synced");
-    const done = { days: 0, subs: 0, years: 0 };
+    const done = { days: 0, subs: 0, events: 0, years: 0 };
     if (!force && last && this.now().getTime() - Date.parse(last) < SYNC_EVERY_MS) return done;
     this.store.setCursor("sales:synced", this.now().toISOString());
     try {
       do {
         const pass = await this.pass();
-        done.days += pass.days; done.subs += pass.subs; done.years += pass.years;
-        if (!pass.days && !pass.subs && !pass.years) break;
+        done.days += pass.days; done.subs += pass.subs; done.events += pass.events; done.years += pass.years;
+        if (!pass.days && !pass.subs && !pass.events && !pass.years) break;
       } while (all);
     } catch (error) {
       this.store.event(null, "analytics_error", `sales reports: ${(error as Error).message.slice(0, 300)}`);
       if (error instanceof RateLimited) this.store.setCursor("sales:synced", new Date(this.now().getTime() - SYNC_EVERY_MS + RATE_LIMIT_RETRY_MS).toISOString());
       throw error;
     } finally {
-      if (done.days || done.subs || done.years) console.log(`[sales] read ${done.days} sales days, ${done.subs} subscription days, ${done.years} years`);
+      if (done.days || done.subs || done.events || done.years) console.log(`[sales] read ${done.days} sales days, ${done.subs} subscription days, ${done.events} event days, ${done.years} years`);
     }
     return done;
   }
 
-  private async pass(): Promise<{ days: number; subs: number; years: number }> {
+  private async pass(): Promise<{ days: number; subs: number; events: number; years: number }> {
     const budget = this.deps.perPass ?? DEFAULT_PER_PASS;
     const years = this.yearsTodo().slice(0, 2);
     const days = this.todo("day").slice(0, budget);
     const subs = this.todo("subs").slice(0, budget);
-    if (!years.length && !days.length && !subs.length) return { days: 0, subs: 0, years: 0 };
+    const events = this.todo("events").slice(0, budget);
+    if (!years.length && !days.length && !subs.length && !events.length) return { days: 0, subs: 0, events: 0, years: 0 };
     const skus = await this.skus();
     const rates = await this.ratesFor([...days, ...subs, ...years.map(y => `${y}-07-01`)]);
-    const n = { days: 0, subs: 0, years: 0 };
+    const n = { days: 0, subs: 0, events: 0, years: 0 };
     try {
       for (const day of days) {
         // Without rates a day's proceeds can't be converted; it waits for the next pass.
@@ -400,25 +499,16 @@ export class AppleSales {
         this.saveSales("day", day, text, skus, rates.get(day) ?? null);
         n.days++;
       }
-      // Walking back, a run of days without a report after some with one is the time before the first subscription.
-      let hadOk = this.store.cursorsWithPrefix("sales:got:subs:").some(r => r.value.includes('"ok"'));
-      let gap = 0;
-      const recentFrom = addDays(this.yesterday(), -(RECENT_DAYS - 1));
-      for (const day of subs) {
-        if (hadOk && gap >= SUBS_GAP) break;
-        if (!rates.get(day)) continue;
-        const text = await this.deps.report("subscriptions", day);
-        if (text === null) {
-          this.mark("subs", day, "none");
-          if (day < recentFrom) gap++;
-          continue;
-        }
-        hadOk = true;
-        gap = 0;
+      n.subs = await this.walkBack("subs", subs, async (day, text) => {
+        // Subscription prices are converted at the day's rate, so a day without rates waits.
+        if (!rates.get(day)) return false;
         for (const [appId, snap] of aggregateSubscriptions(parseTsv(text), rates.get(day) ?? null)) this.store.setCursor(`subs:${appId}:day:${day}`, JSON.stringify(snap));
-        this.mark("subs", day, "ok");
-        n.subs++;
-      }
+        return true;
+      }, day => !!rates.get(day));
+      n.events = await this.walkBack("events", events, async (day, text) => {
+        for (const [appId, ev] of aggregateEvents(parseTsv(text))) this.store.setCursor(`subev:${appId}:day:${day}`, JSON.stringify(ev));
+        return true;
+      });
       for (const year of years) {
         if (!rates.get(`${year}-07-01`)) continue;
         const text = await this.deps.report("sales-yearly", year);
@@ -433,6 +523,33 @@ export class AppleSales {
     return n;
   }
 
+  /**
+   * Reads daily reports that begin with the first subscription, newest first. Walking back, a run of days without a
+   * report after some with one is the time before the first subscription, so the walk stops there.
+   */
+  private async walkBack(kind: SubsKind, days: string[], save: (day: string, text: string) => Promise<boolean>, ready: (day: string) => boolean = () => true): Promise<number> {
+    let hadOk = this.store.cursorsWithPrefix(`sales:got:${kind}:`).some(r => r.value.includes('"ok"'));
+    let gap = 0;
+    let n = 0;
+    const recentFrom = addDays(this.yesterday(), -(RECENT_DAYS - 1));
+    for (const day of days) {
+      if (hadOk && gap >= SUBS_GAP) break;
+      if (!ready(day)) continue;
+      const text = await this.deps.report(kind === "subs" ? "subscriptions" : "events", day);
+      if (text === null) {
+        this.mark(kind, day, "none");
+        if (day < recentFrom) gap++;
+        continue;
+      }
+      hadOk = true;
+      gap = 0;
+      if (!(await save(day, text))) continue;
+      this.mark(kind, day, "ok");
+      n++;
+    }
+    return n;
+  }
+
   private saveSales(kind: "day" | "year", date: string, text: string, skus: Map<string, string>, rates: Record<string, number> | null): void {
     const { apps, names } = aggregateSales(parseTsv(text), skus, rates);
     for (const [appId, name] of names) if (name) this.store.setCursor(`sales:${appId}:name`, name.slice(0, 80));
@@ -441,16 +558,17 @@ export class AppleSales {
   }
 
   /** What's stored, for the CLI. */
-  status(): { days: { ok: number; none: number; todo: number; oldest: string | null }; subs: { ok: number; todo: number; oldest: string | null }; years: string[] } {
+  status(): { days: { ok: number; none: number; todo: number; oldest: string | null }; subs: { ok: number; todo: number; oldest: string | null }; events: { ok: number; todo: number; oldest: string | null }; years: string[] } {
     const count = (kind: Kind) => {
       const rows = this.store.cursorsWithPrefix(`sales:got:${kind}:`).map(r => ({ date: r.key.split(":").at(-1)!, got: JSON.parse(r.value) as Got }));
       const ok = rows.filter(r => r.got.s === "ok").map(r => r.date).sort();
       return { ok: ok.length, none: rows.length - ok.length, oldest: ok[0] ?? null };
     };
-    const d = count("day"), s = count("subs");
+    const d = count("day"), s = count("subs"), e = count("events");
     return {
       days: { ...d, todo: this.todo("day").length },
       subs: { ok: s.ok, oldest: s.oldest, todo: this.todo("subs").length },
+      events: { ok: e.ok, oldest: e.oldest, todo: this.todo("events").length },
       years: this.store.cursorsWithPrefix("sales:got:year:").filter(r => (JSON.parse(r.value) as Got).s === "ok").map(r => r.key.split(":").at(-1)!).sort(),
     };
   }
@@ -491,5 +609,14 @@ export function subsSnapshots(store: Store, appId: string, from = "0000"): { day
     const day = key.slice(prefix.length);
     if (day < from) return [];
     try { return [{ day, s: JSON.parse(value) as SubsSnapshot }]; } catch { return []; }
+  }).sort((a, b) => a.day.localeCompare(b.day));
+}
+
+export function eventDays(store: Store, appId: string, from = "0000"): { day: string; e: SubEvents }[] {
+  const prefix = `subev:${appId}:day:`;
+  return store.cursorsWithPrefix(prefix).flatMap(({ key, value }) => {
+    const day = key.slice(prefix.length);
+    if (day < from) return [];
+    try { return [{ day, e: JSON.parse(value) as SubEvents }]; } catch { return []; }
   }).sort((a, b) => a.day.localeCompare(b.day));
 }

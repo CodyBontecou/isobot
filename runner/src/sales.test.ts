@@ -2,12 +2,29 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { RateLimited } from "./analytics.js";
 import { appSales } from "./metrics.js";
-import { aggregateSales, aggregateSubscriptions, AppleSales, perMonth, toUsd, type ReportFetch } from "./sales.js";
+import { aggregateEvents, aggregateSales, aggregateSubscriptions, AppleSales, eventCount, perMonth, toUsd, type ReportFetch } from "./sales.js";
 import { Store } from "./store.js";
 
 // Column layouts as Apple sends them (2026-11); the numbers are made up.
 const SALES = ["Provider", "Provider Country", "SKU", "Developer", "Title", "Version", "Product Type Identifier", "Units", "Developer Proceeds", "Begin Date", "End Date", "Customer Currency", "Country Code", "Currency of Proceeds", "Apple Identifier", "Customer Price", "Promo Code", "Parent Identifier", "Subscription", "Period", "Category", "CMB", "Device", "Supported Platforms", "Proceeds Reason", "Preserved Pricing", "Client", "Order Type"];
 const SUBS = ["App Name", "App Apple ID", "Subscription Name", "Subscription Apple ID", "Subscription Group ID", "Standard Subscription Duration", "Subscription Offer Name", "Promotional Offer ID", "Customer Price", "Customer Currency", "Developer Proceeds", "Proceeds Currency", "Preserved Pricing", "Proceeds Reason", "Client", "Device", "State", "Country", "Active Standard Price Subscriptions", "Active Free Trial Introductory Offer Subscriptions", "Active Pay Up Front Introductory Offer Subscriptions", "Active Pay As You Go Introductory Offer Subscriptions", "Free Trial Promotional Offer Subscriptions", "Pay Up Front Promotional Offer Subscriptions", "Pay As You Go Promotional Offer Subscriptions", "Free Trial Offer Code Subscriptions", "Pay Up Front Offer Code Subscriptions", "Pay As You Go Offer Code Subscriptions", "Free Trial Win-back Offers", "Pay Up Front Win-back Offers", "Pay As You Go Win-back Offers", "Billing Retry", "Grace Period", "Subscribers"];
+
+const EVENTS = ["Event Date", "Event", "App Name", "App Apple ID", "Subscription Name", "Subscription Apple ID", "Subscription Group ID", "Standard Subscription Duration", "Subscription Offer Name", "Promotional Offer ID", "Subscription Offer Type", "Subscription Offer Duration", "Marketing Opt-In", "Marketing Opt-In Duration", "Preserved Pricing", "Proceeds Reason", "Consecutive Paid Periods", "Original Start Date", "Client", "Device", "State", "Country", "Previous Subscription Name", "Previous Subscription Apple ID", "Days Before Canceling", "Cancellation Reason", "Days Canceled", "Quantity", "Paid Service Days Recovered"];
+const ev = (r: Record<string, string | number>) => ({ "App Name": "Health.md", "App Apple ID": "6757763969", "Subscription Name": "Individual Weekly", "Standard Subscription Duration": "7 Days", Quantity: 1, "Consecutive Paid Periods": 0, ...r });
+const EVENT_ROWS = [
+  ev({ Event: "Start Introductory Offer", "Subscription Offer Type": "Free Trial", Quantity: 2 }),
+  ev({ Event: "Start Introductory Offer", "Subscription Name": "Individual Yearly", "Standard Subscription Duration": "1 Year", "Subscription Offer Type": "Free Trial" }),
+  ev({ Event: "Paid Subscription from Introductory Offer", "Subscription Offer Type": "Free Trial", "Consecutive Paid Periods": 1 }),
+  ev({ Event: "Cancel", "Subscription Offer Type": "Free Trial", "Cancellation Reason": "Canceled" }),
+  ev({ Event: "Cancel", "Consecutive Paid Periods": 3, "Preserved Pricing": "Yes", "Cancellation Reason": "Billing issue" }),
+  ev({ Event: "Renew", "Consecutive Paid Periods": 2, "Preserved Pricing": "Yes" }),
+  ev({ Event: "Renew", "Consecutive Paid Periods": 3, "Preserved Pricing": "Yes", Quantity: 2 }),
+  ev({ Event: "Renew", "Consecutive Paid Periods": 2 }),
+  ev({ Event: "Billing Retry from Paid Subscription", "Consecutive Paid Periods": 2 }),
+  ev({ Event: "Paid Subscription from Billing Retry", "Consecutive Paid Periods": 3 }),
+  ev({ Event: "Crossgrade", "Subscription Name": "Individual Yearly", "Standard Subscription Duration": "1 Year", "Consecutive Paid Periods": 3 }),
+  ev({ Event: "Refund", "App Apple ID": "6761960794", "App Name": "Whereday" }),
+];
 
 const tsv = (header: string[], rows: Record<string, string | number>[]) => [header.join("\t"), ...rows.map(r => header.map(h => r[h] ?? "").join("\t"))].join("\n");
 const sale = (r: Record<string, string | number>) => ({ "Currency of Proceeds": "USD", "Customer Currency": "USD", Units: 1, ...r });
@@ -94,6 +111,32 @@ test("aggregateSubscriptions counts each plan's paid, trial and retry subscripti
   assert.equal(snap.monthly, Math.round((weekly.monthly + yearly.monthly) * 100) / 100);
 });
 
+test("aggregateEvents counts trials, conversions, cancellations and renewals per app and plan, old price apart", () => {
+  const apps = aggregateEvents(rows(EVENTS, EVENT_ROWS));
+  const h = apps.get("6757763969")!;
+  assert.equal(h.trialStarts, 3);
+  assert.equal(h.converted, 1);
+  assert.equal(h.trialCancels, 1);
+  assert.equal(h.paidCancels, 1);
+  assert.equal(h.renewals, 4);
+  assert.equal(h.retry, 1);
+  assert.equal(h.recovered, 1);
+  assert.equal(h.changes, 1);
+  assert.deepEqual(h.cancelReasons, { Canceled: 1, "Billing issue": 1 });
+  assert.equal(h.events["Renew"], 4);
+  const old = h.plans.find(p => p.name === "Individual Weekly" && p.oldPrice)!;
+  assert.equal(old.renewals, 3);
+  assert.deepEqual(old.renewByPeriod, { 2: 1, 3: 2 });
+  assert.equal(old.paidCancels, 1);
+  const current = h.plans.find(p => p.name === "Individual Weekly" && !p.oldPrice)!;
+  assert.equal(current.trialStarts, 2);
+  assert.deepEqual(current.renewByPeriod, { 2: 1 });
+  assert.equal(apps.get("6761960794")!.refunds, 1);
+  // Only free trials count as trial starts; a paid introductory offer doesn't.
+  assert.equal(eventCount("Start Introductory Offer", "Pay As You Go", 0), null);
+  assert.equal(eventCount("Renewal from Billing Retry", "", 3), "recovered");
+});
+
 const NOW = new Date("2026-11-26T18:00:00Z");
 const salesText = tsv(SALES, DAY_ROWS.slice(0, 5));
 
@@ -118,6 +161,7 @@ function harness(options: { subsFrom?: string; noSalesOn?: string[]; perPass?: n
     report: options.report ?? (async (kind, date) => {
       asked.push(`${kind}:${date}`);
       if (kind === "sales-yearly") return date === "2025" ? salesText : null;
+      if (kind === "events") return date >= (options.subsFrom ?? "2026-10-31") ? tsv(EVENTS, EVENT_ROWS) : null;
       if (kind === "subscriptions") return date >= (options.subsFrom ?? "2026-10-31") ? tsv(SUBS, [{ "App Name": "Health.md", "App Apple ID": "6757763969", "Subscription Name": "Weekly", "Standard Subscription Duration": "7 Days", "Developer Proceeds": 2.54, "Proceeds Currency": "USD", "Active Standard Price Subscriptions": 5 }]) : null;
       return options.noSalesOn?.includes(date) ? null : salesText;
     }),
@@ -142,6 +186,10 @@ test("a first backfill reads every daily report Apple still has, the years befor
   const subsAsked = asked.filter(a => a.startsWith("subscriptions:")).length;
   assert.equal(subsAsked, 26 + 14);
   assert.equal(JSON.parse(store.cursor("subs:6757763969:day:2026-11-25")!).paid, 5);
+  // Subscription events the same way.
+  assert.equal(done.events, 26);
+  assert.equal(asked.filter(a => a.startsWith("events:")).length, 26 + 14);
+  assert.equal(JSON.parse(store.cursor("subev:6757763969:day:2026-11-25")!).trialStarts, 3);
   // Nothing left to read; a second pass asks nothing.
   asked.length = 0;
   await sales.tick(true, true);
@@ -208,6 +256,11 @@ test("appSales sums months and years from the days, marks partial ones, and carr
   assert.equal(s.subs.length, 26);
   assert.equal(s.subs.at(-1)!.monthly, Math.round(5 * 2.54 * perMonth("7 Days") * 100) / 100);
   assert.equal(s.plans[0].paid, 5);
+  // Events: one row per day since Oct 31; the last 28 days summed by plan.
+  assert.equal(s.events.at(-1)!.trialStarts, 3);
+  assert.equal(s.recentEvents!.from, "2026-10-29");
+  assert.equal(s.recentEvents!.trialStarts, 26 * 3);
+  assert.equal(s.recentEvents!.plans.find(p => p.oldPrice)!.renewByPeriod["3"], 26 * 2);
   assert.equal(appSales(store, "123", "2026-10-28"), null);
 });
 

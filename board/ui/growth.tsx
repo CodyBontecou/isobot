@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Apple, ArrowDown, ArrowUp, ExternalLink, Globe, Inbox, Newspaper, Play, Search, Table2, TrendingUp, X } from 'lucide-react';
-import type { AppSales, Metrics, MetricsApp, MetricsSite, PhraseRank, Proceeds } from './types';
+import type { AppSales, EventCounts, Metrics, MetricsApp, MetricsSite, PhraseRank, Proceeds } from './types';
 
 /**
  * Growth: what isobot's scheduled work measures (App Store and Play funnels, search ranks, Search Console)
@@ -435,6 +435,8 @@ function Revenue({ apps }: { apps: MetricsApp[] }) {
   const paid = latestSubs.reduce((a, s) => a + s.paid, 0);
   const trials = latestSubs.reduce((a, s) => a + s.trials, 0);
   const lastMonths = months.slice(-4).map(m => m.month);
+  const recentEvents = withSales.filter(a => a.sales!.recentEvents);
+  const allEvents = recentEvents.reduce((t, a) => ({ converted: t.converted + a.sales!.recentEvents!.converted, trialCancels: t.trialCancels + a.sales!.recentEvents!.trialCancels }), { converted: 0, trialCancels: 0 });
   const years = [...new Set(sales.flatMap(s => s.years.map(y => y.year)))].sort();
   const full = (n: number) => n.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   return (
@@ -445,6 +447,7 @@ function Revenue({ apps }: { apps: MetricsApp[] }) {
             delta={<Delta now={thisMonth} before={lastMonthSoFar} format={full} vs="same days last month" />} />
           <Tile label="Last 30 days" value={full(d30)} delta={<Delta now={d30} before={d30before} format={full} vs="30 days before" />} sub={through ? `to ${dayLabel(through)}` : undefined} />
           <Tile label="Recurring run-rate" value={latestSubs.length ? `${full(runRate)}/mo` : '—'} sub={latestSubs.length ? `${exact(paid)} paid · ${exact(trials)} in trial` : 'No subscription reports yet'} />
+          {recentEvents.length ? <Tile label="Trial conversion" value={share(conversion(allEvents))} sub={`${exact(allEvents.converted)} of ${exact(allEvents.converted + allEvents.trialCancels)} ended trials · 28 days`} /> : null}
           {years.slice(-3).map(y => {
             const total = sales.reduce((a, s) => a + (s.years.find(x => x.year === y)?.total ?? 0), 0);
             const partial = sales.some(s => s.years.find(x => x.year === y)?.partial);
@@ -471,6 +474,17 @@ function Revenue({ apps }: { apps: MetricsApp[] }) {
               </table>
             </div>
           </div>
+          {recentEvents.length ? (
+            <div className="chart-card">
+              <div className="chart-head"><div><h3>Trials and cancellations</h3><div className="chart-caption" title={EVENT_TITLE}>Apple's subscription events, the last 28 days</div></div></div>
+              <div className="table-scroll">
+                <table className="table compact">
+                  <EventsHead first="App" />
+                  <tbody>{recentEvents.map(a => <EventsRow key={a.id} label={a.name.split(':')[0]} e={a.sales!.recentEvents!} />)}</tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
     </Section>
@@ -498,6 +512,66 @@ function SubscriptionsCard({ sales, days }: { sales: AppSales; days: string[] })
         </div>
       )}>
       <LineChart days={days} series={series} markers={[]} />
+    </ChartCard>
+  );
+}
+
+/** Share of trials that ended paid: conversions against trials cancelled (auto-renew off before the first charge). */
+function conversion(e: Pick<EventCounts, 'converted' | 'trialCancels'>): number | null {
+  const ended = e.converted + e.trialCancels;
+  return ended ? e.converted / ended : null;
+}
+const share = (n: number | null) => (n === null ? "—" : `${Math.round(n * 100)}%`);
+
+/** Event counts summed over days in [from, to]. */
+function eventSum(events: AppSales['events'], from: string, to: string): EventCounts {
+  const t: EventCounts = { trialStarts: 0, converted: 0, trialCancels: 0, paidCancels: 0, renewals: 0, newPaid: 0, reactivated: 0, retry: 0, recovered: 0, refunds: 0, changes: 0 };
+  for (const d of events ?? []) {
+    if (d.day < from || d.day > to) continue;
+    for (const k of Object.keys(t) as (keyof EventCounts)[]) t[k] += d[k] ?? 0;
+  }
+  return t;
+}
+
+const EVENT_TITLE = 'Apple\'s subscription event report. A trial counts as converted when its first charge goes through, and as cancelled when auto-renew is turned off before it; conversion is converted ÷ (converted + cancelled).';
+
+function EventsHead({ first = '\u00a0' }: { first?: string }) {
+  return (
+    <thead><tr><th>{first}</th><th className="num">Conversion</th><th className="num">Trials</th><th className="num">Converted</th><th className="num">Trial cancels</th><th className="num">Renewals</th><th className="num">Paid cancels</th></tr></thead>
+  );
+}
+function EventsRow({ label, e }: { label: ReactNode; e: EventCounts }) {
+  return (
+    <tr><td style={{ whiteSpace: 'nowrap' }}>{label}</td><td className="num"><strong>{share(conversion(e))}</strong></td><td className="num">{exact(e.trialStarts)}</td><td className="num">{exact(e.converted)}</td><td className="num">{exact(e.trialCancels)}</td><td className="num">{exact(e.renewals)}</td><td className="num">{exact(e.paidCancels)}</td></tr>
+  );
+}
+
+/** One app's trials, conversions and cancellations by week, with the last 28 days by plan in the table view. */
+function TrialsCard({ sales }: { sales: AppSales }) {
+  const events = sales.events ?? [];
+  const recent = sales.recentEvents;
+  const to = events.at(-1)?.day;
+  if (!to || !recent) return null;
+  const weeks = Array.from({ length: 8 }, (_, i) => ({ end: addDays(to, -7 * i), start: addDays(to, -7 * i - 6) }))
+    .filter(w => events.some(d => d.day <= w.end && d.day >= w.start));
+  const reasons = Object.entries(recent.cancelReasons).sort((a, b) => b[1] - a[1]);
+  return (
+    <ChartCard title="Trials and cancellations" caption={<span title={EVENT_TITLE}>Apple's subscription events · {share(conversion(recent))} of trials converted, 28 days to {dayLabel(to)}</span>}
+      table={() => (
+        <div className="table-scroll">
+          <table className="table compact">
+            <EventsHead first="Plan" />
+            <tbody>{recent.plans.map(p => <EventsRow key={`${p.name}|${p.period}|${p.oldPrice}`} label={<>{p.name.replace(/^.*?\b(Individual|Family)/, '$1')} <span className="tone-muted">· {p.period}{p.oldPrice ? ' · old price' : ''}</span></>} e={p} />)}</tbody>
+          </table>
+          <div className="chart-caption">By plan, {dayLabel(recent.from)}–{dayLabel(recent.to)}.{reasons.length ? ` Cancellation reasons: ${reasons.map(([r, n]) => `${r} ${n}`).join(', ')}.` : ''}</div>
+        </div>
+      )}>
+      <div className="table-scroll">
+        <table className="table compact">
+          <EventsHead first="Week of" />
+          <tbody>{weeks.map(w => <EventsRow key={w.end} label={dayLabel(w.start)} e={eventSum(events, w.start, w.end)} />)}</tbody>
+        </table>
+      </div>
     </ChartCard>
   );
 }
@@ -646,6 +720,7 @@ function RepoGrowth({ apps, sites, days, smooth, daily }: { apps: MetricsApp[]; 
             </ChartCard>
           ) : null}
           {ios?.sales?.subs.length ? <SubscriptionsCard sales={ios.sales} days={days} /> : null}
+          {ios?.sales?.recentEvents ? <TrialsCard sales={ios.sales} /> : null}
           {ratingSeries.length ? (
             <ChartCard title="Google Play rating" caption={`Overall average, Play's ratings report${ratingThrough ? ` to ${dayLabel(ratingThrough)}` : ''}`} legend={ratingSeries}
               table={() => <SeriesTable days={days} series={ratingSeries} format={n => n.toFixed(2)} />}>
