@@ -84,6 +84,48 @@ runner  ──next push (sent at once): actionResults──▶ board marks it do
 - While a click waits, the page refreshes every 4 seconds; the runner pushes a fresh GitHub read with the result,
   so the card moves columns within seconds of the runner applying it.
 
+## Agent
+
+The agent dock talks to isobot from any view (`board/ui/agent.tsx`, `board/src/agent.ts`, `runner/src/boardChat.ts`).
+Open it with **Ask isobot** in the topbar or ⌘J (on a phone, the floating button opens it as a half-height sheet over
+the view). It is part of the shell, not a view, so moving around the board never ends a conversation: the thread,
+the draft and the scroll stay, and the board keeps the conversation itself, so a reload or another device picks it up.
+New conversations start only on purpose (＋ in the dock, or New conversation on the **Agents** view, which lists
+them all as Needs you, Working, Idle and Archived).
+
+What isobot sees with each message (the "isobot sees" strip shows it before you send):
+
+- the URL and the view's name;
+- what you **picked**: ⌥-click a PR, issue, job, task card or schedule row (long-press on a phone), or drag across
+  days on a Growth line chart, which sends that range with the chart's numbers;
+- the last thing you **hovered** (a row, or a day on a chart), shown as a dashed chip you can drop.
+
+Picks stay while you move between views (to compare things) and clear once sent. The runner treats all of it as
+data, and fetches fresh details with its tools by those ids.
+
+Each conversation is one resumed Claude Code session with the staff chat's model, read-only tools and rules
+(`BOARD_RULES`, the staff chat's with the board's wording). Anything that changes something is a proposal with
+**Approve** and **Dismiss**, run by the same `executeAction` as a 👍 in Discord. The runner keeps its own copy of
+what each proposal does; the board only says which one, and who clicked.
+
+How a message travels:
+
+```
+browser ──POST /api/agent/messages (session + CSRF): text + page context──▶ board: agent_messages, thread queued
+board   ──WebSocket the runner keeps open (/api/ingest/agent, Bearer INGEST_TOKEN): work──▶ runner
+runner: one Claude Code turn; status ("github pr · 87") ──▶ board while it works; reply + proposals ──▶ board
+board   ──change feed (WebSocket /api/agent/live, same-origin)──▶ browsers re-read /api/agent
+browser ──POST /api/agent/decide──▶ board ──▶ runner runs it ──▶ result + note in the conversation
+```
+
+- Both WebSockets are held by the Durable Object with hibernation, so an idle connection costs nothing; pings are
+  answered without waking it. The runner reconnects with backoff, and updates it made while disconnected go out
+  when it's back. Without a runner connection, messages wait and the dock says so.
+- A turn the runner took and never answered (it restarted) is given up after 30 minutes with a note. Proposals
+  expire after a day, like the 👍 window. Archived conversations are deleted after 90 days.
+- Chat turns use `chat.maxConcurrent` (default 2) separately from Discord's; `chat.enabled: false` turns both off.
+- Not yet: screenshots, pins and ink, voice, and isobot issues that skip approval.
+
 ## Sources
 
 Every issue and PR shows where its work came from, read from what isobot already writes (no extra API calls):

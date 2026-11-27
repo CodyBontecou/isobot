@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useFocus } from './agent';
 import { Apple, ArrowDown, ArrowUp, ExternalLink, Globe, Inbox, Newspaper, Play, Search, Table2, TrendingUp, X } from 'lucide-react';
 import type { AppSales, EventCounts, Metrics, MetricsApp, MetricsSite, PhraseRank, Proceeds } from './types';
 import { Latest } from './latest';
@@ -141,9 +142,29 @@ function MarkerShape({ kind, x, y }: { kind: Marker['kind']; x: number; y: numbe
     : <circle cx={x} cy={y} r={3.5} className="marker-shape" />;
 }
 
-function LineChart({ days, series, markers, format = exact, height = 170 }: { days: string[]; series: Series[]; markers: Marker[]; format?: (n: number) => string; height?: number }) {
+/** A chart's numbers for the agent: one line per day, each series' value (and listing changes). */
+function chartData(days: string[], series: Series[], markers: Marker[], format: (n: number) => string): string {
+  const lines = days.map(d => `${d}: ${series.map(s => `${s.label} ${s.values.has(d) ? format(s.values.get(d)!) : '—'}`).join(', ')}${markers.filter(m => m.day === d).map(m => ` [${m.kind === 'listing' ? 'listing change' : 'page published'}: ${m.text}]`).join('')}`);
+  // Keep it short: the agent can look up more with its tools.
+  return lines.length > 40 ? [...lines.slice(0, 20), `… ${lines.length - 40} more days …`, ...lines.slice(-20)].join('\n') : lines.join('\n');
+}
+
+/**
+ * A line chart by day. With a `name`, the agent dock sees it: hovering a day makes it the dock's hover,
+ * and dragging across days picks that range (with its numbers) for the next question.
+ */
+function LineChart({ days, series, markers, format = exact, height = 170, name }: { days: string[]; series: Series[]; markers: Marker[]; format?: (n: number) => string; height?: number; name?: string }) {
   const [ref, width] = useWidth<HTMLDivElement>();
-  const [hover, setHover] = useState<number | null>(null);
+  const [hover, setHoverState] = useState<number | null>(null);
+  const focus = useFocus();
+  const [drag, setDrag] = useState<{ from: number; to: number } | null>(null);
+  const brushed = name ? focus.picked.find(r => r.chart === name)?.range : undefined;
+  const setHover = (i: number | null) => {
+    setHoverState(i);
+    if (name && i !== null && !drag) {
+      focus.setHover({ kind: 'chart', id: `${name} ${days[i]}`, label: `${name} · ${dayLabel(days[i])}`, chart: `${name}:hover`, data: chartData([days[i]], series, markers, format) });
+    }
+  };
   const max = niceMax(Math.max(0, ...series.flatMap(s => days.map(d => s.values.get(d) ?? 0))));
   const plotW = Math.max(10, width - PAD.left - PAD.right);
   const plotH = height - PAD.top - PAD.bottom;
@@ -167,12 +188,37 @@ function LineChart({ days, series, markers, format = exact, height = 170 }: { da
     return { s, d, lastIndex };
   });
 
-  const onMove = (event: React.PointerEvent<SVGSVGElement>) => {
+  const indexAt = (event: React.PointerEvent<SVGSVGElement>) => {
     const box = event.currentTarget.getBoundingClientRect();
     const px = event.clientX - box.left;
-    const i = Math.round(((px - PAD.left) / plotW) * (days.length - 1));
+    return Math.round(((px - PAD.left) / plotW) * (days.length - 1));
+  };
+  const clamp = (i: number) => Math.min(Math.max(i, 0), days.length - 1);
+  const onMove = (event: React.PointerEvent<SVGSVGElement>) => {
+    const i = indexAt(event);
+    if (drag) setDrag({ ...drag, to: clamp(i) });
     setHover(i >= 0 && i < days.length ? i : null);
   };
+  const onDown = (event: React.PointerEvent<SVGSVGElement>) => {
+    if (!name || !days.length || event.button !== 0) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const i = clamp(indexAt(event));
+    setDrag({ from: i, to: i });
+  };
+  const onUp = () => {
+    if (!drag || !name) return;
+    setDrag(null);
+    const [a, b] = [Math.min(drag.from, drag.to), Math.max(drag.from, drag.to)];
+    // A click, not a drag: nothing to pick.
+    if (b - a < 1) return;
+    const range: [string, string] = [days[a], days[b]];
+    focus.toggle({
+      kind: 'chart', id: `${name} ${range[0]}..${range[1]}`, label: `${name} · ${dayLabel(range[0])}–${dayLabel(range[1])}`,
+      chart: name, range, data: chartData(days.slice(a, b + 1), series, markers.filter(m => m.day >= range[0] && m.day <= range[1]), format),
+    });
+  };
+  const band = drag ? [Math.min(drag.from, drag.to), Math.max(drag.from, drag.to)]
+    : brushed && index.has(brushed[0]) && index.has(brushed[1]) ? [index.get(brushed[0])!, index.get(brushed[1])!] : null;
   const hoverDay = hover !== null ? days[hover] : null;
   const hoverMarkers = hoverDay ? markers.filter(m => m.day === hoverDay) : [];
   const tipLeft = hover !== null ? Math.min(Math.max(x(hover) + 12, 0), Math.max(0, width - 220)) : 0;
@@ -180,8 +226,9 @@ function LineChart({ days, series, markers, format = exact, height = 170 }: { da
   return (
     <div className="chart" ref={ref} style={{ height }}>
       {width > 0 ? (
-        <svg width={width} height={height} onPointerMove={onMove} onPointerLeave={() => setHover(null)} role="img"
-          aria-label={`${series.map(s => s.label).join(' and ')} by day`}>
+        <svg width={width} height={height} onPointerMove={onMove} onPointerLeave={() => { setHoverState(null); }} onPointerDown={onDown} onPointerUp={onUp} onPointerCancel={() => setDrag(null)} role="img"
+          aria-label={`${series.map(s => s.label).join(' and ')} by day${name ? '; drag across days to ask isobot about them' : ''}`}>
+          {band ? <rect x={x(band[0])} y={PAD.top} width={Math.max(2, x(band[1]) - x(band[0]))} height={plotH} className="brush" /> : null}
           {ticks.map(t => (
             <g key={t}>
               <line x1={PAD.left} x2={width - PAD.right} y1={y(t)} y2={y(t)} className="grid" />
@@ -706,15 +753,15 @@ function RepoGrowth({ apps, sites, days, smooth, daily }: { apps: MetricsApp[]; 
         <div className="chart-grid">
           <ChartCard title="New installs" caption={basis} legend={installs} empty={hasFunnel(installs) ? undefined : 'No install numbers yet'}
             table={() => <SeriesTable days={days} series={installs} />}>
-            <LineChart days={days} series={installs} markers={markers} />
+            <LineChart days={days} series={installs} markers={markers} name={`${name} new installs`} />
           </ChartCard>
           <ChartCard title="Store listing traffic" caption={basis} legend={traffic} empty={hasFunnel(traffic) ? undefined : 'No listing traffic numbers yet'}
             table={() => <SeriesTable days={days} series={traffic} />}>
-            <LineChart days={days} series={traffic} markers={markers} />
+            <LineChart days={days} series={traffic} markers={markers} name={`${name} store listing traffic`} />
           </ChartCard>
           <ChartCard title="Search phrases in the top 10" caption={rankStart ? `Tracked phrases on the main storefront · since ${dayLabel(rankStart)}` : undefined} legend={ranks}
             empty={ranks.length ? undefined : 'No rank snapshots yet'} table={() => <SeriesTable days={days} series={ranks} />}>
-            <LineChart days={days} series={ranks} markers={markers} />
+            <LineChart days={days} series={ranks} markers={markers} name={`${name} search phrases in the top 10`} />
           </ChartCard>
           {ios?.sales?.months.length ? (
             <ChartCard title="Proceeds by month" caption="Apple's sales reports · USD after commission" legend={KINDS.filter(k => ios.sales!.months.some(m => m.proceeds[k.id])).map(k => ({ id: k.id, label: k.label, color: k.color, values: new Map() }))}
@@ -727,7 +774,7 @@ function RepoGrowth({ apps, sites, days, smooth, daily }: { apps: MetricsApp[]; 
           {ratingSeries.length ? (
             <ChartCard title="Google Play rating" caption={`Overall average, Play's ratings report${ratingThrough ? ` to ${dayLabel(ratingThrough)}` : ''}`} legend={ratingSeries}
               table={() => <SeriesTable days={days} series={ratingSeries} format={n => n.toFixed(2)} />}>
-              <LineChart days={days} series={ratingSeries} markers={markers} format={n => n.toFixed(1)} />
+              <LineChart days={days} series={ratingSeries} markers={markers} format={n => n.toFixed(1)} name={`${name} Google Play rating`} />
             </ChartCard>
           ) : null}
           <div className="chart-card mini-tiles">
