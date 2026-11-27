@@ -252,20 +252,20 @@ test("a failed pass keeps what it read, and a rate limit stops the pass for ever
   assert.equal(errors.length, 1, "the first app's rate limit ends the pass");
   assert.match(errors[0].detail ?? "", /rate limit/);
   assert.ok(asc.calls.length - calls <= 3);
-  // It tries again after Apple's hour, not at the next 6-hour pass.
+  // It waits out Apple's hour (65 minutes) instead of trying again at the next hourly pass.
   asc.fail = null;
   const synced = Date.parse(store.cursor("analytics:synced")!);
-  assert.equal(new Date("2026-11-20T09:00:00").getTime() - synced, 6 * 3_600_000 - 65 * 60_000);
+  assert.equal(new Date("2026-11-20T09:00:00").getTime() - synced, 3_600_000 - 65 * 60_000);
 });
 
-test("tick runs every few hours, and describe answers the chat tool", async () => {
+test("tick runs hourly, and describe answers the chat tool", async () => {
   const { asc, analytics } = setup();
   asc.add("2026-11-19", "App Downloads Standard", "d19", downloads([["2026-11-18", 9]]));
   asc.add("2026-11-19", "App Store Discovery and Engagement Standard", "e19", discovery("2026-11-18", 400, 30));
   await analytics.tick();
   const calls = asc.calls.length;
   await analytics.tick();
-  assert.equal(asc.calls.length, calls, "not again within 6 hours");
+  assert.equal(asc.calls.length, calls, "not again within the hour");
   const one = analytics.describe("health-md", 14) as { name: string; days: { day: string; conversionPct: number | null }[] };
   assert.equal(one.name, "Health.md");
   assert.deepEqual(one.days.map(d => [d.day, d.conversionPct]), [["2026-11-18", 30]]);

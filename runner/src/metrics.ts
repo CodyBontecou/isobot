@@ -2,7 +2,7 @@ import type { DayMetrics } from "./analytics.js";
 import type { Applied, DaySnapshot, PlayApplied } from "./aso.js";
 import { asoApps, contentRepos, type RunnerConfig } from "./config.js";
 import { localDay, type SearchWeek } from "./content.js";
-import type { PlayDay } from "./playAnalytics.js";
+import { playSales, storedRates, type PlayDay, type PlaySales } from "./playAnalytics.js";
 import { blankCounts, EVENT_COUNTS, eventDays, salesDaysRead, salesRead, salesRecords, subsSnapshots, sumRecords, type EventCounts, type PlanEvents, type PlanSnapshot, type Proceeds, type SalesRecord } from "./sales.js";
 import type { Store } from "./store.js";
 
@@ -62,6 +62,8 @@ export interface MetricsApp {
   changes: ListingChange[];
   /** Apple's Sales and Trends reports (sales.ts); App Store apps only, once any have been read. */
   sales?: AppSales;
+  /** Play's sales and subscriptions reports (playAnalytics.ts); Play apps only, once any have been read. */
+  playSales?: PlaySales;
 }
 
 /** A sales record without its per-currency detail. */
@@ -104,8 +106,17 @@ export interface MetricsSite {
   search: ({ day: string } & SearchWeek)[];
 }
 
+/** When the runner last looked at each store's reports (hourly), and why the last look failed, if it did. */
+export interface StoreChecks {
+  appleAnalytics: string | null;
+  appleSales: string | null;
+  play: string | null;
+  playError: string | null;
+}
+
 export interface BoardMetrics {
   at: string;
+  checks?: StoreChecks;
   apps: MetricsApp[];
   sites: MetricsSite[];
   credits: { days: { day: string; spent: number }[]; balance: number | null };
@@ -209,7 +220,7 @@ function recentEvents(events: { day: string; e: import("./sales.js").SubEvents }
 
 function playDay(m: PlayDay): Record<string, number> {
   const v: Record<string, number> = {};
-  for (const f of ["visitors", "acquisitions", "searchVisitors", "searchAcquisitions", "userInstalls", "userUninstalls", "newOrders", "ratingDaily", "ratingTotal"] as const) {
+  for (const f of ["visitors", "acquisitions", "searchVisitors", "searchAcquisitions", "userInstalls", "userUninstalls", "activeDevices", "newOrders", "ratingDaily", "ratingTotal"] as const) {
     if (typeof m[f] === "number") v[f] = m[f]!;
   }
   return v;
@@ -296,6 +307,7 @@ export function buildMetrics(config: RunnerConfig, store: Store, now = new Date(
   }
   for (const app of tracked.filter(a => a.store === "play")) {
     const id = app.aso.appId;
+    const money = playSales(days<PlayDay>(store, `playstats:${id}:day:`, since).map(d => ({ day: d.day, m: d.value })), day => storedRates(store, day), store.cursor("playstats:sales:updated"));
     apps.push({
       repo: `${app.owner}/${app.repo}`, store: "play", id,
       // Named like its App Store twin when there is one (the Play listing title isn't stored).
@@ -303,6 +315,7 @@ export function buildMetrics(config: RunnerConfig, store: Store, now = new Date(
       funnel: days<PlayDay>(store, `playstats:${id}:day:`, since).map(d => ({ day: d.day, v: playDay(d.value) })),
       ...asoOf(id),
       changes: history(id),
+      ...(money ? { playSales: money } : {}),
     });
   }
 
@@ -321,5 +334,11 @@ export function buildMetrics(config: RunnerConfig, store: Store, now = new Date(
 
   const credits = days<number>(store, "content:credits:", since).map(d => ({ day: d.day, spent: Number(d.value) || 0 }));
   const balance = Number(store.cursor("content:credits:balance"));
-  return { at: now.toISOString(), apps, sites, credits: { days: credits, balance: Number.isFinite(balance) && store.cursor("content:credits:balance") !== null ? balance : null } };
+  const checks: StoreChecks = {
+    appleAnalytics: store.cursor("analytics:synced"),
+    appleSales: store.cursor("sales:synced"),
+    play: store.cursor("playstats:synced"),
+    playError: store.cursor("playstats:error"),
+  };
+  return { at: now.toISOString(), checks, apps, sites, credits: { days: credits, balance: Number.isFinite(balance) && store.cursor("content:credits:balance") !== null ? balance : null } };
 }

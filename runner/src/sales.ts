@@ -178,8 +178,11 @@ export function aggregateEvents(rows: Record<string, string>[]): Map<string, Sub
   return out;
 }
 
-const SYNC_EVERY_MS = 6 * 3_600_000;
+/** Hourly: yesterday's reports appear once a day, and a pass that finds them already read asks Apple nothing. */
+const SYNC_EVERY_MS = 3_600_000;
 const RATE_LIMIT_RETRY_MS = 65 * 60_000;
+/** A recent report Apple didn't have yet is asked again after this long (a little under a pass, so each pass asks). */
+const RECHECK_MS = 50 * 60_000;
 /** Apple's daily reports last 365 days; the oldest is skipped when it's about to go. */
 const DAILY_WINDOW = 364;
 /** Days whose missing report is asked for again: Apple publishes a day's report the next morning, sometimes later. */
@@ -380,8 +383,8 @@ export class AppleSales {
       const got = this.got(kind, day);
       if (got?.s === "ok") { seenOk = true; gap = 0; continue; }
       if (got?.s === "none") {
-        // A missing report is asked again only while it's recent and was last asked more than 6 hours after the day.
-        if (i < RECENT_DAYS && Date.parse(got.at) < this.now().getTime() - 5 * 3_600_000) recent.push(day);
+        // A missing report is asked again only while it's recent, at most about hourly (it's published once a day).
+        if (i < RECENT_DAYS && Date.parse(got.at) < this.now().getTime() - RECHECK_MS) recent.push(day);
         else if (i >= RECENT_DAYS) gap++;
         if (kind !== "day" && seenOk && gap >= SUBS_GAP) break;
         continue;
@@ -458,7 +461,7 @@ export class AppleSales {
     return out;
   }
 
-  /** One pass, at most every 6 hours unless forced; `all` keeps going until nothing is left (a first backfill by hand). */
+  /** One pass, at most hourly unless forced; `all` keeps going until nothing is left (a first backfill by hand). */
   async tick(force = false, all = false): Promise<{ days: number; subs: number; events: number; years: number }> {
     const last = this.store.cursor("sales:synced");
     const done = { days: 0, subs: 0, events: 0, years: 0 };

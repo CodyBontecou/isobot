@@ -75,7 +75,8 @@ const FIELDS: Record<ReportKey, (keyof DayMetrics)[]> = {
 
 interface DayRecord { src: Partial<Record<ReportKey, string>>; m: DayMetrics }
 
-const SYNC_EVERY_MS = 6 * 3_600_000;
+/** Hourly, so a report Apple publishes is on the board within the hour; a pass with nothing new is a call per report. */
+const SYNC_EVERY_MS = 3_600_000;
 /** After App Store Connect's rate limit, the next pass waits this long (Apple's window is an hour). */
 const RATE_LIMIT_RETRY_MS = 65 * 60_000;
 /** Instances read per app and pass (a request each). The API key is shared with releases and ASO, so a first
@@ -380,7 +381,7 @@ export class AppAnalytics implements AnalyticsView {
     return this.deps.store.cursor(this.key(appId, "name")) ?? this.apps().find(a => a.appId === appId)?.repo.split("/")[1] ?? appId;
   }
 
-  /** One pass: every app's new report instances, at most every few hours unless forced. */
+  /** One pass: every app's new report instances, at most hourly unless forced. */
   async tick(force = false): Promise<void> {
     const { store } = this.deps;
     const last = store.cursor("analytics:synced");
@@ -394,7 +395,7 @@ export class AppAnalytics implements AnalyticsView {
         console.warn(`[analytics] ${app.repo}: ${(error as Error).message}`);
         store.event(null, "analytics_error", `${app.repo}: ${(error as Error).message.slice(0, 300)}`);
         // The rate limit is the API key's, shared with releases and ASO: stop here and leave them room,
-        // and try again in an hour rather than at the next 6-hour pass.
+        // and try again after Apple's hour-long window rather than at the next hourly pass.
         if (error instanceof RateLimited) {
           store.setCursor("analytics:synced", new Date(this.now().getTime() - SYNC_EVERY_MS + RATE_LIMIT_RETRY_MS).toISOString());
           break;

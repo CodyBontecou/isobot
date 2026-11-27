@@ -9,7 +9,7 @@ import { asoApps, validateConfig } from "./config.js";
 import { AsoTrain, reportText, type AsoClient } from "./aso.js";
 import { GoogleAuth, PlayPublisher, type Fetch, type PlayListing } from "./google.js";
 import { parsePlayProposal, promoProblems, stuffedWords } from "./play.js";
-import { decodeReport, parseCsv, parseInstalls, parseRatings, parseSales, parseStorePerformance, PlayAnalytics, playRatings, playWeekText, ratingsText, unzip } from "./playAnalytics.js";
+import { decodeReport, parseCsv, parseInstalls, parseRatings, parseSales, parseStorePerformance, parseSubscriptions, PlayAnalytics, playRatings, playSales, playWeekText, ratingsText, unzip } from "./playAnalytics.js";
 import { formatCheckIn, type NeedsMe } from "./chatTools.js";
 import { buildMetrics } from "./metrics.js";
 import { beforeAfterText } from "./analytics.js";
@@ -291,13 +291,69 @@ test("Play Console reports: UTF-16 CSV, columns found by name, sales from a zip"
   assert.equal(decodeReport(utf16("a,b\n1,2")), "a,b\n1,2");
   assert.equal(decodeReport(Buffer.from("﻿a,b", "utf8")), "a,b");
   assert.deepEqual(parseCsv('x,"y, z","q ""w"""\n1,2,3\n'), [{ x: "1", "y, z": "2", 'q "w"': "3" }]);
-  assert.deepEqual(parseInstalls(parseCsv(decodeReport(utf16(INSTALLS)))).get("2026-11-02"), { userInstalls: 5, userUninstalls: 0 });
+  assert.deepEqual(parseInstalls(parseCsv(decodeReport(utf16(INSTALLS)))).get("2026-11-02"), { userInstalls: 5, userUninstalls: 0, activeDevices: 124 });
   assert.deepEqual(parseStorePerformance(parseCsv(decodeReport(utf16(STORE)))).get("2026-11-01"), { visitors: 44, acquisitions: 4, searchVisitors: 25, searchAcquisitions: 3 });
   const files = unzip(zipOf("salesreport_202611.csv", Buffer.from(SALES)));
   const sales = parseSales(parseCsv(decodeReport(files.get("salesreport_202611.csv")!)));
-  assert.deepEqual(sales.get("md.vox.android")!.get("2026-11-01"), { orders: 2, newOrders: 1, charged: { USD: 33.98 } });
-  assert.deepEqual(sales.get("md.vox.android")!.get("2026-11-02"), { refunds: 1 });
+  assert.deepEqual(sales.get("md.vox.android")!.get("2026-11-01"), { orders: 2, newOrders: 1, subOrders: 2, charged: { USD: 33.98 }, net: { USD: 28.88 } });
+  assert.deepEqual(sales.get("md.vox.android")!.get("2026-11-02"), { refunds: 1, net: { USD: -25.49 } });
   assert.ok(sales.has("com.other.app"));
+});
+
+// Play's current sales report: the package is in "Package ID", and a later "Featured Product ID" is usually empty.
+const SALES_NOW = "Order Number,Order Charged Date,Order Charged Timestamp,Financial Status,Device Model,Product Title,Package ID,Product Type,SKU ID,Currency of Sale,Item Price,Taxes Collected,Charged Amount,Country of Buyer,Base Plan or Purchase Option ID,Offer ID,Group ID,First USD 1M Eligible,Promotion ID,Coupon Value,Discount Rate,Featured Product ID\n"
+  + "GPA.3307-1,2026-11-01,1,Charged,m3q,Premium (Lifetime),com.healthmd.android,One-time product,health_md_premium_lifetime,USD,19.99,1.65,21.64,US,lifetime,,1,Yes,,,,\n"
+  + "GPA.3352-2,2026-11-03,1,Charged,q8q,Premium (Lifetime),com.healthmd.android,One-time product,health_md_premium_lifetime,PLN,75.60,17.39,92.99,PL,lifetime,,1,Yes,,,,\n"
+  + "GPA.3370-3..0,2026-11-23,1,Charged,,Health.md Yearly,com.healthmd.android,Subscription,health_md_premium_yearly,GBP,20.83,4.16,24.99,GB,yearly,trial-7d,1,Yes,,,,\n";
+const SUBS = "Date,Package Name,Product ID,Country,Base Plan ID,Offer ID,New Subscriptions,Cancelled Subscriptions,Active Subscriptions\n"
+  + "2026-11-13,com.healthmd.android,health_md_premium_yearly,MX,yearly,trial-7d,1,0,1\n"
+  + "2026-11-25,com.healthmd.android,health_md_premium_yearly,US,yearly,trial-7d,1,0,2\n"
+  + "2026-11-25,com.healthmd.android,health_md_premium_yearly,IN,yearly,,0,1,1\n";
+
+test("Play sales: today's report names the package in Package ID, not Featured Product ID; proceeds net of tax and fee", () => {
+  const sales = parseSales(parseCsv(SALES_NOW)).get("com.healthmd.android")!;
+  assert.deepEqual(sales.get("2026-11-01"), { orders: 1, newOrders: 1, lifetimeOrders: 1, charged: { USD: 21.64 }, net: { USD: 16.99 } });
+  assert.deepEqual(sales.get("2026-11-23"), { orders: 1, subOrders: 1, charged: { GBP: 24.99 }, net: { GBP: 17.71 } });
+  const subs = parseSubscriptions(parseCsv(SUBS));
+  assert.equal(subs.product, "health_md_premium_yearly");
+  assert.deepEqual(subs.days.get("2026-11-25"), { active: 3, new: 1, cancelled: 1 });
+
+  const days = [...sales].map(([day, m]) => ({ day, m }));
+  days.push({ day: "2026-11-25", m: { subs: { health_md_premium_yearly: subs.days.get("2026-11-25")!, health_md_premium_weekly: { active: 2, new: 0, cancelled: 0 } } } });
+  const money = playSales(days.sort((a, b) => a.day.localeCompare(b.day)), () => ({ GBP: 0.8, PLN: 4 }), "2026-11-26T23:00:00Z")!;
+  assert.deepEqual(money.days.map(d => [d.day, d.proceeds]), [["2026-11-01", 16.99], ["2026-11-03", 16.07], ["2026-11-23", 22.14]]);
+  assert.equal(money.through, "2026-11-23");
+  assert.equal(money.approx, false);
+  assert.deepEqual(money.subs, [{ day: "2026-11-25", active: 5, new: 1, cancelled: 1 }]);
+  assert.deepEqual(money.products, [{ id: "health_md_premium_yearly", active: 3 }, { id: "health_md_premium_weekly", active: 2 }]);
+});
+
+test("Play analytics: subscription reports per product add up, and the sales and subscriptions reach the board", async () => {
+  const google = new FakeGoogle();
+  const store = new Store(":memory:");
+  const now = new Date("2026-11-26T12:00:00");
+  const pa = new PlayAnalytics({ store, auth: new GoogleAuth(KEY, google.fetch), bucket: "pubsite_prod_1", packages: () => ["com.healthmd.android"], now: () => now });
+  google.objects["sales/salesreport_202611.zip"] = { generation: "1", data: zipOf("salesreport_202611.csv", Buffer.from(SALES_NOW)) };
+  google.objects["financial-stats/subscriptions/subscriptions_com.healthmd.android_health_md_premium_yearly_202611_country.csv"] = { generation: "1", data: Buffer.from(SUBS) };
+  google.objects["financial-stats/subscriptions/subscriptions_com.healthmd.android_health_md_premium_weekly_202611_country.csv"] = { generation: "1", data: Buffer.from(SUBS.replaceAll("yearly", "weekly")) };
+  store.setCursor("fx:usd:2026-11-21", JSON.stringify({ GBP: 0.8, PLN: 4 }));
+  await pa.tick();
+  assert.equal(pa.status(), null);
+  // A new yearly file restates only the yearly product.
+  google.objects["financial-stats/subscriptions/subscriptions_com.healthmd.android_health_md_premium_yearly_202611_country.csv"] = { generation: "2", data: Buffer.from(SUBS.replace(",0,1,1", ",0,1,4")) };
+  await pa.sync();
+  assert.deepEqual(pa.days("com.healthmd.android", "2026-11-25", "2026-11-25")[0].m.subs, {
+    health_md_premium_yearly: { active: 6, new: 1, cancelled: 1 },
+    health_md_premium_weekly: { active: 3, new: 1, cancelled: 1 },
+  });
+
+  const config = testConfig();
+  config.repos["codybontecou/vox.md"] = { ...config.repos["codybontecou/vox.md"], aso: { appId: "6758967337", autonomy: "report", play: { packageName: "com.healthmd.android" } } };
+  const metrics = buildMetrics(config, store, now);
+  assert.equal(metrics.checks?.play, now.toISOString(), "the board shows when Play was last read");
+  const play = metrics.apps.find(a => a.store === "play" && a.id === "com.healthmd.android")!;
+  assert.equal(play.playSales?.subs.at(-1)?.active, 9);
+  assert.equal(play.playSales?.days.find(d => d.day === "2026-11-23")?.proceeds, 22.14);
 });
 
 test("Play analytics: a 403 is kept and shown, not thrown; readable reports make the weekly line", async () => {
@@ -310,7 +366,7 @@ test("Play analytics: a 403 is kept and shown, not thrown; readable reports make
   assert.match(pa.status()!, /can't read gs:\/\/pubsite_prod_1 yet \(403\)/);
   assert.match(pa.weekLine("md.vox.android")!, /Google Play analytics\*\*: not available yet/);
   await pa.tick();
-  assert.equal(store.cursor("playstats:synced"), now.toISOString(), "waits 6 hours between passes");
+  assert.equal(store.cursor("playstats:synced"), now.toISOString(), "waits an hour between passes");
 
   google.bucketStatus = 200;
   const rows = (from: number) => Array.from({ length: 7 }, (_, i) => `2026-11-${String(from + i).padStart(2, "0")}`);

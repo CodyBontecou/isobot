@@ -233,8 +233,9 @@ test("App Store Connect's rate limit ends the pass, keeps what was read, and ret
   });
   await assert.rejects(sales.tick(true), RateLimited);
   assert.equal(sales.status().days.ok, 3);
+  // The next pass waits out Apple's hour: an hourly pass would start 5 minutes early, so the mark is set ahead.
   const synced = Date.parse(store.cursor("sales:synced")!);
-  assert.ok(synced < NOW.getTime() - 4 * 3_600_000);
+  assert.equal(synced - NOW.getTime(), 65 * 60_000 - 3_600_000);
 });
 
 test("appSales sums months and years from the days, marks partial ones, and carries the subscription snapshots", async () => {

@@ -1,6 +1,7 @@
 import { inflateRawSync } from "node:zlib";
 import { beforeAfterText } from "./analytics.js";
 import { localDay } from "./content.js";
+import { toUsd } from "./sales.js";
 import { GoogleApiError, listObjects, objectUrl, STORAGE_SCOPE, type GoogleAuth } from "./google.js";
 import type { Store } from "./store.js";
 
@@ -15,6 +16,8 @@ import type { Store } from "./store.js";
  *     none) and the app's overall average. Play gives no count of ratings, and writes no file before an app's first
  *     rating
  *   - sales/salesreport_<YYYYMM>.zip: orders across the account (charged, refunded), by product
+ *   - financial-stats/subscriptions/subscriptions_<pkg>_<product>_<YYYYMM>_country.csv: each subscription
+ *     product's new, cancelled and active subscriptions per day (summed over countries, base plans and offers)
  *
  * The files are monthly and Google rewrites the current month's every day or so; each pass re-reads only files
  * whose generation changed. Most are UTF-16 CSV. Google says not to rely on column order or count, so columns
@@ -31,17 +34,31 @@ export interface PlayDay {
   searchAcquisitions?: number;
   userInstalls?: number;
   userUninstalls?: number;
+  /** Devices the app is installed on that day (Play's "Active Device Installs"). */
+  activeDevices?: number;
   /** Orders charged that day: all of them, first orders (not subscription renewals), and refunds. */
   orders?: number;
   newOrders?: number;
   refunds?: number;
   /** Charged amounts by the buyer's currency (Play's sales report doesn't convert). */
   charged?: Record<string, number>;
+  /** Charged orders that were one-time products (lifetime unlocks) and subscription charges. */
+  lifetimeOrders?: number;
+  subOrders?: number;
+  /** Estimated proceeds by the buyer's currency: item prices before tax, less Google's 15% service fee, less refunds. */
+  net?: Record<string, number>;
+  /** Subscriptions per subscription product (each product's report restates its own). */
+  subs?: Record<string, PlaySubDay>;
   /** Play's average of the star ratings left that day; 0 means no new ratings that day (Play reports no count). */
   ratingDaily?: number;
   /** Play's overall average rating as of that day. */
   ratingTotal?: number;
 }
+
+export interface PlaySubDay { active: number; new: number; cancelled: number }
+
+/** Google's service fee on the first USD 1M a year and on every subscription; the account is well under 1M. */
+export const PLAY_FEE = 0.15;
 
 export interface PlayAnalyticsDeps {
   store: Store;
@@ -52,7 +69,8 @@ export interface PlayAnalyticsDeps {
   now?(): Date;
 }
 
-const SYNC_EVERY_MS = 6 * 3_600_000;
+/** Google rewrites its reports about once a day; looking hourly picks a new one up within the hour. */
+const SYNC_EVERY_MS = 3_600_000;
 const KEEP_DAYS = 400;
 /** Months of the ratings report read (one small file a month), enough for the board's 120 days. */
 const RATING_MONTHS = 5;
@@ -128,7 +146,7 @@ export function parseInstalls(rows: Record<string, string>[]): Map<string, PlayD
   for (const r of rows) {
     const day = reportDay(col(r, "date"));
     if (!day) continue;
-    days.set(day, { userInstalls: num(col(r, "daily user installs")), userUninstalls: num(col(r, "daily user uninstalls")) });
+    days.set(day, { userInstalls: num(col(r, "daily user installs")), userUninstalls: num(col(r, "daily user uninstalls")), activeDevices: num(col(r, "active device installs")) });
   }
   return days;
 }
@@ -211,32 +229,121 @@ export function parseStorePerformance(rows: Record<string, string>[]): Map<strin
 
 /**
  * salesreport_….csv → package → day → orders. A subscription renewal's order number ends in "..N", so orders
- * without it are first purchases (new subscriptions, trials converting, one-time purchases).
+ * without it are first purchases (new subscriptions, trials converting, one-time purchases). The package is in
+ * "Package ID" (older reports: "Product ID"); "Featured Product ID" is something else and must not be taken for it.
  */
 export function parseSales(rows: Record<string, string>[]): Map<string, Map<string, PlayDay>> {
   const out = new Map<string, Map<string, PlayDay>>();
+  const add = (map: Record<string, number>, currency: string, amount: number) => { map[currency] = Math.round(((map[currency] ?? 0) + amount) * 100) / 100; };
   for (const r of rows) {
-    const pkg = col(r, "product id") ?? col(r, "package");
+    const pkg = r["package id"] || r["product id"];
     const day = reportDay(col(r, "order charged date") ?? col(r, "charged date") ?? col(r, "date"));
     if (!pkg || !day) continue;
     const status = (col(r, "financial status") ?? col(r, "status") ?? "").toLocaleLowerCase();
     const days = out.get(pkg) ?? new Map<string, PlayDay>();
     const d = days.get(day) ?? {};
-    if (status.includes("refund")) d.refunds = (d.refunds ?? 0) + 1;
-    else if (!status || status.includes("charged")) {
+    const currency = col(r, "currency of sale") ?? col(r, "currency");
+    // The price before tax; tax isn't the developer's.
+    const price = num(col(r, "item price"));
+    if (status.includes("refund")) {
+      d.refunds = (d.refunds ?? 0) + 1;
+      if (price !== undefined && currency) add(d.net ??= {}, currency, -Math.abs(price) * (1 - PLAY_FEE));
+    } else if (!status || status.includes("charged")) {
       d.orders = (d.orders ?? 0) + 1;
       if (!/\.\.\d+$/.test(col(r, "order number") ?? "")) d.newOrders = (d.newOrders ?? 0) + 1;
-      const amount = num(col(r, "charged amount") ?? col(r, "item price"));
-      const currency = col(r, "currency of sale") ?? col(r, "currency");
-      if (amount !== undefined && currency) {
-        d.charged ??= {};
-        d.charged[currency] = Math.round(((d.charged[currency] ?? 0) + amount) * 100) / 100;
-      }
+      const type = (col(r, "product type") ?? "").toLocaleLowerCase();
+      if (type.includes("subscription")) d.subOrders = (d.subOrders ?? 0) + 1;
+      else if (type) d.lifetimeOrders = (d.lifetimeOrders ?? 0) + 1;
+      const amount = num(col(r, "charged amount")) ?? price;
+      if (amount !== undefined && currency) add(d.charged ??= {}, currency, amount);
+      if (price !== undefined && currency) add(d.net ??= {}, currency, price * (1 - PLAY_FEE));
     }
     days.set(day, d);
     out.set(pkg, days);
   }
   return out;
+}
+
+/** subscriptions_….csv → day → that product's new, cancelled and active subscriptions, over every country and offer. */
+export function parseSubscriptions(rows: Record<string, string>[]): { product: string | null; days: Map<string, PlaySubDay> } {
+  const days = new Map<string, PlaySubDay>();
+  let product: string | null = null;
+  for (const r of rows) {
+    const day = reportDay(col(r, "date"));
+    if (!day) continue;
+    product ??= col(r, "product id") || null;
+    const d = days.get(day) ?? { active: 0, new: 0, cancelled: 0 };
+    d.active += num(col(r, "active subscriptions")) ?? 0;
+    d.new += num(col(r, "new subscriptions")) ?? 0;
+    d.cancelled += num(col(r, "cancelled subscriptions")) ?? 0;
+    days.set(day, d);
+  }
+  return { product, days };
+}
+
+/** A Play app's money and subscriptions for the board, per day; USD at the ECB rate the runner keeps for Apple's sales. */
+export interface PlaySalesDay {
+  day: string;
+  orders: number;
+  newOrders: number;
+  lifetime: number;
+  subscriptions: number;
+  refunds: number;
+  /** Estimated proceeds, USD (item price before tax, less Google's fee and refunds). */
+  proceeds: number;
+}
+export interface PlaySales {
+  /** The newest day of the sales report and of the subscriptions report. */
+  through: string | null;
+  subsThrough: string | null;
+  days: PlaySalesDay[];
+  subs: { day: string; active: number; new: number; cancelled: number }[];
+  /** Active subscriptions by product on `subsThrough`. */
+  products: { id: string; active: number }[];
+  /** Part of the proceeds was converted at a fixed fallback rate. */
+  approx: boolean;
+  /** When Google last rewrote the current month's sales report. */
+  salesUpdatedAt: string | null;
+}
+
+/** Rates (units per USD) the runner stored for Apple's sales (sales.ts), the newest on or before `day`. */
+export function storedRates(store: Store, day: string): Record<string, number> | null {
+  for (let i = 0; i < 7; i++) {
+    const v = store.cursor(`fx:usd:${addDays(day, -i)}`);
+    if (v) { try { return JSON.parse(v) as Record<string, number>; } catch { return null; } }
+  }
+  return null;
+}
+
+export function playSales(days: { day: string; m: PlayDay }[], rates: (day: string) => Record<string, number> | null, salesUpdatedAt: string | null = null): PlaySales | null {
+  const sold = days.filter(d => d.m.orders !== undefined || d.m.refunds !== undefined || d.m.net !== undefined);
+  const subbed = days.filter(d => d.m.subs && Object.keys(d.m.subs).length);
+  if (!sold.length && !subbed.length) return null;
+  let approx = false;
+  const out: PlaySalesDay[] = sold.map(({ day, m }) => {
+    const r = rates(day);
+    let usd = 0;
+    for (const [cur, amount] of Object.entries(m.net ?? {})) {
+      const c = toUsd(amount, cur, r);
+      usd += c.usd;
+      approx ||= c.approx;
+    }
+    return { day, orders: m.orders ?? 0, newOrders: m.newOrders ?? 0, lifetime: m.lifetimeOrders ?? 0, subscriptions: m.subOrders ?? 0, refunds: m.refunds ?? 0, proceeds: Math.round(usd * 100) / 100 };
+  });
+  const subs = subbed.map(({ day, m }) => {
+    const all = Object.values(m.subs!);
+    return { day, active: all.reduce((a, s) => a + s.active, 0), new: all.reduce((a, s) => a + s.new, 0), cancelled: all.reduce((a, s) => a + s.cancelled, 0) };
+  });
+  const last = subbed.at(-1);
+  return {
+    through: sold.at(-1)?.day ?? null,
+    subsThrough: last?.day ?? null,
+    days: out,
+    subs,
+    products: last ? Object.entries(last.m.subs!).map(([id, s]) => ({ id, active: s.active })).sort((a, b) => b.active - a.active) : [],
+    approx,
+    salesUpdatedAt,
+  };
 }
 
 /** The files of a zip archive (stored or deflated), by name. Enough for Play's single-CSV sales reports. */
@@ -373,7 +480,8 @@ export class PlayAnalytics {
       ] as const) {
         for (const o of await listObjects(auth, bucket, prefix)) {
           if (!o.name.endsWith(suffix) || !within.some(m => o.name.includes(`_${m}_`))) continue;
-          const data = await fresh(o.name, o.generation);
+          // ":2": installs files read before active device installs were kept are read once more.
+          const data = await fresh(o.name, parse === parseInstalls ? `${o.generation}:2` : o.generation);
           if (data) this.merge(pkg, parse(parseCsv(decodeReport(data))));
         }
       }
@@ -381,12 +489,30 @@ export class PlayAnalytics {
     const followed = new Set(this.deps.packages());
     for (const o of await listObjects(auth, bucket, "sales/salesreport_")) {
       if (!months.some(m => o.name.includes(`_${m}`))) continue;
-      const data = await fresh(o.name, o.generation);
+      // When Google last rewrote the current month: the report covers orders to about then, with or without any.
+      if (o.name.includes(`_${months[0]}`) && o.updated) store.setCursor("playstats:sales:updated", o.updated);
+      // ":2": the files read before the package column was found right stored no orders; each is read once more.
+      const data = await fresh(o.name, `${o.generation}:2`);
       if (!data) continue;
       const csvs = o.name.endsWith(".zip") ? [...unzip(data).values()] : [data];
       for (const csv of csvs) {
         // A month's file is complete for that month: its days replace the sales fields, so a refund isn't lost.
-        for (const [pkg, days] of parseSales(parseCsv(decodeReport(csv)))) if (followed.has(pkg)) this.merge(pkg, days, ["orders", "newOrders", "refunds", "charged"]);
+        for (const [pkg, days] of parseSales(parseCsv(decodeReport(csv)))) if (followed.has(pkg)) this.merge(pkg, days, ["orders", "newOrders", "refunds", "charged", "lifetimeOrders", "subOrders", "net"]);
+      }
+    }
+    for (const pkg of followed) {
+      for (const o of await listObjects(auth, bucket, `financial-stats/subscriptions/subscriptions_${pkg}_`)) {
+        if (!o.name.endsWith(".csv") || !months.some(m => o.name.includes(`_${m}`))) continue;
+        const data = await fresh(o.name, o.generation);
+        if (!data) continue;
+        const { product, days } = parseSubscriptions(parseCsv(decodeReport(data)));
+        // The file restates its product's month; other products' numbers on the same days stay.
+        const name = product ?? o.name.slice(`financial-stats/subscriptions/subscriptions_${pkg}_`.length).replace(/_\d{6}_country\.csv$/, "");
+        for (const [day, sub] of days) {
+          const k = this.key(pkg, `day:${day}`);
+          const old = JSON.parse(this.deps.store.cursor(k) ?? "{}") as PlayDay;
+          this.deps.store.setCursor(k, JSON.stringify({ ...old, subs: { ...old.subs, [name]: sub } }));
+        }
       }
     }
     const oldest = localDay(new Date(this.now().getTime() - KEEP_DAYS * 86_400_000));
@@ -415,6 +541,11 @@ export class PlayAnalytics {
     return this.deps.store.cursorsWithPrefix(prefix)
       .map(r => ({ day: r.key.slice(prefix.length), m: JSON.parse(r.value) as PlayDay }))
       .filter(d => d.day >= from && d.day <= to);
+  }
+
+  /** When the last pass looked at the bucket. */
+  checkedAt(): string | null {
+    return this.deps.store.cursor("playstats:synced");
   }
 
   /** The newest day with store listing numbers. */
