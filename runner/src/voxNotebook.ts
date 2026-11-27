@@ -212,7 +212,8 @@ export function openReview(text: string): string[] {
   const items: string[] = [];
   for (const line of open.body.split("\n")) {
     if (/^[-*]\s+/.test(line)) items.push(line.replace(/^[-*]\s+/, ""));
-    else if (items.length && line.trim()) items[items.length - 1] += `\n${line.replace(/^ {2}/, "")}`;
+    // Blank lines stay inside an item (a list, then a closing question); the next top-level bullet ends it.
+    else if (items.length) items[items.length - 1] += `\n${line.replace(/^ {2}/, "")}`;
   }
   return items.map(i => i.trim()).filter(i => i && !PRIVATE_LINK.test(i)).map(i => clip(i, TEXT_LIMIT));
 }

@@ -74,4 +74,6 @@ test("actions carry continuation lines and only link notes that exist", () => {
     { project: "isobot", text: "Two ([note](notes/ideas/missing.md))", done: true, notes: [] },
   ]);
   assert.deepEqual(openReview("# x\n\n## Later\n\n- no\n"), []);
+  assert.deepEqual(openReview("## Open\n\n- **Two things:**\n  - one;\n  - two.\n\n  Which?\n- Next\n"),
+    ["**Two things:**\n- one;\n- two.\n\nWhich?", "Next"]);
 });
