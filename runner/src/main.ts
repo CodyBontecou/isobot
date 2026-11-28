@@ -11,6 +11,7 @@ import { PlayAnalytics, ratingsText } from "./playAnalytics.js";
 import { ArtifactSync } from "./artifacts.js";
 import { CrashAudit } from "./crashes.js";
 import { PlayRollout, planText } from "./playRollout.js";
+import { PricingTrain } from "./pricing.js";
 import type { CheckReport } from "./policy.js";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -85,6 +86,8 @@ interface Runtime {
   crashes: CrashAudit;
   /** Staged Play production rollouts moved forward on their own (playRollout.ts); null without config.playRollout. */
   playRollout: PlayRollout | null;
+  /** isobot's own price changes on the App Store and Google Play (pricing.ts); off without config.pricing. */
+  pricing: PricingTrain;
   /** Every open PR in the configured repos, sorted into what needs the owner (prSweep.ts); on unless prSweep.enabled is false. */
   prSweep: PrSweep;
   /** The board's Artifacts view, listed from claude.ai every few hours (artifacts.ts); off without config.artifacts. */
@@ -309,6 +312,20 @@ function runtime(): Runtime {
       return { ok: result.code === 0 && !result.timedOut, stdout: result.stdout, stderr: result.stderr };
     },
   });
+  const pricing = new PricingTrain({
+    config, store, github, notifier, repo: repoFor,
+    agent: input => builder.agentJson(input),
+    google: googleAuth ?? undefined,
+    approvals: asoDiscord ? {
+      reactors: (channelId, messageId, emoji) => asoDiscord.reactors(channelId, messageId, emoji),
+      owners: () => (asoOwners ??= chatAllowlist(asoDiscord).catch(error => { asoOwners = null; throw error; })),
+    } : undefined,
+    // Price writes need asc's write access; every other runner read of App Store Connect stays read-only.
+    asc: async args => {
+      const result = await run("asc", args, { cwd: env.home, env: workerEnv(), timeoutMs: 600_000, maxBytes: 16 * 1024 * 1024 });
+      return { ok: result.code === 0 && !result.timedOut, stdout: result.stdout, stderr: result.stderr };
+    },
+  });
   const prSweep = new PrSweep({
     config: config.prSweep, landLabel: config.labels.land, github, store,
     repos: () => configuredRepos(config).filter(r => policyFor(config, `${r.owner}/${r.repo}`).autonomy !== "off").map(r => `${r.owner}/${r.repo}`),
@@ -317,7 +334,7 @@ function runtime(): Runtime {
     config: config.artifacts, bin: env.claudeBin, dir: path.join(env.home, "artifacts"), board: env.board,
     cursor: key => store.cursor(key), setCursor: (key, value) => store.setCursor(key, value),
   });
-  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, production, content, aso, analytics, sales, playAnalytics, crashes, playRollout, prSweep, artifacts, secrets, handoff, leadership };
+  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, production, content, aso, analytics, sales, playAnalytics, crashes, playRollout, pricing, prSweep, artifacts, secrets, handoff, leadership };
 }
 
 /** ASO Tracker's CLI: one JSON call per tool; it starts the tracker's daemon itself when it isn't running. */
@@ -393,6 +410,8 @@ const CRASHES_EVERY_MS = 30 * 60_000;
 const ARTIFACTS_RETRY_MS = 30 * 60_000;
 /** How often the PR sweep looks; it sweeps every prSweep.everyHours itself. */
 const PR_SWEEP_POLL_MS = 10 * 60_000;
+/** How often the pricing train looks: reactions, outcomes, decisions (it reads store prices every 6 hours itself). */
+const PRICING_EVERY_MS = 15 * 60_000;
 
 /** A cycle running longer than this (release steps included) counts as hung for the external heartbeat. */
 const HUNG_CYCLE_MS = 2 * 60 * 60_000;
@@ -440,6 +459,8 @@ async function loop(rt: Runtime): Promise<void> {
   let crashesRunning = false;
   let lastRollout = 0;
   let rolloutRunning = false;
+  let lastPricing = 0;
+  let pricingRunning = false;
   let lastPrPoll = 0;
   let prSweepRunning = false;
   let artifactsRunning = false;
@@ -514,6 +535,8 @@ async function loop(rt: Runtime): Promise<void> {
       `${rt.crashes.playApps().length} Play, ${rt.crashes.iosApps().length} App Store apps; stores read every 6 h`));
     if (rt.playRollout?.enabled()) items.push(every("play-rollout", "Play rollouts", CRASHES_EVERY_MS, lastRollout, rolloutRunning,
       `${rt.playRollout.apps().length} Play apps; production checked every 3 h`));
+    if (rt.pricing.enabled()) items.push(every("pricing", "Pricing train", PRICING_EVERY_MS, lastPricing, pricingRunning,
+      `${rt.pricing.apps().length} apps; prices read every 6 h, judged after ${rt.config.pricing?.minDays ?? 28} days${rt.pricing.paused() ? " (paused)" : ""}`));
     if (rt.prSweep.enabled()) {
       const last = rt.prSweep.latest()?.at ?? null;
       items.push({ id: "pr-sweep", name: "PR sweep", cadence: `every ${rt.prSweep.everyMs() / 3_600_000} h`, lastAt: last,
@@ -576,7 +599,7 @@ async function loop(rt: Runtime): Promise<void> {
   if (leadership) {
     // A leader hands over to the preferred Mac only between duties, never in the middle of one.
     leadership.idle = () => !trainTicking && !rt.train.shipping() && !rt.production.busy() && !triageRunning && !contentRunning && !asoRunning && !asoPolling && !analyticsRunning
-      && !crashesRunning && !artifactsRunning && !rolloutRunning && !prSweepRunning && !chat?.busy() && !boardChat?.busy();
+      && !crashesRunning && !artifactsRunning && !rolloutRunning && !pricingRunning && !prSweepRunning && !chat?.busy() && !boardChat?.busy();
     // A paused runner does none of the leader's duties, so it hands the lead to a runner that will.
     leadership.standby = () => existsSync(pausedFile(rt.env));
     let renewing = false;
@@ -685,6 +708,13 @@ async function loop(rt: Runtime): Promise<void> {
           // Reads Play at most every 3 hours itself; a failure is posted once and retried, never thrown.
           void rt.playRollout.tick().catch(error => console.warn(`[rollout] failed: ${(error as Error).message}`))
             .finally(() => { rolloutRunning = false; });
+        }
+        if (leads() && !pricingRunning && Date.now() - lastPricing > PRICING_EVERY_MS && rt.pricing.enabled()) {
+          lastPricing = Date.now();
+          pricingRunning = true;
+          // Each app's failures are posted once and retried next pass; at most one decision run per pass.
+          void rt.pricing.tick().catch(error => console.warn(`[pricing] failed: ${(error as Error).message}`))
+            .finally(() => { pricingRunning = false; });
         }
         if (leads() && !prSweepRunning && Date.now() - lastPrPoll > PR_SWEEP_POLL_MS && rt.prSweep.enabled()) {
           lastPrPoll = Date.now();
@@ -1027,6 +1057,10 @@ const HELP = `isobot runner
                       Show the latest proposal's apply state, approve or dismiss it (like ✅ / 🛑 in Discord),
                       or write an approved one to App Store Connect now (e.g. right after creating a version).
                       A repo's Google Play app is named by its package (e.g. aso md.vox.android research)
+  pricing [<repo | package>] [status | snapshot | decide [--dry-run] | revert | pause | resume]
+                      The pricing train: each app's prices, bounds and changes (status, the default), read the
+                      stores now (snapshot), run a decision now (--dry-run prints it and changes nothing),
+                      undo the newest price change (revert), or stop and restart all decisions (pause | resume)
   analytics play [sync | ratings]
                       Read Play Console's bulk reports now (sync), print each Play app's ratings (ratings),
                       or print each Play app's week and the reports' status
@@ -1340,6 +1374,36 @@ async function main(): Promise<void> {
         console.log([...flags, ...lines].join("\n") || "(no analytics yet: run `analytics sync`)");
       } else {
         console.log(JSON.stringify(rt.analytics.describe(what ?? null, Number(days) || 14), null, 2));
+      }
+      return;
+    }
+    case "pricing": {
+      const args = process.argv.slice(3);
+      const verbs = ["status", "snapshot", "decide", "revert", "pause", "resume"];
+      const target = args[0] && !verbs.includes(args[0]) ? args.shift()! : null;
+      const verb = args[0] ?? "status";
+      if (!rt.pricing.enabled()) { console.error("The pricing train is off: add \"pricing\": {} to the runner config and a repo's \"pricing\"."); process.exitCode = 2; return; }
+      if (verb === "pause" || verb === "resume") { rt.pricing.setPaused(verb === "pause"); console.log(verb === "pause" ? "Pricing decisions paused (🛑 and outcomes still run)." : "Pricing decisions resumed."); return; }
+      const t = target?.toLowerCase();
+      const all = rt.pricing.apps();
+      const byId = all.filter(a => a.appId.toLowerCase() === t);
+      const byRepo = all.filter(a => a.repo.toLowerCase() === t || `${a.owner}/${a.repo}`.toLowerCase() === t);
+      let apps = !t ? all : byId.length ? byId : byRepo;
+      // A repo name alone acts on its App Store app; its Play app is named by package.
+      if ((verb === "decide" || verb === "revert") && apps.length > 1) apps = apps.filter(a => a.market === "appstore");
+      if (!apps.length) { console.error(`no pricing app matches ${target}`); process.exitCode = 2; return; }
+      if ((verb === "decide" || verb === "revert") && (!target || apps.length !== 1)) { console.error(`usage: pricing <repo | package> ${verb}`); process.exitCode = 2; return; }
+      for (const app of apps) {
+        if (verb === "snapshot") { rt.store.deleteCursor(`pricing:${app.appId}:snapshot`); await rt.pricing.snapshot(app); }
+        if (verb === "decide") {
+          const dry = args.includes("--dry-run");
+          const r = await rt.pricing.maybeDecide(app, true, dry);
+          console.log(JSON.stringify(r, null, 2));
+          if (dry) console.log(`\n${rt.pricing.context(app)}`);
+          continue;
+        }
+        if (verb === "revert") { console.log(JSON.stringify(await rt.pricing.revert(app, "cli"), null, 2)); continue; }
+        console.log(rt.pricing.status(app));
       }
       return;
     }
