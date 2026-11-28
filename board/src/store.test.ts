@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { BadAction, BadSnapshot, BoardStore, type Sql } from "./store.js";
+import { BadAction, BadArtifacts, BadSnapshot, BoardStore, type Sql } from "./store.js";
 
 /** Durable Object SQLite's exec(), over node:sqlite. */
 function sql(): Sql {
@@ -146,4 +146,21 @@ test("a snapshot with malformed action results is refused", () => {
   const store = new BoardStore(sql());
   assert.throws(() => store.ingest(snapshot({ actionResults: "nope" }), now), BadSnapshot);
   assert.doesNotThrow(() => store.ingest(snapshot({ actionResults: [null, { id: 1 }] }), now), "bad entries are skipped");
+});
+
+test("the artifact list is replaced whole and checked", () => {
+  const store = new BoardStore(sql());
+  assert.equal(store.artifacts(), null);
+  const artifact = { title: "Health.md — iOS", url: "https://claude.ai/artifact/ReJHGf1T1VmasyhyVDdBke", project: "Health.md", repo: "codybontecou/health-md", kind: "Design", updatedAt: "2026-11-10" };
+  assert.deepEqual(store.setArtifacts({ v: 1, at: now.toISOString(), artifacts: [artifact, { ...artifact, url: "https://claude.ai/code/artifact/abcdefgh-1234", repo: null }] }, now), { ok: true, count: 2 });
+  const list = store.artifacts();
+  assert.equal(list?.artifacts.length, 2);
+  assert.deepEqual(list?.artifacts[0], { ...artifact, pinned: false, shared: false });
+  assert.equal(list?.receivedAt, now.toISOString());
+  store.setArtifacts({ v: 1, at: now.toISOString(), artifacts: [artifact] }, now);
+  assert.equal(store.artifacts()?.artifacts.length, 1);
+  assert.throws(() => store.setArtifacts({ v: 1, at: now.toISOString(), artifacts: [{ ...artifact, url: "https://evil.example/artifact/x" }] }), BadArtifacts);
+  assert.throws(() => store.setArtifacts({ v: 1, at: now.toISOString(), artifacts: [{ ...artifact, repo: "not a repo" }] }), BadArtifacts);
+  assert.throws(() => store.setArtifacts({ v: 2, at: now.toISOString(), artifacts: [] }), BadArtifacts);
+  assert.equal(store.artifacts()?.artifacts.length, 1, "a bad push leaves the old list");
 });

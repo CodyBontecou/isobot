@@ -15,6 +15,7 @@ link), and a side pane with a job's full timeline.
 | Schedule | Triage, content and ASO trains, analytics, the daily check-in, search and rank reports, release trains, and pending follow-ups |
 | Pull requests / Issues | Open items, and items merged or closed in the last 14 days, across every configured repository. Open PRs carry the PR sweep's verdict (merge, land, duplicate, superseded, stale draft) with its reason on hover, and Pull requests has a **Needs you** tab ([PR sweep](runner.md#pull-request-sweep)) |
 | Jobs | The runner's 200 latest jobs with state, attempts and PR; click one for its timeline |
+| Artifacts | Claude's published artifacts (designs, pages, docs on claude.ai) grouped by project, with search; the repository filter keeps the ones filed under that repo ([Artifacts](#artifacts)) |
 
 The repository list in the sidebar filters every view.
 
@@ -142,6 +143,26 @@ Every issue and PR shows where its work came from, read from what isobot already
 PRs take the source of the issue they close (`Closes #n`). Filter by source on the Issues and Pull requests views
 (`?source=discord`); Overview counts open issues by source. A new source needs a marker
 written where its issues are opened, plus a case in `itemSource()` in `runner/src/dashboard.ts`.
+
+## Artifacts
+
+The board can't read claude.ai, so the list is pushed to it and replaced whole each time:
+
+```sh
+node board/scripts/push-artifacts.mjs artifacts.json   # ISOBOT_BOARD_URL / ISOBOT_BOARD_TOKEN from env or runner.env
+```
+
+```json
+{ "v": 1, "at": "2026-11-27T12:00:00Z", "artifacts": [
+  { "title": "Health.md — iOS", "url": "https://claude.ai/artifact/…", "project": "Health.md",
+    "repo": "codybontecou/health-md", "kind": "Design", "updatedAt": "2026-11-10", "pinned": false, "shared": false } ] }
+```
+
+- `POST /api/ingest/artifacts` takes it with the `INGEST_TOKEN`; `GET /api/artifacts` serves it to a session.
+- Links must be `https://claude.ai/artifact/…` or `https://claude.ai/code/artifact/…`; at most 2,000 entries. A bad
+  push is refused and the old list stays.
+- `project` is the group heading. `repo` is a runner repository (or null), so the sidebar filter applies.
+  To refresh it, ask Claude Code to list your artifacts, file them by project and run the script.
 
 ## Setup
 
