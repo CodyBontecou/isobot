@@ -1,3 +1,4 @@
+import type { ArtifactsConfig } from "./artifacts.js";
 import { readFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import path from "node:path";
@@ -330,6 +331,8 @@ export interface RunnerConfig {
   playRollout?: PlayRolloutLimits;
   /** The pull request sweep (prSweep.ts): every open PR in the configured repos, sorted into what needs the owner. On by default. */
   prSweep?: PrSweepConfig;
+  /** The board's Artifacts view, kept current from claude.ai (artifacts.ts). Off without this block. */
+  artifacts?: ArtifactsConfig;
   /** 💻 on isobot's Discord messages opens the conversation in the owner's local Herdr (handoff.ts). */
   handoff?: HandoffConfig;
   /** Keep the live checkout on the isobot repo's main: pull, rebuild, deploy and restart (selfUpdate.ts). Off without this block. */
@@ -460,6 +463,16 @@ export function validateConfig(config: RunnerConfig): void {
   if (config.labels && !config.labels.land) config.labels.land = "isobot:land";
   for (const key of ["proposed", "ready", "building", "review", "failed", "ship", "stop", "auto"] as const) {
     if (!config.labels?.[key]) fail(`labels.${key} is required`);
+  }
+  if (config.artifacts) {
+    const a = config.artifacts;
+    if (a.everyHours !== undefined && !(a.everyHours >= 1 && a.everyHours <= 168)) fail("artifacts.everyHours must be 1-168");
+    if (!Array.isArray(a.projects)) fail("artifacts.projects must be a list");
+    for (const p of a.projects) {
+      if (typeof p?.project !== "string" || !p.project.trim() || !Array.isArray(p.match) || !p.match.every(m => typeof m === "string" && m.trim()))
+        fail("each artifacts.projects entry needs a project and match words");
+      if (p.repo !== undefined && !/^[\w.-]+\/[\w.-]+$/.test(p.repo)) fail(`artifacts project ${p.project}: repo must be owner/repo`);
+    }
   }
   for (const [category, repo] of Object.entries(config.discordCategories ?? {})) {
     if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) fail(`discordCategories.${category} must be owner/repo`);

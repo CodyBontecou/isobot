@@ -2,13 +2,14 @@ import { createRoot } from 'react-dom/client';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   Activity, AlertTriangle, Bot, CalendarClock, CalendarRange, CircleDot, CircleX, ExternalLink, GitMerge, GitPullRequest,
-  Check, Hammer, Inbox, KanbanSquare, LayoutDashboard, ListChecks, LogOut, Pause, RefreshCw, RotateCcw, Square, Trash2, TrendingUp, X,
+  Check, Hammer, Shapes, Inbox, KanbanSquare, LayoutDashboard, ListChecks, LogOut, Pause, RefreshCw, RotateCcw, Square, Trash2, TrendingUp, X,
 } from 'lucide-react';
 import {
   ATTENTION, Chip, Empty, getJson, ItemRow, JobLink, Labels, labelTone, prNeedsYou, refAttrs, rel, full, SearchBox, Section, short,
   SignedOut, SourceChip, SOURCES, sourceOf, STATE_TONE,
 } from './common';
 import { AgentDock, AgentsView, FocusProvider, threadTone, useAgent, useFocus, type Agent } from './agent';
+import { Artifacts } from './artifacts';
 import { Growth } from './growth';
 import { Summary, type Period } from './summary';
 import type { ActionKind, Board, BoardAction, BoardEvent, BoardItem, Job, RunnerState, Session, SourceKind, View } from './types';
@@ -27,6 +28,7 @@ const VIEWS: { id: View; label: string; icon: typeof Activity }[] = [
   { id: 'prs', label: 'Pull requests', icon: GitPullRequest },
   { id: 'issues', label: 'Issues', icon: CircleDot },
   { id: 'jobs', label: 'Jobs', icon: ListChecks },
+  { id: 'artifacts', label: 'Artifacts', icon: Shapes },
 ];
 
 type Params = { view: View; repo: string; q: string; state: string; job: string; source: string; range: string; daily: string; app: string; period: string; date: string };
@@ -246,6 +248,7 @@ function App() {
               {params.view === 'schedule' && <Schedule runner={runner} now={now} open={job => setParams({ job })} />}
               {params.view === 'prs' && <Items kind="pr" items={items} source={params.source} setSource={source => setParams({ source })} state={params.state || 'open'} setState={state => setParams({ state })} q={params.q} setQ={q => setParams({ q }, false)} now={now} githubAt={board.github?.at} />}
               {params.view === 'issues' && <Items kind="issue" items={items} source={params.source} setSource={source => setParams({ source })} state={params.state || 'open'} setState={state => setParams({ state })} q={params.q} setQ={q => setParams({ q }, false)} now={now} githubAt={board.github?.at} />}
+              {params.view === 'artifacts' && <Artifacts repo={params.repo} q={params.q} setQ={q => setParams({ q }, false)} signedOut={signedOut} />}
               {params.view === 'jobs' && <Jobs jobs={jobs} q={params.q} setQ={q => setParams({ q }, false)} now={now} open={job => setParams({ job })} />}
             </div>}
       </main>

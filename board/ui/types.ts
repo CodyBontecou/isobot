@@ -106,7 +106,7 @@ export interface BoardEvent { id: number; jobId: string | null; at: string; kind
 
 export interface Session { authenticated: boolean; oauthConfigured?: boolean; user?: { id: string; login: string; name: string | null }; csrfToken?: string }
 
-export type View = 'overview' | 'summary' | 'growth' | 'tasks' | 'activity' | 'schedule' | 'prs' | 'issues' | 'jobs' | 'agents';
+export type View = 'overview' | 'artifacts' | 'summary' | 'growth' | 'tasks' | 'activity' | 'schedule' | 'prs' | 'issues' | 'jobs' | 'agents';
 
 // Mirrors board/src/agent.ts: agent conversations, served by /api/agent.
 
@@ -214,3 +214,7 @@ export interface SummaryData {
 }
 
 export interface CalendarData { hours: { hour: string; repo: string | null; n: number }[] }
+
+/** One claude.ai artifact on the Artifacts view (board/src/store.ts). */
+export interface Artifact { title: string; url: string; project: string; repo: string | null; kind: string; updatedAt: string | null; pinned: boolean; shared: boolean }
+export interface ArtifactList { v: 1; at: string; artifacts: Artifact[] }

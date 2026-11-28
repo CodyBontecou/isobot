@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { checkSessionMutation, handleAccountRequest, resolveAccountSession, type AccountEnvironment } from "../../cloudflare/src/account-routes.js";
 import { AgentStore, BadAgentInput } from "./agent.js";
-import { BadAction, BadSnapshot, BoardStore, CALENDAR_MAX_DAYS, SUMMARY_MAX_DAYS, type IngestResult } from "./store.js";
+import { BadAction, BadArtifacts, BadSnapshot, BoardStore, CALENDAR_MAX_DAYS, SUMMARY_MAX_DAYS, type IngestResult } from "./store.js";
 
 /**
  * The isobot board at bot.isolated.tech: a view of the runner (state, schedule, timeline) and its GitHub
@@ -56,7 +56,7 @@ export default {
     const path = url.pathname;
     if (path === "/health") return new Response("ok", { headers: PRIVATE });
 
-    if (path === "/api/ingest" || path === "/api/ingest/actions" || path === "/api/ingest/agent") {
+    if (path === "/api/ingest" || path === "/api/ingest/actions" || path === "/api/ingest/agent" || path === "/api/ingest/artifacts") {
       const match = /^Bearer (.+)$/.exec(request.headers.get("Authorization") ?? "");
       if (!env.INGEST_TOKEN || !match || !await sameSecret(match[1], env.INGEST_TOKEN)) return json({ error: "Unauthorized" }, 401);
       // The runner's poll between pushes: just the queued actions.
@@ -64,6 +64,15 @@ export default {
       if (path === "/api/ingest/agent") return upgrade(request, env, "runner");
       if (path === "/api/ingest/actions") return request.method === "GET" ? json({ actions: await env.BOARD.getByName("board").pendingActions() }) : json({ error: "Use GET" }, 405);
       if (request.method !== "POST") return json({ error: "Use POST" }, 405);
+      if (path === "/api/ingest/artifacts") {
+        // The Artifacts view's list (scripts/push-artifacts.mjs): replaced whole on every push.
+        const text = await readText(request, 1_000_000);
+        if (text === null) return json({ error: "Too large" }, 413);
+        let list: unknown;
+        try { list = JSON.parse(text); } catch { return json({ error: "Invalid JSON" }, 400); }
+        const result = await env.BOARD.getByName("board").setArtifacts(list);
+        return "error" in result ? json({ error: result.error }, 400) : json(result);
+      }
       const body = await readText(request, INGEST_LIMIT);
       if (body === null) return json({ error: "Snapshot too large" }, 413);
       let snapshot: unknown;
@@ -114,6 +123,7 @@ export default {
       }
       if (path === "/api/board") return json(await board.board());
       if (path === "/api/metrics") return json({ metrics: await board.metrics() });
+      if (path === "/api/artifacts") return json({ artifacts: await board.artifacts() });
       if (path === "/api/events") {
         const days = Math.min(Math.max(Number(url.searchParams.get("days") ?? 7) || 7, 1), 30);
         const job = url.searchParams.get("job");
@@ -283,6 +293,18 @@ export class BoardState extends DurableObject<Env> {
   }
 
   metrics() { return this.store.metrics(); }
+
+  /** A bad list comes back as `{ error }` rather than an exception across RPC. */
+  setArtifacts(list: unknown): { ok: true; count: number } | { error: string } {
+    try {
+      return this.store.setArtifacts(list);
+    } catch (error) {
+      if (error instanceof BadArtifacts) return { error: error.message };
+      throw error;
+    }
+  }
+
+  artifacts() { return this.store.artifacts(); }
 
   events(options: { since: string; jobId?: string; limit?: number }) { return this.store.events(options); }
 

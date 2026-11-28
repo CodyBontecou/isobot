@@ -15,6 +15,7 @@ link), and a side pane with a job's full timeline.
 | Schedule | Triage, content and ASO trains, analytics, the daily check-in, search and rank reports, release trains, and pending follow-ups |
 | Pull requests / Issues | Open items, and items merged or closed in the last 14 days, across every configured repository. Open PRs carry the PR sweep's verdict (merge, land, duplicate, superseded, stale draft) with its reason on hover, and Pull requests has a **Needs you** tab ([PR sweep](runner.md#pull-request-sweep)) |
 | Jobs | The runner's 200 latest jobs with state, attempts and PR; click one for its timeline |
+| Artifacts | Claude's published artifacts (designs, pages, docs on claude.ai) grouped by project, with search; the repository filter keeps the ones filed under that repo ([Artifacts](#artifacts)) |
 
 The repository list in the sidebar filters every view.
 
@@ -142,6 +143,25 @@ Every issue and PR shows where its work came from, read from what isobot already
 PRs take the source of the issue they close (`Closes #n`). Filter by source on the Issues and Pull requests views
 (`?source=discord`); Overview counts open issues by source. A new source needs a marker
 written where its issues are opened, plus a case in `itemSource()` in `runner/src/dashboard.ts`.
+
+## Artifacts
+
+The Artifacts view lists Claude's published artifacts (claude.ai designs, pages and docs) by project. The board can't read
+claude.ai, so the runner pushes the list (`runner/src/artifacts.ts`, on the primary, every `artifacts.everyHours`, default 6):
+
+- A Claude Code session (`haiku`, the runner's `CLAUDE_CODE_OAUTH_TOKEN`) gets only the Artifact tool, switched on in
+  `-p` mode by `CLAUDE_CODE_ARTIFACT=1`, and pages through `list` with scope `all`. A PreToolUse hook refuses every
+  other action, so a title in an artifact someone shared can't make it publish, open or delete anything.
+- The runner parses the tool's own results from the `stream-json` output, not the model's reply. Then it files each
+  artifact under the first `artifacts.projects` entry whose `match` words appear in the title (case-insensitive), or
+  under "Other". A project's `repo` makes the sidebar's repository filter apply.
+- It pushes the whole list to `POST /api/ingest/artifacts` (`INGEST_TOKEN`), which replaces the stored one. An empty
+  listing isn't pushed, and a failure is tried again half an hour later. `GET /api/artifacts` serves the list to a session.
+- `npm run runner -- artifacts sync` lists and pushes now. Schedule shows the job as **Artifacts**.
+- A hand-made list can be pushed with `node board/scripts/push-artifacts.mjs list.json` (ISOBOT_BOARD_URL/TOKEN from
+  env or runner.env). Its format is `{ "v": 1, "at", "artifacts": [{ "title", "url", "project", "repo", "kind",
+  "updatedAt", "pinned", "shared" }] }`. Links must be `https://claude.ai/artifact/…` or `…/code/artifact/…`, with at
+  most 2,000 entries. A bad push is refused and the old list stays.
 
 ## Setup
 

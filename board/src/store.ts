@@ -65,6 +65,21 @@ export class BoardStore {
     sql.exec(`CREATE TABLE IF NOT EXISTS actions (id TEXT PRIMARY KEY, at TEXT NOT NULL, kind TEXT NOT NULL, repo TEXT NOT NULL, number INTEGER NOT NULL,
       by TEXT NOT NULL, state TEXT NOT NULL, result TEXT, done_at TEXT)`);
     sql.exec(`CREATE INDEX IF NOT EXISTS actions_state ON actions (state, at)`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS artifacts (id INTEGER PRIMARY KEY CHECK (id = 1), at TEXT NOT NULL, data TEXT NOT NULL)`);
+  }
+
+  /** Replaces the Artifacts view's list with a pushed one (scripts/push-artifacts.mjs). Throws `BadArtifacts` on bad input. */
+  setArtifacts(raw: unknown, now = new Date()): { ok: true; count: number } {
+    const list = checkArtifacts(raw);
+    this.sql.exec(`INSERT INTO artifacts (id, at, data) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET at = excluded.at, data = excluded.data`,
+      now.toISOString(), JSON.stringify(list));
+    return { ok: true, count: list.artifacts.length };
+  }
+
+  /** The latest pushed artifact list, with when it was received, or null before the first push. */
+  artifacts(): (ArtifactList & { receivedAt: string }) | null {
+    const row = this.sql.exec("SELECT at, data FROM artifacts WHERE id = 1").toArray()[0];
+    return row ? { ...JSON.parse(String(row.data)) as ArtifactList, receivedAt: String(row.at) } : null;
   }
 
   /**
@@ -300,4 +315,51 @@ function checkSnapshot(raw: unknown): CheckedSnapshot {
       || !Array.isArray(m.apps) || !Array.isArray(m.sites) || !m.credits || typeof m.credits !== "object") fail("bad metrics");
   }
   return s as unknown as CheckedSnapshot;
+}
+
+/** A claude.ai artifact (Claude's published pages and designs), filed under the project it belongs to. */
+export interface Artifact {
+  title: string;
+  url: string;
+  /** Group heading, e.g. "Health.md" or "B-Line"; "Other" when it fits none. */
+  project: string;
+  /** The runner repo it belongs to (owner/name), so the sidebar's repo filter applies; null for projects isobot doesn't run. */
+  repo: string | null;
+  /** "Design", "Page", "Doc", … as the artifact list names it. */
+  kind: string;
+  updatedAt: string | null;
+  pinned: boolean;
+  shared: boolean;
+}
+export interface ArtifactList { v: 1; at: string; artifacts: Artifact[] }
+
+export class BadArtifacts extends Error {}
+
+const ARTIFACT_URL = /^https:\/\/claude\.ai\/(code\/)?artifact\/[\w-]{8,64}$/;
+const ARTIFACT_LIMIT = 2000;
+
+function checkArtifacts(raw: unknown): ArtifactList {
+  const fail = (why: string): never => { throw new BadArtifacts(why); };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) fail("body must be an object");
+  const body = raw as Record<string, unknown>;
+  if (body.v !== 1) fail(`unsupported version ${String(body.v)}`);
+  if (typeof body.at !== "string" || Number.isNaN(Date.parse(body.at))) fail("bad at");
+  if (!Array.isArray(body.artifacts) || body.artifacts.length > ARTIFACT_LIMIT) fail(`artifacts must be a list of at most ${ARTIFACT_LIMIT}`);
+  const text = (value: unknown, max: number, name: string): string =>
+    typeof value === "string" && value.trim() && value.length <= max ? value.trim() : fail(`bad ${name}`);
+  const artifacts = (body.artifacts as unknown[]).map((item): Artifact => {
+    const a = item as Record<string, unknown>;
+    if (!a || typeof a !== "object") fail("bad artifact");
+    const url = text(a.url, 200, "url");
+    if (!ARTIFACT_URL.test(url)) fail(`not a claude.ai artifact link: ${url}`);
+    const repo = a.repo === null || a.repo === undefined ? null : text(a.repo, 140, "repo");
+    if (repo !== null && !/^[\w.-]+\/[\w.-]+$/.test(repo)) fail(`bad repo ${repo}`);
+    const updatedAt = a.updatedAt === null || a.updatedAt === undefined ? null : text(a.updatedAt, 40, "updatedAt");
+    if (updatedAt !== null && Number.isNaN(Date.parse(updatedAt))) fail(`bad updatedAt ${updatedAt}`);
+    return {
+      title: text(a.title, 300, "title"), url, project: text(a.project, 80, "project"), repo,
+      kind: a.kind === undefined ? "Page" : text(a.kind, 40, "kind"), updatedAt, pinned: a.pinned === true, shared: a.shared === true,
+    };
+  });
+  return { v: 1, at: new Date(Date.parse(body.at as string)).toISOString(), artifacts };
 }
