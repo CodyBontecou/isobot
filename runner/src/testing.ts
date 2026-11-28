@@ -4,7 +4,7 @@ import path from "node:path";
 import type { AgentRun, Builder, JobDevices, PreviousReview, Review, TriageItem, TriageResult } from "./builder.js";
 import { loadConfig, type Labels, type RunnerConfig } from "./config.js";
 import type { DiffStat } from "./git.js";
-import type { CiState, GitHubApi, Issue, IssueComment, PullRequest } from "./github.js";
+import type { CiState, GitHubApi, Issue, IssueComment, PullRequest, SecretAlert } from "./github.js";
 import { RUNNER_MARKER } from "./notes.js";
 import type { RepoOps } from "./pipeline.js";
 
@@ -79,6 +79,8 @@ export class FakeGitHub implements GitHubApi {
     return this.labelers.get(`${owner}/${repo}#${number}:${label}`) ?? this.login;
   }
   async isPublic(owner: string, repo: string): Promise<boolean> { return this.publicRepos.has(`${owner}/${repo}`); }
+  secretAlerts = new Map<string, SecretAlert[]>();
+  async secretScanningAlerts(owner: string, repo: string): Promise<SecretAlert[] | null> { return this.secretAlerts.get(`${owner}/${repo}`) ?? []; }
   async issueComments(owner: string, repo: string, number: number): Promise<IssueComment[]> {
     this.commentReads.push(`${owner}/${repo}#${number}`);
     return this.comments.filter(c => c.key === `${owner}/${repo}#${number}`).map(c => ({ id: c.id, author: c.author ?? this.login, body: c.body }));

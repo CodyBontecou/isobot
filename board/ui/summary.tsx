@@ -452,6 +452,7 @@ const WORK: { id: string; label: string; kinds: string[] }[] = [
   { id: 'aso-applied', label: 'Listing changes applied', kinds: ['aso_applied', 'aso_live'] },
   { id: 'train', label: 'Release trains', kinds: ['train'] },
   { id: 'crash', label: 'Crash issues filed', kinds: ['crash_issue'] },
+  { id: 'security', label: 'Security issues filed', kinds: ['security_issue'] },
   { id: 'sweep', label: 'PRs closed by the sweep', kinds: ['pr_sweep_closed'] },
   { id: 'shipped', label: 'Releases shipped', kinds: ['state:shipped'] },
 ];

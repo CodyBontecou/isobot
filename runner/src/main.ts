@@ -10,6 +10,7 @@ import { GoogleAuth, PlayPublisher } from "./google.js";
 import { PlayAnalytics, ratingsText } from "./playAnalytics.js";
 import { ArtifactSync } from "./artifacts.js";
 import { CrashAudit } from "./crashes.js";
+import { SecurityAudit, securityDetailKey } from "./security.js";
 import { PlayRollout, planText } from "./playRollout.js";
 import { PricingTrain } from "./pricing.js";
 import type { CheckReport } from "./policy.js";
@@ -84,6 +85,8 @@ interface Runtime {
   playAnalytics: PlayAnalytics | null;
   /** Crashes from Google Play, the App Store and TestFlight (crashes.ts); off without config.crashes. */
   crashes: CrashAudit;
+  /** The nightly security audit (security.ts); off without config.security. */
+  security: SecurityAudit;
   /** Staged Play production rollouts moved forward on their own (playRollout.ts); null without config.playRollout. */
   playRollout: PlayRollout | null;
   /** isobot's own price changes on the App Store and Google Play (pricing.ts); off without config.pricing. */
@@ -292,6 +295,12 @@ function runtime(): Runtime {
     google: googleAuth,
     notify: (text, reactions) => notifier.discord(text, reactions),
   });
+  const security = new SecurityAudit({
+    config, store, github, repo: repoFor,
+    exec: (cmd, args, cwd) => run(cmd, args, { cwd, env: workerEnv(), timeoutMs: 15 * 60_000, maxBytes: 128 * 1024 * 1024 }),
+    agent: input => builder.agentJson(input),
+    notify: text => notifier.discord(text),
+  });
   const playRollout = googleAuth && config.playRollout
     ? new PlayRollout({ config, store, google: googleAuth, notify: text => notifier.discord(text) })
     : null;
@@ -334,7 +343,7 @@ function runtime(): Runtime {
     config: config.artifacts, bin: env.claudeBin, dir: path.join(env.home, "artifacts"), board: env.board,
     cursor: key => store.cursor(key), setCursor: (key, value) => store.setCursor(key, value),
   });
-  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, production, content, aso, analytics, sales, playAnalytics, crashes, playRollout, pricing, prSweep, artifacts, secrets, handoff, leadership };
+  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, production, content, aso, analytics, sales, playAnalytics, crashes, security, playRollout, pricing, prSweep, artifacts, secrets, handoff, leadership };
 }
 
 /** ASO Tracker's CLI: one JSON call per tool; it starts the tracker's daemon itself when it isn't running. */
@@ -404,6 +413,8 @@ const ASO_EVERY_MS = 60 * 60_000;
 const ASO_POLL_MS = 5 * 60_000;
 /** How often the store reports are looked at; each source reads its store at most hourly itself. */
 const ANALYTICS_EVERY_MS = 5 * 60_000;
+/** How often the security audit looks; inside its night hours it audits one repository per look. */
+const SECURITY_EVERY_MS = 20 * 60_000;
 /** How often the crash audit looks; it reads the stores at most every 6 hours itself. */
 const CRASHES_EVERY_MS = 30 * 60_000;
 /** How often the loop asks the artifact sync whether it's due (it lists every artifacts.everyHours itself). */
@@ -457,6 +468,8 @@ async function loop(rt: Runtime): Promise<void> {
   let analyticsRunning = false;
   let lastCrashes = 0;
   let crashesRunning = false;
+  let lastSecurity = 0;
+  let securityRunning = false;
   let lastRollout = 0;
   let rolloutRunning = false;
   let lastPricing = 0;
@@ -533,6 +546,8 @@ async function loop(rt: Runtime): Promise<void> {
     }
     if (rt.crashes.enabled()) items.push(every("crashes", "Crash audit", CRASHES_EVERY_MS, lastCrashes, crashesRunning,
       `${rt.crashes.playApps().length} Play, ${rt.crashes.iosApps().length} App Store apps; stores read every 6 h`));
+    if (rt.security.enabled()) items.push(every("security", "Security audit", SECURITY_EVERY_MS, lastSecurity, securityRunning,
+      `${rt.security.repos().length} repos nightly (${rt.security.limits.hours.join("-")} h): dependencies, secrets, code review; full review every ${rt.security.limits.fullEveryDays} days`));
     if (rt.playRollout?.enabled()) items.push(every("play-rollout", "Play rollouts", CRASHES_EVERY_MS, lastRollout, rolloutRunning,
       `${rt.playRollout.apps().length} Play apps; production checked every 3 h`));
     if (rt.pricing.enabled()) items.push(every("pricing", "Pricing train", PRICING_EVERY_MS, lastPricing, pricingRunning,
@@ -599,7 +614,7 @@ async function loop(rt: Runtime): Promise<void> {
   if (leadership) {
     // A leader hands over to the preferred Mac only between duties, never in the middle of one.
     leadership.idle = () => !trainTicking && !rt.train.shipping() && !rt.production.busy() && !triageRunning && !contentRunning && !asoRunning && !asoPolling && !analyticsRunning
-      && !crashesRunning && !artifactsRunning && !rolloutRunning && !pricingRunning && !prSweepRunning && !chat?.busy() && !boardChat?.busy();
+      && !crashesRunning && !securityRunning && !artifactsRunning && !rolloutRunning && !pricingRunning && !prSweepRunning && !chat?.busy() && !boardChat?.busy();
     // A paused runner does none of the leader's duties, so it hands the lead to a runner that will.
     leadership.standby = () => existsSync(pausedFile(rt.env));
     let renewing = false;
@@ -693,6 +708,14 @@ async function loop(rt: Runtime): Promise<void> {
           void rt.crashes.tick().then(({ filed }) => { if (filed.length) console.log(`[crashes] opened ${filed.length} issue(s)`); })
             .catch(error => console.warn(`[crashes] failed: ${(error as Error).message}`))
             .finally(() => { crashesRunning = false; });
+        }
+        if (leads() && !securityRunning && Date.now() - lastSecurity > SECURITY_EVERY_MS && rt.security.enabled()) {
+          lastSecurity = Date.now();
+          securityRunning = true;
+          // Beside the cycle, one repository per look; a failure is kept for the check-in, not thrown.
+          void rt.security.tick().then(({ repo, filed }) => { if (repo) console.log(`[security] audited ${repo}${filed.length ? `, opened ${filed.length} issue(s)` : ""}`); })
+            .catch(error => console.warn(`[security] failed: ${(error as Error).message}`))
+            .finally(() => { securityRunning = false; });
         }
         if (leads() && !artifactsRunning && Date.now() - lastArtifactsTry > ARTIFACTS_RETRY_MS && rt.artifacts.enabled()) {
           lastArtifactsTry = Date.now();
@@ -823,6 +846,7 @@ function chatToolDeps(rt: Runtime, live: () => LiveStatus, chatDir: string, disc
     card: id => rt.notifier.card({ id }),
     analytics: rt.analytics,
     crashes: rt.crashes.enabled() ? rt.crashes : undefined,
+    security: rt.security.enabled() ? rt.security : undefined,
     playRatings: rt.playAnalytics ?? undefined,
     ...(discord ? { discord: { api: discord.api, guildId: discord.guildId, webhookDir: path.join(rt.env.home, "webhooks") } } : {}),
     asc: async (args, { readOnly }) => {
@@ -1075,7 +1099,10 @@ const HELP = `isobot runner
                       do it now (run), or resume a rollout it halted, accepting the crashes it halted for (resume)
   crashes [sync | checkin]
                       Read Google Play, App Store and TestFlight crashes now and open issues for new ones (sync),
-                      or print the check-in's crash section (checkin, the default)`;
+                      or print the check-in's crash section (checkin, the default)
+  security [sync [owner/repo] | checkin | show <id>]
+                      Audit the next repository not audited today, or the one named, now (sync), print the
+                      check-in's security section (checkin, the default), or print a finding's private details (show)`;
 
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "help";
@@ -1305,6 +1332,28 @@ async function main(): Promise<void> {
       }
       const { lines, flags } = rt.crashes.checkIn();
       console.log([...flags, ...lines].join("\n") || "(no crashes recorded: run `crashes sync`)");
+      return;
+    }
+    case "security": {
+      const [what = "checkin", arg] = process.argv.slice(3);
+      if (!rt.security.enabled()) {
+        console.error("The security audit is off: add \"security\": {} to the runner config.");
+        process.exitCode = 2;
+        return;
+      }
+      if (what === "show") {
+        const detail = arg ? rt.store.cursor(securityDetailKey(arg)) : null;
+        if (!detail) { console.error(arg ? `No finding ${arg} stored on this Mac.` : "usage: security show <id>"); process.exitCode = 2; return; }
+        console.log(detail);
+        return;
+      }
+      if (what === "sync") {
+        const { repo, filed } = await rt.security.tick(true, arg);
+        console.log(!repo ? "Nothing to audit." : filed.length ? `Audited ${repo}. Opened:\n${filed.join("\n")}` : `Audited ${repo}; no new issues.`);
+        if (repo) console.log(JSON.stringify(rt.security.snapshot(repo), null, 1));
+      }
+      const { lines, flags } = rt.security.checkIn();
+      console.log([...flags, ...lines].join("\n") || "(no audits recorded: run `security sync`)");
       return;
     }
     case "play": {

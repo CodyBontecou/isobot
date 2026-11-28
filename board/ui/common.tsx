@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Activity, Bot, Bug, CircleCheck, CircleDot, ExternalLink, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, Inbox, Mail, MessageSquare, Mic, Newspaper, Rocket, Search, Star, X } from 'lucide-react';
+import { Activity, Bot, Bug, CircleCheck, CircleDot, ExternalLink, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, Inbox, Mail, MessageSquare, Mic, Newspaper, Rocket, Search, ShieldAlert, Star, X } from 'lucide-react';
 import type { BoardItem, SourceKind } from './types';
 
 /** Pieces every view shares: relative times, JSON fetches, rows, chips and sources. */
@@ -72,6 +72,7 @@ export const SOURCES: Record<SourceKind, { label: string; icon: typeof Activity;
   content: { label: 'Content train', icon: Newspaper, hint: 'Researched by the content train' },
   release: { label: 'Release train', icon: Rocket, hint: 'Opened by the release train' },
   crash: { label: 'Crash report', icon: Bug, hint: 'A Play, App Store or TestFlight crash, via the crash audit' },
+  security: { label: 'Security audit', icon: ShieldAlert, hint: 'A vulnerable dependency or code finding, via the nightly security audit' },
 };
 export const sourceOf = (item: BoardItem): SourceKind => item.source && item.source.kind in SOURCES ? item.source.kind : 'github';
 

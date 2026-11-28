@@ -22,7 +22,7 @@ export interface BoardItem {
   attention?: { status: string; reason: string; action: string | null; at: string };
 }
 
-export type SourceKind = 'github' | 'discord' | 'email' | 'vox' | 'appstore' | 'chat' | 'content' | 'release' | 'crash';
+export type SourceKind = 'github' | 'discord' | 'email' | 'vox' | 'appstore' | 'chat' | 'content' | 'release' | 'crash' | 'security';
 
 export interface ItemSource {
   kind: SourceKind;

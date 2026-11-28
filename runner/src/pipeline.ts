@@ -10,6 +10,7 @@ import { isTransient, TransientError, UsageLimitError } from "./errors.js";
 import { failureFeedback, formatChecks } from "./checks.js";
 import { configuredRepos, contentPolicy, policyFor, type Environment, type RepoPolicy, type RunnerConfig } from "./config.js";
 import { contentEvidenceKey, CONTENT_BUILD_RULES } from "./content.js";
+import { securityTask } from "./security.js";
 import type { DiffStat } from "./git.js";
 import type { GitHubApi, Issue, IssueComment, PullRequest } from "./github.js";
 import { asksToRetry, maxCommentId, noteFeedback, ownerNotes, quoteNote, withNotes, type OwnerNote } from "./notes.js";
@@ -537,6 +538,9 @@ export class Pipeline {
       const paths = `## Files this content may change\nAnything else keeps it from publishing:\n${(policy.allowedPaths ?? []).map(glob => `- \`${glob}\``).join("\n")}`;
       task = [task, CONTENT_BUILD_RULES, paths, ...(evidence ? ["## Private research evidence (keep out of the repository, commits and PR)", evidence] : [])].join("\n\n");
     }
+    // A security audit finding: its rules, and on a public repository the details the issue leaves out.
+    const security = securityTask(issue.body, this.deps.store);
+    if (security) task = [task, security].join("\n\n");
     const fingerprint = createHash("sha256").update(`${issue.title}\n${issue.body}\n${proposal?.body ?? ""}`).digest("hex");
     // A stranger's issue that isobot's own proposal replaced, and that isobot itself approved as small,
     // builds from the vetted proposal, so it may go as far as the owner's own work.

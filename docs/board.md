@@ -137,6 +137,7 @@ Every issue and PR shows where its work came from, read from what isobot already
 | Vox note | The `from-vox` label from the Vox inbox pipeline |
 | isobot chat | `<!-- isobot:chat -->` on issues the staff chat opens |
 | Crash report | `<!-- isobot:crash:… -->` on issues the [crash audit](crashes.md) opens |
+| Security audit | `<!-- isobot:security:… -->` on issues the [security audit](security.md) opens |
 | Content train, release train | Their issue wording |
 | GitHub | Everything else |
 

@@ -245,6 +245,7 @@ a.chip.source:hover { background: var(--bg-hover); color: var(--text); }
 .chip.source.discord, .chip.source.chat { color: var(--accent); }
 .chip.source.appstore { color: var(--warn); }
 .chip.source.crash { color: var(--bad); }
+.chip.source.security { color: var(--bad); }
 .chip.source.vox, .chip.source.email { color: var(--info); }
 .card-source { margin-top: 6px; display: flex; }
 .task-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }

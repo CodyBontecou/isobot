@@ -218,9 +218,11 @@ Attach screenshots or logs and it reads them.
 - **Daily check-in:** at `chat.checkInHour` (local time; 9 by default, `null` for none) the
   channel gets a summary of what needs you: PRs to review, jobs ready to ship, failures this week,
   proposals awaiting approval, and, with [App Store analytics](analytics.md) on, a line per app with
-  its latest day's numbers, and with the [crash audit](crashes.md) on, a **Crashes** section. Nothing is posted
-  on a day with nothing to say; an analytics flag (downloads jumping or dropping, a churn spike, reports that
-  stopped arriving) or a crash flag (a spike, a new crash group in the latest release) counts as something to say.
+  its latest day's numbers, with the [crash audit](crashes.md) on, a **Crashes** section, and with the
+  [security audit](security.md) on, a **Security** section. Nothing is posted on a day with nothing to say; an
+  analytics flag (downloads jumping or dropping, a churn spike, reports that stopped arriving), a crash flag (a
+  spike, a new crash group in the latest release) or a security flag (a leaked key to rotate, a critical finding,
+  an audit that stopped running) counts as something to say.
 
 Who can talk to it: `ISOBOT_CHAT_USERS` (comma-separated Discord user ids), else
 `ISOBOT_ALLOWED_USERS`, else the bot application's owner. Everyone else is ignored, and only their
@@ -314,7 +316,7 @@ long job.
 
 **Only one runner may lead.** Leases cover builds, nothing else. Triage, the staff chat
 and the board's agent dock, the 💻 handoff, the board feed, the release and weekly App Store trains,
-the content, ASO, crash and Play rollout trains, the hourly store reads and the PR sweep all keep their
+the content, ASO, crash, security and Play rollout trains, the hourly store reads and the PR sweep all keep their
 place in the runner's own `runner.sqlite` or poll Discord themselves, so a second runner doing them
 would post every digest and answer every chat message twice, and could release twice. Give every
 other runner `ISOBOT_RUNNER_ROLE=builder` in its `runner.env`, or run them all as `auto`
@@ -750,6 +752,15 @@ With `"crashes": {}`, the runner reads Google Play's crash and ANR clusters, App
 TestFlight crash submissions every 6 hours, files each new crash group that affects enough users as an
 `isobot:proposed` bug in the app's repo, and adds a **Crashes** section to the daily check-in. See
 [Crash audit](crashes.md).
+
+## Security audit
+
+With `"security": {}`, the runner audits each repository it builds once a night: osv-scanner over every
+lockfile, GitHub's secret-scanning alerts, gitleaks, and a read-only agent review (the whole repository once a
+week per repository, the new commits on other nights). New findings become `security` issues, approved and
+built straight away with `autoApprove`; on a public repository a code finding's details stay off the issue and
+go to the builder privately. Leaked keys to rotate show in the check-in's **Security** section. See
+[Security audit](security.md).
 
 ## Play rollouts
 
