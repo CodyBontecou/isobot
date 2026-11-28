@@ -399,13 +399,18 @@ export interface Labels {
   content: string;
 }
 
-export type RunnerRole = "primary" | "builder";
+/**
+ * primary: every duty, on its own. builder: builds only. auto: builds, and leads (every duty) while it holds
+ * the watchdog's lease, so several Macs share the work and any of them can be switched off (leader.ts).
+ */
+export type RunnerRole = "primary" | "builder" | "auto";
 
 export function runnerRole(value: string | undefined): RunnerRole {
   const role = value?.trim().toLowerCase() || "primary";
   if (role === "primary" || role === "all") return "primary";
   if (role === "builder" || role === "builds") return "builder";
-  throw new Error(`ISOBOT_RUNNER_ROLE must be "primary" or "builder", not "${value}"`);
+  if (role === "auto" || role === "shared") return "auto";
+  throw new Error(`ISOBOT_RUNNER_ROLE must be "primary", "builder" or "auto", not "${value}"`);
 }
 
 export interface Environment {
@@ -433,6 +438,8 @@ export interface Environment {
    * handoff, trains or store reads, which keep their place in this runner's SQLite and would run twice beside a primary.
    */
   role: RunnerRole;
+  /** auto role: this Mac takes the lead back whenever it's up (ISOBOT_LEADER_PREFERRED=1, for the always-on one). */
+  leaderPreferred: boolean;
   /** The isobot-sandbox Worker for cloud builds (`executor: "cloudflare"`), from ISOBOT_SANDBOX_URL and ISOBOT_SANDBOX_TOKEN. */
   sandbox?: { url: string; token: string };
   /** The isobot board Worker (bot.isolated.tech), from ISOBOT_BOARD_URL and ISOBOT_BOARD_TOKEN. */
@@ -803,6 +810,10 @@ export function loadEnvironment(env: NodeJS.ProcessEnv = process.env): Environme
   }
   const heartbeatUrl = env.ISOBOT_HEARTBEAT_URL?.trim() || undefined;
   if (heartbeatUrl && !/^https:\/\//.test(heartbeatUrl)) throw new Error("ISOBOT_HEARTBEAT_URL must use HTTPS");
+  // The lease lives in the watchdog, at the heartbeat's address.
+  if (runnerRole(env.ISOBOT_RUNNER_ROLE) === "auto" && !/\/ping\/[^/]+\/?$/.test(heartbeatUrl ?? "")) {
+    throw new Error("ISOBOT_RUNNER_ROLE=auto needs ISOBOT_HEARTBEAT_URL (…/ping/<token>): the leader lease lives in the watchdog");
+  }
   const imap = imapAccounts(env);
   return {
     home: env.ISOBOT_HOME ?? path.join(homedir(), "Library", "Application Support", "isobot"),
@@ -818,6 +829,7 @@ export function loadEnvironment(env: NodeJS.ProcessEnv = process.env): Environme
     heartbeatUrl,
     runnerId: (env.ISOBOT_RUNNER_ID?.trim() || hostname().split(".")[0] || "runner").replace(/[^\w.-]+/g, "-"),
     role: runnerRole(env.ISOBOT_RUNNER_ROLE),
+    leaderPreferred: /^(1|true|yes)$/i.test(env.ISOBOT_LEADER_PREFERRED?.trim() ?? ""),
     sandbox: sandboxEnv(env),
     board: boardEnv(env),
   };

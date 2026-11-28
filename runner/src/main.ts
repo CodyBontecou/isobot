@@ -38,6 +38,7 @@ import { buildMetrics } from "./metrics.js";
 import { formatSweep, PrSweep } from "./prSweep.js";
 import { runBoardAction } from "./boardActions.js";
 import { Dashboard, WEEKDAYS, every, nextDailyAt, nextWeeklyAt, type ScheduleItem } from "./dashboard.js";
+import { httpCoordinator, Leadership, RENEW_MS } from "./leader.js";
 import { Awake, heartbeatAge, pingHeartbeat, readHeartbeat, rotateLog, writeHeartbeat } from "./ops.js";
 import { killAllChildren, run, runningChildren, setGitIdentity, sh, workerEnv } from "./proc.js";
 import { SelfUpdate } from "./selfUpdate.js";
@@ -92,6 +93,8 @@ interface Runtime {
   secrets: string[];
   /** Messages carrying a 💻 (Herdr handoff), when it's on. */
   handoff?: HandoffWatch;
+  /** auto role: the watchdog lease that decides whether this runner leads (leader.ts). */
+  leadership?: Leadership;
 }
 
 /** Set once the runner starts stopping; a release train interrupted by it resumes next start. */
@@ -148,7 +151,13 @@ function runtime(): Runtime {
   const builder = new ClaudeCodeBuilder(config.builder, { secrets: builderSecrets, noWrite: [path.join(env.home, "repos"), shimDir, mcpDir, ISOBOT_ROOT] }, env.claudeBin, shimDir, shellTool);
   const devices = new LocalDevices(path.join(env.home, "logs", "devices"));
   const handoff = handoffEnabled(config, env) ? new HandoffWatch(store) : undefined;
-  const notifier = new Notifier({ webhookUrl: env.discordWebhookUrl, bot: env.discordBot, store, jobUrl: env.jobUrl, handoff });
+  const leadership = env.role === "auto"
+    ? new Leadership({ coordinator: httpCoordinator(env.heartbeatUrl!), store, runnerId: env.runnerId, preferred: env.leaderPreferred })
+    : undefined;
+  const notifier = new Notifier({
+    webhookUrl: env.discordWebhookUrl, bot: env.discordBot, store, jobUrl: env.jobUrl, handoff,
+    handoffActive: leadership ? () => leadership.leading : undefined,
+  });
   // Checks execute builder-written code, so they get the same confinement as the builder's shell.
   const checks = (cwd: string, commands: string[], options: { timeoutMs?: number; sandbox: boolean; env?: Record<string, string> }) => runChecks(cwd, commands, {
     timeoutMs: options.timeoutMs, env: options.env,
@@ -156,7 +165,8 @@ function runtime(): Runtime {
     shimDir,
   });
   const repoFor = (owner: string, repo: string) => new Repo(env.home, owner, repo, env.githubToken);
-  const pipeline = new Pipeline({ config, env, store, github, builder, notifier, repo: repoFor, checks, devices, runnerId: env.runnerId, role: env.role, cloud: cloudExecutor(config, env, repoFor) });
+  const pipeline = new Pipeline({ config, env, store, github, builder, notifier, repo: repoFor, checks, devices, runnerId: env.runnerId, role: env.role,
+    leading: leadership ? () => leadership.leading : undefined, cloud: cloudExecutor(config, env, repoFor) });
   const labels = Object.values(config.labels);
   const sources: Source[] = [new GitHubSource(github, configuredRepos(config), labels)];
   if (env.piUrl && env.piToken) sources.push(new DiscordSource(env.piUrl, env.piToken, lowerKeys(config.discordCategories)));
@@ -179,7 +189,7 @@ function runtime(): Runtime {
     return detail.data?.attributes?.externalBuildState ?? null;
   };
   const train = new ReleaseTrain({
-    config, store, github, notifier, repo: repoFor,
+    config, store, github, notifier, repo: repoFor, runnerId: env.runnerId,
     stopping: () => shuttingDown,
     notes: input => builder.releaseNotes(input),
     pullBody: async (owner, repo, number) => (await github.pullDetails(owner, repo, number)).body,
@@ -307,7 +317,7 @@ function runtime(): Runtime {
     config: config.artifacts, bin: env.claudeBin, dir: path.join(env.home, "artifacts"), board: env.board,
     cursor: key => store.cursor(key), setCursor: (key, value) => store.setCursor(key, value),
   });
-  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, production, content, aso, analytics, sales, playAnalytics, crashes, playRollout, prSweep, artifacts, secrets, handoff };
+  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, production, content, aso, analytics, sales, playAnalytics, crashes, playRollout, prSweep, artifacts, secrets, handoff, leadership };
 }
 
 /** ASO Tracker's CLI: one JSON call per tool; it starts the tracker's daemon itself when it isn't running. */
@@ -409,7 +419,10 @@ async function loop(rt: Runtime): Promise<void> {
     rt.pipeline.beginShutdown();
     shuttingDown = true;
     killAllChildren();
-    setTimeout(() => process.exit(0), 2000).unref();
+    // Stopped for good (not a self-update restart, which is back within the lease): hand the lead on now.
+    const handing = rt.leadership?.leading && signal !== "self-update";
+    if (handing) void rt.leadership!.stepDown().then(() => console.log("[leader] handed the lead on"));
+    setTimeout(() => process.exit(0), handing ? 8000 : 2000).unref();
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
@@ -432,23 +445,39 @@ async function loop(rt: Runtime): Promise<void> {
   let artifactsRunning = false;
   let lastArtifactsTry = 0;
   let cycleStartedAt: number | null = null;
+  let trainTicking = false;
+  /** Whether this runner does the leader's duties now: a primary always, an auto runner while it holds the lease. */
+  const leads = () => rt.env.role === "primary" || Boolean(rt.leadership?.leading);
   if (rt.env.heartbeatUrl) {
     const url = rt.env.heartbeatUrl;
     // Its own timer, so a long release step inside a cycle doesn't silence it; a hung cycle still does.
     setInterval(() => {
       const hung = cycleStartedAt !== null && Date.now() - cycleStartedAt > HUNG_CYCLE_MS;
-      if (!stopping && !lastCycleError && !hung) void pingHeartbeat(url);
+      // With several runners the heartbeat means "someone leads": only the leader sends it.
+      if (!stopping && !lastCycleError && !hung && leads()) void pingHeartbeat(url);
     }, 60_000);
-    void pingHeartbeat(url);
+    if (leads()) void pingHeartbeat(url);
   }
-  const chat = await startChat(rt, () => ({ activeJobs: rt.pipeline.activeJobs, lastCycleError, lastTriageAt, manuallyPaused: existsSync(pausedFile(rt.env)) }))
-    .catch(error => { console.warn(`[chat] not started: ${(error as Error).message}`); return null; });
-  process.once("exit", () => chat?.stop());
-  const boardChat = await startBoardChat(rt, () => ({ activeJobs: rt.pipeline.activeJobs, lastCycleError, lastTriageAt, manuallyPaused: existsSync(pausedFile(rt.env)) }))
-    .catch(error => { console.warn(`[boardchat] not started: ${(error as Error).message}`); return null; });
-  process.once("exit", () => boardChat?.stop());
-  const handoff = await startHandoff(rt).catch(error => { console.warn(`[handoff] not started: ${(error as Error).message}`); return null; });
-  process.once("exit", () => handoff?.stop());
+  // The leader's services (all of them on a primary; on an auto runner only while it holds the lease).
+  const live = () => ({ activeJobs: rt.pipeline.activeJobs, lastCycleError, lastTriageAt, manuallyPaused: existsSync(pausedFile(rt.env)) });
+  let chat: StaffChat | null = null;
+  let boardChat: BoardChat | null = null;
+  let handoff: Handoff | null = null;
+  let stopBoardActions: (() => void) | null = null;
+  const startLeaderServices = async () => {
+    chat ??= await startChat(rt, live).catch(error => { console.warn(`[chat] not started: ${(error as Error).message}`); return null; });
+    boardChat ??= await startBoardChat(rt, live).catch(error => { console.warn(`[boardchat] not started: ${(error as Error).message}`); return null; });
+    handoff ??= await startHandoff(rt).catch(error => { console.warn(`[handoff] not started: ${(error as Error).message}`); return null; });
+    stopBoardActions ??= board?.start() ?? null;
+  };
+  const stopLeaderServices = () => {
+    chat?.stop();
+    boardChat?.stop();
+    handoff?.stop();
+    stopBoardActions?.();
+    chat = boardChat = handoff = stopBoardActions = null;
+  };
+  process.once("exit", stopLeaderServices);
   const startedAt = new Date().toISOString();
   const schedule = (now: Date): ScheduleItem[] => {
     const items: ScheduleItem[] = [
@@ -491,7 +520,7 @@ async function loop(rt: Runtime): Promise<void> {
         nextAt: last ? new Date(Date.parse(last) + rt.prSweep.everyMs()).toISOString() : null, running: prSweepRunning,
         detail: "every open PR: what to merge, what to land, release PRs a newer release replaced" });
     }
-    if (rt.artifacts.enabled() && primary) {
+    if (rt.artifacts.enabled() && leads()) {
       const last = rt.artifacts.lastAt();
       items.push({ id: "artifacts", name: "Artifacts", cadence: `every ${rt.artifacts.everyMs() / 3_600_000} h`, lastAt: last,
         nextAt: artifactsRunning ? null : last ? new Date(Date.parse(last) + rt.artifacts.everyMs()).toISOString() : now.toISOString(), running: artifactsRunning,
@@ -519,9 +548,8 @@ async function loop(rt: Runtime): Promise<void> {
     }
     return items;
   };
-  // Only the primary feeds the board: two runners would overwrite each other's snapshot.
-  const primary = rt.env.role === "primary";
-  const board = rt.env.board && primary ? new Dashboard({
+  // Only the leader feeds the board: two runners would overwrite each other's snapshot.
+  const board = rt.env.board && rt.env.role !== "builder" ? new Dashboard({
     url: rt.env.board.url, token: rt.env.board.token, runnerId: rt.env.runnerId, store: rt.store, github: rt.github,
     repos: () => Object.keys(rt.config.repos).map(name => {
       const policy = policyFor(rt.config, name);
@@ -537,14 +565,51 @@ async function loop(rt: Runtime): Promise<void> {
       event: (jobId, text) => rt.store.event(jobId, "board_action", text),
     }),
   }) : null;
-  board?.start();
   // Merged isobot changes reach this runner: pulled, built, deployed, then a restart once idle.
   const selfUpdate = rt.config.selfUpdate ? new SelfUpdate({
     root: LIVE_ROOT, config: rt.config.selfUpdate, notify: text => rt.notifier.discord(text, [], { handoff: false }),
   }) : null;
   let selfUpdating = false;
   console.log(`[runner] started as ${rt.env.runnerId} (${rt.env.role}): ${configuredRepos(rt.config).map(r => `${r.owner}/${r.repo}`).join(", ")}; sources: ${rt.sources.map(s => s.name).join(", ")}`);
-  await rt.notifier.discord(primary ? "🟢 isobot runner started" : `🟢 isobot runner \`${rt.env.runnerId}\` started (builds only)`, [], { handoff: false });
+  if (rt.env.role === "primary") await startLeaderServices();
+  const leadership = rt.leadership;
+  if (leadership) {
+    // A leader hands over to the preferred Mac only between duties, never in the middle of one.
+    leadership.idle = () => !trainTicking && !rt.train.shipping() && !rt.production.busy() && !triageRunning && !contentRunning && !asoRunning && !asoPolling && !analyticsRunning
+      && !crashesRunning && !artifactsRunning && !rolloutRunning && !prSweepRunning && !chat?.busy() && !boardChat?.busy();
+    // A paused runner does none of the leader's duties, so it hands the lead to a runner that will.
+    leadership.standby = () => existsSync(pausedFile(rt.env));
+    let renewing = false;
+    const renew = async () => {
+      if (renewing || stopping) return;
+      renewing = true;
+      try {
+        const change = await leadership.tick();
+        if (change?.kind === "gained") {
+          // Fresh services, so the chat reads the state the last leader left rather than what it held before.
+          stopLeaderServices();
+          await startLeaderServices();
+          if (rt.env.heartbeatUrl) void pingHeartbeat(rt.env.heartbeatUrl);
+          if (change.from) await rt.notifier.discord(`👑 \`${rt.env.runnerId}\` took over from \`${change.from}\`: triage, chat, the board and the trains run here now`, [], { handoff: false }).catch(() => null);
+        } else if (change) {
+          stopLeaderServices();
+          if (change.kind === "yielded") {
+            await rt.notifier.discord(change.to ? `↪️ \`${rt.env.runnerId}\` handed the lead to \`${change.to}\``
+              : `⏸️ \`${rt.env.runnerId}\` is paused and handed the lead on`, [], { handoff: false }).catch(() => null);
+          }
+        }
+      } catch (error) {
+        console.warn(`[leader] ${(error as Error).message}`);
+      } finally {
+        renewing = false;
+      }
+    };
+    await renew();
+    setInterval(() => void renew(), RENEW_MS).unref();
+  }
+  const role = rt.env.role === "primary" ? "" : rt.env.role === "builder" ? " (builds only)"
+    : leadership?.leading ? " (leads)" : ` (builds; ${leadership?.leader ? `\`${leadership.leader}\` leads` : "no leader yet"})`;
+  await rt.notifier.discord(rt.env.role === "primary" ? "🟢 isobot runner started" : `🟢 isobot runner \`${rt.env.runnerId}\` started${role}`, [], { handoff: false });
   while (!stopping) {
     const manuallyPaused = existsSync(pausedFile(rt.env));
     if (!manuallyPaused) {
@@ -555,34 +620,39 @@ async function loop(rt: Runtime): Promise<void> {
         if (!selfUpdate?.pending) rt.pipeline.startQueued();
         await rt.pipeline.followUp();
         await rt.pipeline.cleanUp();
-        // Everything below keeps its place in this runner's SQLite, so only the primary runs it.
-        if (primary) {
-          await rt.train.tick();
-          await rt.production.tick();
+        // Everything below runs once across all runners: on the primary, or the auto runner that leads.
+        if (leads()) {
+          trainTicking = true;
+          try {
+            await rt.train.tick();
+            await rt.production.tick();
+          } finally {
+            trainTicking = false;
+          }
         }
         lastCycleError = null;
-        if (primary && !contentRunning && Date.now() - lastContent > CONTENT_EVERY_MS && contentRepos(rt.config).length) {
+        if (leads() && !contentRunning && Date.now() - lastContent > CONTENT_EVERY_MS && contentRepos(rt.config).length) {
           lastContent = Date.now();
           contentRunning = true;
           // Research takes minutes: like triage it runs beside the cycle, one pass at a time.
           void rt.content.tick().catch(error => console.warn(`[content] failed: ${(error as Error).message}`))
             .finally(() => { contentRunning = false; });
         }
-        if (primary && !asoRunning && Date.now() - lastAso > ASO_EVERY_MS && asoApps(rt.config).length) {
+        if (leads() && !asoRunning && Date.now() - lastAso > ASO_EVERY_MS && asoApps(rt.config).length) {
           lastAso = Date.now();
           asoRunning = true;
           // Reading boards and research take minutes: beside the cycle, one pass at a time.
           void rt.aso.tick().catch(error => console.warn(`[aso] failed: ${(error as Error).message}`))
             .finally(() => { asoRunning = false; });
         }
-        if (primary && !asoPolling && Date.now() - lastAsoPoll > ASO_POLL_MS && asoApps(rt.config).length) {
+        if (leads() && !asoPolling && Date.now() - lastAsoPoll > ASO_POLL_MS && asoApps(rt.config).length) {
           lastAsoPoll = Date.now();
           asoPolling = true;
           // Owners' ✅ on proposals, and approved listings waiting for an editable version.
           void rt.aso.poll().catch(error => console.warn(`[aso] poll failed: ${(error as Error).message}`))
             .finally(() => { asoPolling = false; });
         }
-        if (primary && !analyticsRunning && Date.now() - lastAnalytics > ANALYTICS_EVERY_MS && (rt.analytics.apps().length || rt.playAnalytics)) {
+        if (leads() && !analyticsRunning && Date.now() - lastAnalytics > ANALYTICS_EVERY_MS && (rt.analytics.apps().length || rt.playAnalytics)) {
           lastAnalytics = Date.now();
           analyticsRunning = true;
           // Downloads take a while on a first backfill: beside the cycle, one pass at a time.
@@ -593,7 +663,7 @@ async function loop(rt: Runtime): Promise<void> {
             if (rt.playAnalytics) await rt.playAnalytics.tick().catch(error => console.warn(`[play-analytics] failed: ${(error as Error).message}`));
           })().finally(() => { analyticsRunning = false; });
         }
-        if (primary && !crashesRunning && Date.now() - lastCrashes > CRASHES_EVERY_MS && rt.crashes.enabled()) {
+        if (leads() && !crashesRunning && Date.now() - lastCrashes > CRASHES_EVERY_MS && rt.crashes.enabled()) {
           lastCrashes = Date.now();
           crashesRunning = true;
           // Beside the cycle, one pass at a time; a source's failure is kept for the check-in, not thrown.
@@ -601,7 +671,7 @@ async function loop(rt: Runtime): Promise<void> {
             .catch(error => console.warn(`[crashes] failed: ${(error as Error).message}`))
             .finally(() => { crashesRunning = false; });
         }
-        if (primary && !artifactsRunning && Date.now() - lastArtifactsTry > ARTIFACTS_RETRY_MS && rt.artifacts.enabled()) {
+        if (leads() && !artifactsRunning && Date.now() - lastArtifactsTry > ARTIFACTS_RETRY_MS && rt.artifacts.enabled()) {
           lastArtifactsTry = Date.now();
           artifactsRunning = true;
           // Lists at most every artifacts.everyHours itself; a failure is logged and tried again half an hour later.
@@ -609,14 +679,14 @@ async function loop(rt: Runtime): Promise<void> {
             .catch(error => console.warn(`[artifacts] failed: ${(error as Error).message}`))
             .finally(() => { artifactsRunning = false; });
         }
-        if (primary && !rolloutRunning && Date.now() - lastRollout > CRASHES_EVERY_MS && rt.playRollout?.enabled()) {
+        if (leads() && !rolloutRunning && Date.now() - lastRollout > CRASHES_EVERY_MS && rt.playRollout?.enabled()) {
           lastRollout = Date.now();
           rolloutRunning = true;
           // Reads Play at most every 3 hours itself; a failure is posted once and retried, never thrown.
           void rt.playRollout.tick().catch(error => console.warn(`[rollout] failed: ${(error as Error).message}`))
             .finally(() => { rolloutRunning = false; });
         }
-        if (primary && !prSweepRunning && Date.now() - lastPrPoll > PR_SWEEP_POLL_MS && rt.prSweep.enabled()) {
+        if (leads() && !prSweepRunning && Date.now() - lastPrPoll > PR_SWEEP_POLL_MS && rt.prSweep.enabled()) {
           lastPrPoll = Date.now();
           prSweepRunning = true;
           // A few GraphQL reads per repo; beside the cycle, one pass at a time. It never merges or pushes.
@@ -625,7 +695,7 @@ async function loop(rt: Runtime): Promise<void> {
           }).catch(error => console.warn(`[pr-sweep] failed: ${(error as Error).message}`))
             .finally(() => { prSweepRunning = false; });
         }
-        if (primary && !triageRunning && Date.now() - lastTriage > rt.config.triageMinutes * 60_000) {
+        if (leads() && !triageRunning && Date.now() - lastTriage > rt.config.triageMinutes * 60_000) {
           lastTriage = Date.now();
           triageRunning = true;
           // Triage runs in the background so a slow pass never delays builds; one pass at a time.
@@ -668,7 +738,7 @@ async function loop(rt: Runtime): Promise<void> {
     } catch (error) {
       console.warn("[runner] heartbeat failed:", (error as Error).message);
     }
-    board?.tick();
+    if (leads()) board?.tick();
     await sleep(rt.config.pollSeconds * 1000);
   }
 }
@@ -754,6 +824,9 @@ async function startChat(rt: Runtime, live: () => LiveStatus): Promise<StaffChat
     model: claudeChatModel({ bin: rt.env.claudeBin, config, chatDir, settingsJson: JSON.stringify(builderSettings({}, { secrets: rt.secrets, noWrite: [] })) }),
     tools: chatToolDeps(rt, live, chatDir, channel.guild_id ? { api: discord, guildId: channel.guild_id } : undefined),
   });
+  // On an auto runner the chat stops and starts again with the lead: its tool server goes with it.
+  const stopChat = chat.stop.bind(chat);
+  chat.stop = () => { stopChat(); server.stop(); };
   void chat.run();
   console.log(`[chat] listening for ${allowed.size} user(s): answers in channel ${channelId}, mentions from anywhere in the server`);
   return chat;
@@ -781,6 +854,8 @@ async function startBoardChat(rt: Runtime, live: () => LiveStatus): Promise<Boar
     model: claudeChatModel({ bin: rt.env.claudeBin, config, chatDir, rules: BOARD_RULES, settingsJson: JSON.stringify(builderSettings({}, { secrets: rt.secrets, noWrite: [] })) }),
     tools: chatToolDeps(rt, live, chatDir, discord),
   });
+  const stopChat = chat.stop.bind(chat);
+  chat.stop = () => { stopChat(); server.stop(); };
   chat.start();
   return chat;
 }
@@ -833,7 +908,9 @@ async function doctor(rt: Runtime): Promise<boolean> {
     console.log(`${good ? "✅" : "❌"} ${label}${detail ? ` — ${detail}` : ""}`);
   };
   report(true, `Runner \`${rt.env.runnerId}\``, rt.env.role === "builder"
-    ? "builder: builds approved issues only (no triage, chat, board, handoff, trains or store reads)" : "primary: every duty");
+    ? "builder: builds approved issues only (no triage, chat, board, handoff, trains or store reads)"
+    : rt.env.role === "auto" ? `auto: builds, and every duty while it holds the watchdog's lease${rt.env.leaderPreferred ? " (preferred: takes the lead back when it's up)" : ""}`
+    : "primary: every duty");
   const auth = await run(rt.env.claudeBin, ["auth", "status"], { cwd: rt.env.home, timeoutMs: 30_000 }).catch(error => ({ code: 1, stdout: String(error), stderr: "", timedOut: false }));
   const method = /"authMethod":\s*"([^"]+)"/.exec(auth.stdout)?.[1];
   report(auth.code === 0 && /"loggedIn":\s*true/.test(auth.stdout), "Claude Code signed in", method ? `auth method ${method}` : auth.stdout.slice(0, 200));
@@ -925,6 +1002,10 @@ const HELP = `isobot runner
   status              Show recent jobs
   setup               Create the isobot labels in every configured repository
   doctor              Check Claude Code, GitHub, Pi and optional sources
+  shared [status | seed]
+                      auto role: who leads and which runners the watchdog has seen (status, the default), or
+                      load the watchdog's empty shared copy from this Mac's state (seed; once, on the Mac that
+                      has been primary)
   pause | resume      Stop or restart new work (running builds finish)
   checks <repo>       Run a repo's configured checks on its default branch, sandboxed like a build
   say <repo#n> <text> Send isobot a note about a job, like replying in its Discord thread
@@ -998,6 +1079,22 @@ async function main(): Promise<void> {
       }
       const pending = followUpLines(rt.store.followUps());
       if (pending.length) console.log(`\nFollow-ups:\n${pending.map(line => `  ${line}`).join("\n")}`);
+      return;
+    }
+    case "shared": {
+      if (!rt.env.heartbeatUrl) throw new Error("needs ISOBOT_HEARTBEAT_URL: the shared state lives in the watchdog");
+      const coordinator = httpCoordinator(rt.env.heartbeatUrl);
+      if (process.argv[3] === "seed") {
+        const rows = await Leadership.seed(coordinator, rt.store, rt.env.runnerId);
+        return console.log(`seeded the shared copy with ${rows} row(s) from ${rt.env.runnerId}`);
+      }
+      const status = await coordinator.status();
+      const lease = status.lease && status.lease.until > Date.now() ? status.lease : null;
+      console.log(lease ? `leader: ${lease.holder} (epoch ${lease.epoch}${lease.yieldTo ? `, handing over to ${lease.yieldTo}` : ""})` : "leader: none");
+      console.log(`shared state: version ${status.version}${status.version === 0 ? " (empty: run `shared seed` on the Mac that has been primary)" : ""}`);
+      for (const [id, seen] of Object.entries(status.runners)) {
+        console.log(`  ${id.padEnd(12)} last seen ${Math.round((Date.now() - seen.at) / 1000)}s ago${seen.preferred ? ", preferred" : ""}${seen.leading ? ", leading" : ""}`);
+      }
       return;
     }
     case "setup":

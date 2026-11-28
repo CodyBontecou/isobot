@@ -135,6 +135,11 @@ export class StaffChat {
     this.stopped = true;
   }
 
+  /** Whether a turn is running (a leader hands over only between them). */
+  busy(): boolean {
+    return this.turns.size > 0;
+  }
+
   /** Waits for running turns (tests). */
   async idle(): Promise<void> {
     while (this.turns.size) await Promise.all([...this.turns]);

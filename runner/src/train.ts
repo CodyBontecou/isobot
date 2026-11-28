@@ -74,6 +74,11 @@ export interface TrainDeps {
   now?: () => Date;
   /** True once the runner is stopping: a ship killed by shutdown stays pending and starts over next time. */
   stopping?: () => boolean;
+  /**
+   * This runner's name. With several runners sharing the lead (leader.ts), a ship records who runs it, and
+   * another runner that takes the lead doesn't start the same release over while that record is fresh.
+   */
+  runnerId?: string;
   /** Writes user-facing release notes; without it (or when it fails) they come from the job titles. */
   notes?(input: ReleaseNotesInput): Promise<ReleaseNotes>;
   /** A merged PR's description: context for the notes, and where its captures are linked. */
@@ -109,6 +114,8 @@ const LAUNCH_MAX_FAILURES = 5;
 const LAUNCH_MAX_BYTES = 24 * 1024 * 1024;
 
 const SHIPPABLE = ["merged", "released"] as const;
+/** How long a ship's record of who runs it holds off other runners (archive, upload and submit take far less). */
+const SHIP_CLAIM_MS = 6 * 60 * 60_000;
 
 /** A TestFlight build the train uploaded, kept until a weekly production release includes it (production.ts). */
 export interface BetaBuild {
@@ -200,6 +207,11 @@ export class ReleaseTrain {
 
   private now(): Date {
     return this.deps.now?.() ?? new Date();
+  }
+
+  /** Whether a ship is under way (a leader hands over only when none is). */
+  shipping(): boolean {
+    return this.running.size > 0;
   }
 
   /** One pass over every repo with a train. Ships run in the background; the returned promises are for tests. */
@@ -295,9 +307,36 @@ export class ReleaseTrain {
     } else if (now.getTime() - Date.parse(pending.announcedAt) < train.holdMinutes * 60_000) {
       return null;
     }
+    const shipping = this.shippingBy(owner, repo, now);
+    if (shipping && shipping !== this.deps.runnerId) {
+      console.log(`[train] ${owner}/${repo}: ${shipping} is shipping ${pending.version}; not starting it again here`);
+      return null;
+    }
     const status = await this.deps.appStatus(train.appId, train.platform ?? "IOS");
     if (await this.busy(owner, repo, train, status)) return null;
-    return () => this.ship(owner, repo, train, pending);
+    return async () => {
+      const key = this.key(owner, repo, "shipping");
+      store.setCursor(key, JSON.stringify({ runner: this.deps.runnerId ?? null, at: this.now().toISOString() }));
+      try {
+        await this.ship(owner, repo, train, pending);
+      } finally {
+        store.deleteCursor(key);
+      }
+    };
+  }
+
+  /**
+   * Which runner is shipping this repo's release, if another one may still be at it: a ship takes well under
+   * SHIP_CLAIM_MS, so an older record is one whose runner died mid-ship, and the release starts over.
+   */
+  private shippingBy(owner: string, repo: string, now: Date): string | null {
+    try {
+      const raw = this.deps.store.cursor(this.key(owner, repo, "shipping"));
+      const claim = raw ? JSON.parse(raw) as { runner: string | null; at: string } : null;
+      return claim?.runner && now.getTime() - Date.parse(claim.at) < SHIP_CLAIM_MS ? claim.runner : null;
+    } catch {
+      return null;
+    }
   }
 
   /** User-facing notes for a version, falling back to the job titles. */
