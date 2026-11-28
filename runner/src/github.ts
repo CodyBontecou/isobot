@@ -59,6 +59,9 @@ export const LABEL_DESCRIPTIONS: Record<keyof Labels, string> = {
 };
 
 /** The subset of GitHub the runner needs; an interface so tests can fake it. */
+/** A GitHub secret-scanning alert, without the secret. */
+export interface SecretAlert { number: number; type: string; url: string; publiclyLeaked: boolean; createdAt: string; locations: string[] }
+
 export interface GitHubApi {
   /** Login of the token's owner: the identity isobot acts as, and a trusted author. */
   viewer(): Promise<string>;
@@ -69,6 +72,8 @@ export interface GitHubApi {
   /** Who most recently added `label` to the issue, or null if no such event exists. */
   labeledBy(owner: string, repo: string, number: number, label: string): Promise<string | null>;
   isPublic(owner: string, repo: string): Promise<boolean>;
+  /** Open secret-scanning alerts (never the secret itself); null when the repository has secret scanning off. */
+  secretScanningAlerts(owner: string, repo: string): Promise<SecretAlert[] | null>;
   issuesWithLabel(owner: string, repo: string, label: string): Promise<Issue[]>;
   /** Open pull requests with this label, read as issues (title, body, labels, author). */
   pullsWithLabel(owner: string, repo: string, label: string): Promise<Issue[]>;
@@ -133,6 +138,25 @@ export class GitHub implements GitHubApi {
     const events = await this.octokit.paginate(this.octokit.issues.listEvents, { owner, repo, issue_number: number, per_page: 100 });
     const match = events.filter(e => e.event === "labeled" && (e as { label?: { name?: string } }).label?.name?.toLowerCase() === label.toLowerCase()).at(-1);
     return match?.actor?.login ?? null;
+  }
+
+  async secretScanningAlerts(owner: string, repo: string): Promise<SecretAlert[] | null> {
+    let data: { number: number; secret_type_display_name?: string; secret_type?: string; html_url: string; publicly_leaked?: boolean; created_at: string }[];
+    try {
+      ({ data } = await this.octokit.request("GET /repos/{owner}/{repo}/secret-scanning/alerts", { owner, repo, state: "open", per_page: 100, hide_secret: true }) as { data: typeof data });
+    } catch (error) {
+      if ((error as { status?: number }).status === 404) return null;
+      throw error;
+    }
+    return Promise.all(data.map(async a => {
+      const { data: locations } = await this.octokit.request("GET /repos/{owner}/{repo}/secret-scanning/alerts/{alert_number}/locations", { owner, repo, alert_number: a.number, per_page: 3 })
+        .catch(() => ({ data: [] })) as { data: { details?: { path?: string; start_line?: number } }[] };
+      return {
+        number: a.number, type: a.secret_type_display_name ?? a.secret_type ?? "secret", url: a.html_url,
+        publiclyLeaked: Boolean(a.publicly_leaked), createdAt: a.created_at,
+        locations: locations.map(l => l.details?.path ? `${l.details.path}${l.details.start_line ? `:${l.details.start_line}` : ""}` : "").filter(Boolean),
+      };
+    }));
   }
 
   async isPublic(owner: string, repo: string): Promise<boolean> {

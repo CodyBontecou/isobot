@@ -226,6 +226,30 @@ export interface CrashLimits {
   autoApprove?: boolean;
 }
 
+export interface SecurityLimits {
+  /** True: security issues are approved as they're opened (isobot:ready + isobot:auto). Default false (isobot:proposed). */
+  autoApprove?: boolean;
+  /** New GitHub issues per repository and night, most severe first; the rest wait for the next night. Default 3. */
+  issuesPerPass?: number;
+  /** False: report in the check-in only, never open issues. Default true. */
+  fileIssues?: boolean;
+  /** The agent's findings below this severity aren't filed. Default "medium". */
+  minSeverity?: "critical" | "high" | "medium";
+  /** The agent's findings below this confidence aren't filed. Default 0.7. */
+  minConfidence?: number;
+  /** A lockfile gets an issue when an advisory reaches this severity. Default "high". */
+  dependencySeverity?: "critical" | "high" | "medium";
+  /** Days between full reviews of a repository (one full review a night across all of them). Default 7. */
+  fullEveryDays?: number;
+  /** Local hours [from, to) the audit runs in. Default [1, 7]. */
+  hours?: [number, number];
+  /** Repositories to audit, owner/repo. Default every configured repository isobot builds. */
+  repos?: string[];
+  /** Scanner binaries. Defaults "osv-scanner" and "gitleaks" (on PATH). */
+  osvScanner?: string;
+  gitleaks?: string;
+}
+
 export interface PrSweepConfig {
   /** False turns the sweep off. Default true. */
   enabled?: boolean;
@@ -378,6 +402,8 @@ export interface RunnerConfig {
   analytics?: AnalyticsLimits;
   /** The crash audit (crashes.ts): App Store, TestFlight and Google Play crashes. Off without this block. */
   crashes?: CrashLimits;
+  /** The nightly security audit (security.ts): dependencies, secrets and an agent's code review. Off without this block. */
+  security?: SecurityLimits;
   /** The Play rollout train (playRollout.ts): staged production rollouts move forward on their own. Off without this block. */
   playRollout?: PlayRolloutLimits;
   /** The pricing train (pricing.ts); per-app settings live in each repo's `pricing`. Off without this block. */
@@ -575,6 +601,19 @@ export function validateConfig(config: RunnerConfig): void {
     if (c.issuesPerPass !== undefined && !(Number.isInteger(c.issuesPerPass) && c.issuesPerPass >= 0 && c.issuesPerPass <= 20)) fail("crashes.issuesPerPass must be 0-20");
     if (c.fileIssues !== undefined && typeof c.fileIssues !== "boolean") fail("crashes.fileIssues must be true or false");
     if (c.autoApprove !== undefined && typeof c.autoApprove !== "boolean") fail("crashes.autoApprove must be true or false");
+  }
+  if (config.security) {
+    const c = config.security;
+    const sev = ["critical", "high", "medium"];
+    if (c.autoApprove !== undefined && typeof c.autoApprove !== "boolean") fail("security.autoApprove must be true or false");
+    if (c.fileIssues !== undefined && typeof c.fileIssues !== "boolean") fail("security.fileIssues must be true or false");
+    if (c.issuesPerPass !== undefined && !(Number.isInteger(c.issuesPerPass) && c.issuesPerPass >= 0 && c.issuesPerPass <= 20)) fail("security.issuesPerPass must be 0-20");
+    if (c.minSeverity !== undefined && !sev.includes(c.minSeverity)) fail("security.minSeverity must be critical, high or medium");
+    if (c.dependencySeverity !== undefined && !sev.includes(c.dependencySeverity)) fail("security.dependencySeverity must be critical, high or medium");
+    if (c.minConfidence !== undefined && !(typeof c.minConfidence === "number" && c.minConfidence >= 0 && c.minConfidence <= 1)) fail("security.minConfidence must be 0-1");
+    if (c.fullEveryDays !== undefined && !(Number.isInteger(c.fullEveryDays) && c.fullEveryDays >= 1 && c.fullEveryDays <= 90)) fail("security.fullEveryDays must be 1-90");
+    if (c.hours !== undefined && !(Array.isArray(c.hours) && c.hours.length === 2 && c.hours.every(h => Number.isInteger(h) && h >= 0 && h <= 24))) fail("security.hours must be [from, to], hours 0-24");
+    for (const r of c.repos ?? []) if (!config.repos[r]) fail(`security.repos: ${r} isn't in repos`);
   }
   if (config.prSweep) {
     const s = config.prSweep;

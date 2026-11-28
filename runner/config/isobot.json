@@ -45,6 +45,7 @@
   },
   "analytics": {},
   "crashes": { "autoApprove": true },
+  "security": { "autoApprove": true },
   "playRollout": {},
   "pricing": {},
   "labels": {

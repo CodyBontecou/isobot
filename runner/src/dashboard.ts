@@ -1,6 +1,7 @@
 import { describeEvent } from "./events.js";
 import { latestSweep, type SweepResult } from "./prSweep.js";
 import { CRASH_MARKER } from "./crashes.js";
+import { SECURITY_MARKER } from "./security.js";
 import { CHAT_MARKER } from "./notes.js";
 import type { BoardMetrics } from "./metrics.js";
 import type { BoardAction, BoardActionResult } from "./boardActions.js";
@@ -48,7 +49,7 @@ export interface BoardItem {
   attention?: { status: string; reason: string; action: string | null; at: string };
 }
 
-export type SourceKind = "github" | "discord" | "email" | "vox" | "appstore" | "chat" | "content" | "release" | "crash";
+export type SourceKind = "github" | "discord" | "email" | "vox" | "appstore" | "chat" | "content" | "release" | "crash" | "security";
 
 export interface ItemSource {
   kind: SourceKind;
@@ -73,6 +74,7 @@ export function itemSource(body: string | null | undefined, labels: string[] = [
   }
   if (labels.includes("from-vox")) return { kind: "vox" };
   if (text.includes(CRASH_MARKER)) return { kind: "crash" };
+  if (text.includes(SECURITY_MARKER)) return { kind: "security" };
   if (text.includes(CHAT_MARKER)) return { kind: "chat" };
   if (text.includes("Researched by isobot's content train")) return { kind: "content" };
   if (isReleaseIssue(text)) return { kind: "release" };
