@@ -55,6 +55,10 @@ test("environment requires a GitHub token and HTTPS Pi URL", () => {
   assert.equal(loadEnvironment({ GITHUB_TOKEN: "t" }).heartbeatUrl, undefined);
   assert.equal(loadEnvironment({ GITHUB_TOKEN: "t", ISOBOT_RUNNER_ID: " mac mini " }).runnerId, "mac-mini");
   assert.match(loadEnvironment({ GITHUB_TOKEN: "t" }).runnerId, /^[\w.-]+$/);
+  assert.equal(loadEnvironment({ GITHUB_TOKEN: "t" }).role, "primary");
+  assert.equal(loadEnvironment({ GITHUB_TOKEN: "t", ISOBOT_RUNNER_ROLE: " Builder " }).role, "builder");
+  assert.equal(loadEnvironment({ GITHUB_TOKEN: "t", ISOBOT_RUNNER_ROLE: "builds" }).role, "builder");
+  assert.throws(() => loadEnvironment({ GITHUB_TOKEN: "t", ISOBOT_RUNNER_ROLE: "worker" }), /ISOBOT_RUNNER_ROLE/);
   const env = loadEnvironment({ GITHUB_TOKEN: "t", ISOBOT_PI_URL: "https://pi.isolated.tech/", ISOBOT_HOME: "/tmp/x" });
   assert.equal(env.piUrl, "https://pi.isolated.tech");
   assert.equal(env.home, "/tmp/x");

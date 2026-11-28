@@ -311,6 +311,39 @@ This matters while moving to the Mac mini, or with a laptop and the mini both ru
 one runner it costs one extra comment read per claim and a comment edit every ~25 minutes per
 long job.
 
+**Only one runner may be the primary.** Leases cover builds, nothing else. Triage, the staff chat
+and the board's agent dock, the 💻 handoff, the board feed, the release and weekly App Store trains,
+the content, ASO, crash and Play rollout trains, the hourly store reads and the PR sweep all keep their
+place in the runner's own `runner.sqlite` or poll Discord themselves, so a second runner doing them
+would post every digest and answer every chat message twice, and could release twice. Give every
+other runner `ISOBOT_RUNNER_ROLE=builder` in its `runner.env`:
+
+| | primary (default) | builder |
+| --- | --- | --- |
+| Claim and build approved issues, `isobot:land` PRs | ✅ | ✅ |
+| Its own jobs through notes, CI, merge and `release.onMerge` | ✅ | ✅ |
+| Job cards and threads in Discord | ✅ | ✅, no 💻 (that would open Herdr on its machine) |
+| 🧹 cleanup | closes the issue, strips labels, purges its leftovers | purges its own leftovers only |
+| Triage, staff chat, board and its dock, handoff, every train, store reads, PR sweep | ✅ | — |
+| Self-update | ✅ | ✅ |
+| Heartbeat to the watchdog | ✅ | leave `ISOBOT_HEARTBEAT_URL` unset: the watchdog watches one runner, and the primary's pings would hide a dead builder or the other way round |
+
+A builder that dies mid-job leaves its issue on `isobot:building`; once its lease lapses (45 minutes), add
+`isobot:ready` again and whichever runner claims it builds it. `runner doctor` prints the role, and a builder announces itself as ``🟢 isobot runner `mini` started
+(builds only)``. To move the primary from one Mac to another, see
+[Moving the primary](#moving-the-primary): its `runner.sqlite` goes with it, and the old one becomes a
+builder (or stops) before the new one starts.
+
+### Moving the primary
+
+1. On the old primary: `npm run runner -- pause`, wait until `status` shows nothing building
+   and no job `awaiting_ci`, then `runner/launchd/install.sh uninstall`.
+2. Copy `runner.sqlite` (after the runner has stopped, so the `-wal` is folded in) and `runner.env`
+   to the new machine's runner home. Remove `ISOBOT_RUNNER_ROLE` there, or set it to `primary`.
+3. Start the new primary (`runner/launchd/install.sh`), check `status` and `doctor`, and `resume`.
+4. Bring the old machine back as a builder with a fresh `runner.sqlite` (move the old one aside),
+   or leave it stopped.
+
 ## When things go wrong
 
 - **Temporary problems** (network, GitHub outages, Claude overload) put the

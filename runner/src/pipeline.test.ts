@@ -801,6 +801,27 @@ test("🧹 cleanup closes the issue as not planned, strips isobot's labels and p
   assert.match(discord.cards().at(-1)!.description, /🧹 Dismissed and cleaned up/);
 });
 
+test("🧹 on a builder runner drops its own job and leftovers once, and leaves the issue to the primary", async () => {
+  const { github, pipeline, store, repo } = setup();
+  (pipeline as unknown as { deps: { role: string } }).deps.role = "builder";
+  repo.changes = false;
+  github.add(OWNER, NAME, 53, "Built on the mini", ["isobot:ready"]);
+  await cycle(pipeline);
+  github.add(OWNER, NAME, 54, "Built elsewhere", ["isobot:cleanup"]);
+  await github.addLabels(OWNER, NAME, 53, ["isobot:cleanup"]);
+  const comments = github.commentsFor(OWNER, NAME, 53).length;
+
+  await pipeline.cleanUp();
+  await pipeline.cleanUp();
+  assert.equal(github.get(OWNER, NAME, 53).state, "open");
+  assert.ok(github.get(OWNER, NAME, 53).labels.includes("isobot:cleanup"));
+  assert.equal(github.commentsFor(OWNER, NAME, 53).length, comments);
+  assert.equal(repo.calls.filter(c => c === "purge 53").length, 1);
+  assert.ok(!repo.calls.includes("purge 54"));
+  assert.equal(github.commentsFor(OWNER, NAME, 54).length, 0);
+  assert.equal(store.get("codybontecou/time.md#53")!.state, "failed");
+});
+
 test("🧹 from someone else is refused, and a proposal is never claimed while it waits for cleanup", async () => {
   const { github, pipeline, store } = setup();
   github.add(OWNER, NAME, 51, "Sneaky", ["isobot:cleanup"]);

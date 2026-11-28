@@ -153,7 +153,7 @@ function runtime(): Runtime {
     shimDir,
   });
   const repoFor = (owner: string, repo: string) => new Repo(env.home, owner, repo, env.githubToken);
-  const pipeline = new Pipeline({ config, env, store, github, builder, notifier, repo: repoFor, checks, devices, runnerId: env.runnerId, cloud: cloudExecutor(config, env, repoFor) });
+  const pipeline = new Pipeline({ config, env, store, github, builder, notifier, repo: repoFor, checks, devices, runnerId: env.runnerId, role: env.role, cloud: cloudExecutor(config, env, repoFor) });
   const labels = Object.values(config.labels);
   const sources: Source[] = [new GitHubSource(github, configuredRepos(config), labels)];
   if (env.piUrl && env.piToken) sources.push(new DiscordSource(env.piUrl, env.piToken, lowerKeys(config.discordCategories)));
@@ -502,7 +502,9 @@ async function loop(rt: Runtime): Promise<void> {
     }
     return items;
   };
-  const board = rt.env.board ? new Dashboard({
+  // Only the primary feeds the board: two runners would overwrite each other's snapshot.
+  const primary = rt.env.role === "primary";
+  const board = rt.env.board && primary ? new Dashboard({
     url: rt.env.board.url, token: rt.env.board.token, runnerId: rt.env.runnerId, store: rt.store, github: rt.github,
     repos: () => Object.keys(rt.config.repos).map(name => {
       const policy = policyFor(rt.config, name);
@@ -524,8 +526,8 @@ async function loop(rt: Runtime): Promise<void> {
     root: LIVE_ROOT, config: rt.config.selfUpdate, notify: text => rt.notifier.discord(text, [], { handoff: false }),
   }) : null;
   let selfUpdating = false;
-  console.log(`[runner] started: ${configuredRepos(rt.config).map(r => `${r.owner}/${r.repo}`).join(", ")}; sources: ${rt.sources.map(s => s.name).join(", ")}`);
-  await rt.notifier.discord("🟢 isobot runner started", [], { handoff: false });
+  console.log(`[runner] started as ${rt.env.runnerId} (${rt.env.role}): ${configuredRepos(rt.config).map(r => `${r.owner}/${r.repo}`).join(", ")}; sources: ${rt.sources.map(s => s.name).join(", ")}`);
+  await rt.notifier.discord(primary ? "🟢 isobot runner started" : `🟢 isobot runner \`${rt.env.runnerId}\` started (builds only)`, [], { handoff: false });
   while (!stopping) {
     const manuallyPaused = existsSync(pausedFile(rt.env));
     if (!manuallyPaused) {
@@ -536,31 +538,34 @@ async function loop(rt: Runtime): Promise<void> {
         if (!selfUpdate?.pending) rt.pipeline.startQueued();
         await rt.pipeline.followUp();
         await rt.pipeline.cleanUp();
-        await rt.train.tick();
-        await rt.production.tick();
+        // Everything below keeps its place in this runner's SQLite, so only the primary runs it.
+        if (primary) {
+          await rt.train.tick();
+          await rt.production.tick();
+        }
         lastCycleError = null;
-        if (!contentRunning && Date.now() - lastContent > CONTENT_EVERY_MS && contentRepos(rt.config).length) {
+        if (primary && !contentRunning && Date.now() - lastContent > CONTENT_EVERY_MS && contentRepos(rt.config).length) {
           lastContent = Date.now();
           contentRunning = true;
           // Research takes minutes: like triage it runs beside the cycle, one pass at a time.
           void rt.content.tick().catch(error => console.warn(`[content] failed: ${(error as Error).message}`))
             .finally(() => { contentRunning = false; });
         }
-        if (!asoRunning && Date.now() - lastAso > ASO_EVERY_MS && asoApps(rt.config).length) {
+        if (primary && !asoRunning && Date.now() - lastAso > ASO_EVERY_MS && asoApps(rt.config).length) {
           lastAso = Date.now();
           asoRunning = true;
           // Reading boards and research take minutes: beside the cycle, one pass at a time.
           void rt.aso.tick().catch(error => console.warn(`[aso] failed: ${(error as Error).message}`))
             .finally(() => { asoRunning = false; });
         }
-        if (!asoPolling && Date.now() - lastAsoPoll > ASO_POLL_MS && asoApps(rt.config).length) {
+        if (primary && !asoPolling && Date.now() - lastAsoPoll > ASO_POLL_MS && asoApps(rt.config).length) {
           lastAsoPoll = Date.now();
           asoPolling = true;
           // Owners' ✅ on proposals, and approved listings waiting for an editable version.
           void rt.aso.poll().catch(error => console.warn(`[aso] poll failed: ${(error as Error).message}`))
             .finally(() => { asoPolling = false; });
         }
-        if (!analyticsRunning && Date.now() - lastAnalytics > ANALYTICS_EVERY_MS && (rt.analytics.apps().length || rt.playAnalytics)) {
+        if (primary && !analyticsRunning && Date.now() - lastAnalytics > ANALYTICS_EVERY_MS && (rt.analytics.apps().length || rt.playAnalytics)) {
           lastAnalytics = Date.now();
           analyticsRunning = true;
           // Downloads take a while on a first backfill: beside the cycle, one pass at a time.
@@ -571,7 +576,7 @@ async function loop(rt: Runtime): Promise<void> {
             if (rt.playAnalytics) await rt.playAnalytics.tick().catch(error => console.warn(`[play-analytics] failed: ${(error as Error).message}`));
           })().finally(() => { analyticsRunning = false; });
         }
-        if (!crashesRunning && Date.now() - lastCrashes > CRASHES_EVERY_MS && rt.crashes.enabled()) {
+        if (primary && !crashesRunning && Date.now() - lastCrashes > CRASHES_EVERY_MS && rt.crashes.enabled()) {
           lastCrashes = Date.now();
           crashesRunning = true;
           // Beside the cycle, one pass at a time; a source's failure is kept for the check-in, not thrown.
@@ -579,14 +584,14 @@ async function loop(rt: Runtime): Promise<void> {
             .catch(error => console.warn(`[crashes] failed: ${(error as Error).message}`))
             .finally(() => { crashesRunning = false; });
         }
-        if (!rolloutRunning && Date.now() - lastRollout > CRASHES_EVERY_MS && rt.playRollout?.enabled()) {
+        if (primary && !rolloutRunning && Date.now() - lastRollout > CRASHES_EVERY_MS && rt.playRollout?.enabled()) {
           lastRollout = Date.now();
           rolloutRunning = true;
           // Reads Play at most every 3 hours itself; a failure is posted once and retried, never thrown.
           void rt.playRollout.tick().catch(error => console.warn(`[rollout] failed: ${(error as Error).message}`))
             .finally(() => { rolloutRunning = false; });
         }
-        if (!prSweepRunning && Date.now() - lastPrPoll > PR_SWEEP_POLL_MS && rt.prSweep.enabled()) {
+        if (primary && !prSweepRunning && Date.now() - lastPrPoll > PR_SWEEP_POLL_MS && rt.prSweep.enabled()) {
           lastPrPoll = Date.now();
           prSweepRunning = true;
           // A few GraphQL reads per repo; beside the cycle, one pass at a time. It never merges or pushes.
@@ -595,7 +600,7 @@ async function loop(rt: Runtime): Promise<void> {
           }).catch(error => console.warn(`[pr-sweep] failed: ${(error as Error).message}`))
             .finally(() => { prSweepRunning = false; });
         }
-        if (!triageRunning && Date.now() - lastTriage > rt.config.triageMinutes * 60_000) {
+        if (primary && !triageRunning && Date.now() - lastTriage > rt.config.triageMinutes * 60_000) {
           lastTriage = Date.now();
           triageRunning = true;
           // Triage runs in the background so a slow pass never delays builds; one pass at a time.
@@ -645,7 +650,8 @@ async function loop(rt: Runtime): Promise<void> {
 
 /** Herdr handoff: needs the bot (to add and read 💻) and the Herdr CLI; config can switch it off. */
 function handoffEnabled(config: RunnerConfig, env: Environment): boolean {
-  if (!env.discordBot || config.handoff?.enabled === false) return false;
+  // A builder's 💻 would open a tab in the Herdr on its own machine, not the one you're at.
+  if (env.role === "builder" || !env.discordBot || config.handoff?.enabled === false) return false;
   return Boolean(onPath(config.handoff?.herdrBin ?? "herdr"));
 }
 
@@ -705,7 +711,7 @@ function chatToolDeps(rt: Runtime, live: () => LiveStatus, chatDir: string, disc
 
 /** Starts the staff chat when the bot is configured and chat isn't switched off. */
 async function startChat(rt: Runtime, live: () => LiveStatus): Promise<StaffChat | null> {
-  if (!rt.env.discordBot || rt.config.chat?.enabled === false) return null;
+  if (rt.env.role === "builder" || !rt.env.discordBot || rt.config.chat?.enabled === false) return null;
   const discord = new DiscordApi(rt.env.discordBot.token);
   const channelId = rt.env.chatChannelId ?? rt.env.discordBot.channelId;
   const [me, allowed, channel] = await Promise.all([
@@ -733,7 +739,7 @@ async function startChat(rt: Runtime, live: () => LiveStatus): Promise<StaffChat
  * Discord server's tools (channels, webhooks) when the bot is configured too.
  */
 async function startBoardChat(rt: Runtime, live: () => LiveStatus): Promise<BoardChat | null> {
-  if (!rt.env.board || rt.config.chat?.enabled === false) return null;
+  if (rt.env.role === "builder" || !rt.env.board || rt.config.chat?.enabled === false) return null;
   const chatDir = path.join(rt.env.home, "chat");
   mkdirSync(chatDir, { recursive: true });
   let discord: { api: DiscordApi; guildId: string } | undefined;
@@ -801,6 +807,8 @@ async function doctor(rt: Runtime): Promise<boolean> {
     if (!good) ok = false;
     console.log(`${good ? "✅" : "❌"} ${label}${detail ? ` — ${detail}` : ""}`);
   };
+  report(true, `Runner \`${rt.env.runnerId}\``, rt.env.role === "builder"
+    ? "builder: builds approved issues only (no triage, chat, board, handoff, trains or store reads)" : "primary: every duty");
   const auth = await run(rt.env.claudeBin, ["auth", "status"], { cwd: rt.env.home, timeoutMs: 30_000 }).catch(error => ({ code: 1, stdout: String(error), stderr: "", timedOut: false }));
   const method = /"authMethod":\s*"([^"]+)"/.exec(auth.stdout)?.[1];
   report(auth.code === 0 && /"loggedIn":\s*true/.test(auth.stdout), "Claude Code signed in", method ? `auth method ${method}` : auth.stdout.slice(0, 200));

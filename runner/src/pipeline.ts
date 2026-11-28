@@ -68,6 +68,8 @@ export interface PipelineDeps {
   now?: () => Date;
   /** This runner's name in claim leases, so two runners (e.g. a laptop and the mini) never build one issue twice. */
   runnerId?: string;
+  /** "builder" runners leave issue-wide work (🧹 cleanup's labels, comment and close) to the primary. */
+  role?: "primary" | "builder";
   /** Cloud builds (cloud.ts), for repos and content sites with `executor: "cloudflare"`. */
   cloud?: CloudExecutor;
 }
@@ -212,6 +214,9 @@ export class Pipeline {
   private now(): Date {
     return this.deps.now?.() ?? new Date();
   }
+
+  /** Builder runners: 🧹 jobs already dropped here, while the label waits for the primary. */
+  private readonly cleanedHere = new Set<string>();
 
   private get runnerId(): string {
     return (this.deps.runnerId ?? "runner").replace(/[^\w.-]+/g, "-");
@@ -1254,6 +1259,21 @@ export class Pipeline {
       for (const issue of issues) {
         const id = storeId(owner, repo, issue.number);
         if (this.running.has(id)) continue;
+        if (this.deps.role === "builder") {
+          // The primary closes the issue and strips the labels; a builder only drops a job of its own and its leftovers.
+          const job = store.get(id);
+          if (!job || this.cleanedHere.has(id)) continue;
+          try {
+            if (["queued", "blocked", "building", "awaiting_ci"].includes(job.state)) store.update(id, { state: "stopped" });
+            store.clearFollowUp(id);
+            const removed = await this.deps.repo(owner, repo).purge(issue.number);
+            this.cleanedHere.add(id);
+            console.log(`[cleanup] ${id}: ${removed.length} local item(s) removed; the primary closes the issue`);
+          } catch (error) {
+            console.warn(`[cleanup] ${id}: ${(error as Error).message}`);
+          }
+          continue;
+        }
         try {
           // Closing an issue is the owner's call, like approving one.
           const by = await github.labeledBy(owner, repo, issue.number, this.labels.cleanup);

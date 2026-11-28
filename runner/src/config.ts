@@ -396,6 +396,15 @@ export interface Labels {
   content: string;
 }
 
+export type RunnerRole = "primary" | "builder";
+
+export function runnerRole(value: string | undefined): RunnerRole {
+  const role = value?.trim().toLowerCase() || "primary";
+  if (role === "primary" || role === "all") return "primary";
+  if (role === "builder" || role === "builds") return "builder";
+  throw new Error(`ISOBOT_RUNNER_ROLE must be "primary" or "builder", not "${value}"`);
+}
+
 export interface Environment {
   home: string;
   githubToken: string;
@@ -415,6 +424,12 @@ export interface Environment {
   heartbeatUrl?: string;
   /** This runner's name in claim leases (ISOBOT_RUNNER_ID, else the host name), so two runners never build one issue. */
   runnerId: string;
+  /**
+   * ISOBOT_RUNNER_ROLE. "primary" (the default) does everything. "builder" only claims and builds approved issues
+   * (behind claim leases) and sees its own jobs through CI, merge and release: no triage, staff chat, board, 💻
+   * handoff, trains or store reads, which keep their place in this runner's SQLite and would run twice beside a primary.
+   */
+  role: RunnerRole;
   /** The isobot-sandbox Worker for cloud builds (`executor: "cloudflare"`), from ISOBOT_SANDBOX_URL and ISOBOT_SANDBOX_TOKEN. */
   sandbox?: { url: string; token: string };
   /** The isobot board Worker (bot.isolated.tech), from ISOBOT_BOARD_URL and ISOBOT_BOARD_TOKEN. */
@@ -789,6 +804,7 @@ export function loadEnvironment(env: NodeJS.ProcessEnv = process.env): Environme
     claudeBin: env.ISOBOT_CLAUDE_BIN ?? "claude",
     heartbeatUrl,
     runnerId: (env.ISOBOT_RUNNER_ID?.trim() || hostname().split(".")[0] || "runner").replace(/[^\w.-]+/g, "-"),
+    role: runnerRole(env.ISOBOT_RUNNER_ROLE),
     sandbox: sandboxEnv(env),
     board: boardEnv(env),
   };
