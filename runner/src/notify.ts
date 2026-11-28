@@ -23,6 +23,11 @@ export interface NotifierOptions {
   jobUrl?: string;
   /** Records posts that get a 💻 (Herdr handoff); without it nothing gets one. */
   handoff?: Pick<HandoffWatch, "add">;
+  /**
+   * auto role: whether 💻 works from this runner right now. Only the leader watches for it, and a job's 💻 opens
+   * the session on the Mac that built it, so posts get one only while this runner leads.
+   */
+  handoffActive?: () => boolean;
   fetcher?: typeof fetch;
 }
 
@@ -118,6 +123,11 @@ export class Notifier {
     this.fetcher = options.fetcher ?? fetch;
   }
 
+  /** The 💻 watch, while posts should get a 💻. */
+  private get watch(): Pick<HandoffWatch, "add"> | undefined {
+    return this.options.handoff && (this.options.handoffActive?.() ?? true) ? this.options.handoff : undefined;
+  }
+
   /** Whether job cards and threads are available (bot mode). */
   get threads(): boolean {
     return Boolean(this.options.bot);
@@ -133,8 +143,8 @@ export class Notifier {
       const { channelId } = this.options.bot;
       try {
         const posted = await this.bot("POST", `/channels/${channelId}/messages`, message(content)) as { id: string };
-        if (handoff && this.options.handoff) this.options.handoff.add(channelId, posted.id, { kind: "message" });
-        await this.react(channelId, posted.id, handoff && this.options.handoff ? [...reactions, HANDOFF] : reactions);
+        if (handoff && this.watch) this.watch!.add(channelId, posted.id, { kind: "message" });
+        await this.react(channelId, posted.id, handoff && this.watch ? [...reactions, HANDOFF] : reactions);
         return { channelId, messageId: posted.id };
       } catch (error) {
         warn(error);
@@ -173,8 +183,8 @@ export class Notifier {
   /** A post in a job's thread; with handoff on, it gets a 💻 that opens the job's session. */
   private async threadPost(job: Pick<Job, "id">, threadId: string, post: string): Promise<void> {
     const posted = await this.bot("POST", `/channels/${threadId}/messages`, message(post)) as { id: string } | null;
-    if (posted?.id && this.options.handoff) {
-      this.options.handoff.add(threadId, posted.id, { kind: "job", jobId: job.id });
+    if (posted?.id && this.watch) {
+      this.watch!.add(threadId, posted.id, { kind: "job", jobId: job.id });
       await this.react(threadId, posted.id, [HANDOFF]);
     }
   }
@@ -255,8 +265,8 @@ export class Notifier {
     if (card.messageId && card.channelId) {
       try {
         await this.bot("PATCH", `/channels/${card.channelId}/messages/${card.messageId}`, body);
-        if (this.options.handoff && !card.handoff) {
-          this.options.handoff.add(card.channelId, card.messageId, { kind: "job", jobId: job.id });
+        if (this.watch && !card.handoff) {
+          this.watch!.add(card.channelId, card.messageId, { kind: "job", jobId: job.id });
           await this.react(card.channelId, card.messageId, [HANDOFF]);
           card.handoff = true;
         }
@@ -280,14 +290,14 @@ export class Notifier {
       `Following ${card.issueUrl}\nReply here to talk to isobot about this job: your replies go to the builder ` +
       `(during a build, or as a revision of an open PR). Comments on the issue and \`npm run runner -- say\` work the same way.\n` +
       `React on the card: ${CONTROLS.stop} stop (un-click to continue) · ${CONTROLS.continue} build again after a failure or stop · ${CONTROLS.cleanup} dismiss and clean up` +
-      `${this.options.handoff ? ` · ${HANDOFF} continue the builder's session in a Herdr tab on the Mac` : ""}.`,
+      `${this.watch ? ` · ${HANDOFF} continue the builder's session in a Herdr tab on the Mac` : ""}.`,
     ));
-    if (this.options.handoff) {
-      this.options.handoff.add(channelId, created.id, { kind: "job", jobId: job.id });
+    if (this.watch) {
+      this.watch!.add(channelId, created.id, { kind: "job", jobId: job.id });
       card.handoff = true;
       this.save(job.id, card);
     }
-    await this.react(channelId, created.id, this.options.handoff ? [...CARD_CONTROLS, HANDOFF] : CARD_CONTROLS);
+    await this.react(channelId, created.id, this.watch ? [...CARD_CONTROLS, HANDOFF] : CARD_CONTROLS);
   }
 
   /** Adds the bot's reactions in order, so they show up as buttons. A failed one is only logged. */

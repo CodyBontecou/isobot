@@ -11,7 +11,7 @@ import { compareVersions, isBusy, nextVersion, publishCommand, ReleaseTrain, tim
 const REPO = "codybontecou/vox.md";
 const [OWNER, NAME] = REPO.split("/");
 
-function setup(status: AppStatus = { version: "3.0", state: "READY_FOR_DISTRIBUTION" }) {
+function setup(status: AppStatus = { version: "3.0", state: "READY_FOR_DISTRIBUTION" }, runnerId?: string) {
   const config: RunnerConfig = testConfig();
   config.repos = {
     [REPO]: { ownerAutonomy: "merge", checks: ["make test"], train: { appId: "6758967337", project: "Voxboard.xcodeproj", scheme: "Voxboard", everyHours: 24, holdMinutes: 60 } },
@@ -29,7 +29,7 @@ function setup(status: AppStatus = { version: "3.0", state: "READY_FOR_DISTRIBUT
     return new Response(null, { status: 204 });
   }) as typeof fetch });
   const train = new ReleaseTrain({
-    config, store, github, notifier,
+    config, store, github, notifier, runnerId,
     now: () => now,
     repo: () => ({
       sync: async () => "abc123def4567890",
@@ -136,6 +136,33 @@ test("later trains ship on their own after the hold, at most once per interval",
   t.advance(24 * 60);
   await t.run();
   assert.ok([...t.github.issues.values()].some(i => i.title === "Ship 3.0.2"));
+});
+
+test("a release another runner is shipping isn't started again by the runner that took the lead", async () => {
+  const t = setup(undefined, "mini");
+  t.store.setCursor(`train:${REPO}:confirmed`.toLowerCase(), "1");
+  t.merged(90, "Remote-only routes");
+  await t.run();
+  t.advance(61);
+  const key = `train:${REPO}:shipping`.toLowerCase();
+  t.store.setCursor(key, JSON.stringify({ runner: "laptop", at: new Date("2026-11-16T13:00:00Z").toISOString() }));
+  await t.run();
+  assert.equal(t.commands.length, 0, "the laptop may still be uploading it");
+  t.advance(6 * 60);
+  await t.run();
+  assert.equal(t.commands.length, 1, "a record that old is from a runner that died mid-ship: start over");
+  assert.equal(t.store.cursor(key), null, "the ship's own record is gone once it ends");
+});
+
+test("a runner's own shipping record doesn't hold it back (a ship cut short by a restart starts over)", async () => {
+  const t = setup(undefined, "mini");
+  t.store.setCursor(`train:${REPO}:confirmed`.toLowerCase(), "1");
+  t.merged(90, "Remote-only routes");
+  await t.run();
+  t.advance(61);
+  t.store.setCursor(`train:${REPO}:shipping`.toLowerCase(), JSON.stringify({ runner: "mini", at: new Date("2026-11-16T13:00:00Z").toISOString() }));
+  await t.run();
+  assert.equal(t.commands.length, 1);
 });
 
 test("a version in App Review holds the train, and the stop label cancels one", async () => {

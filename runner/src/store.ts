@@ -71,6 +71,24 @@ interface Row {
   last_error: string | null; created_at: string; updated_at: string; not_before: string | null; revising: number | null; kind: string | null;
 }
 
+/** A row of the state the leader shares (leader.ts): a cursor, or a triage mark keyed `source␟item`. */
+export interface SharedRow {
+  table: "cursors" | "seen";
+  key: string;
+  value: string | null;
+}
+
+/**
+ * Which cursors are shared, as SQL over `$key`. Not shared: anything about one job (its key holds `owner/repo#n`),
+ * which lives with the Mac building it; the usage-limit pause, which is per Mac; and `shared:*`, the sync's own.
+ */
+const SHARED_CURSOR = "($key NOT GLOB '*#[0-9]*' AND $key NOT GLOB 'builds:*' AND $key NOT GLOB 'shared:*')";
+
+/** Whether a cursor key is shared (the same rule as SHARED_CURSOR). */
+export function sharedCursor(key: string): boolean {
+  return !/#[0-9]/.test(key) && !key.startsWith("builds:") && !key.startsWith("shared:");
+}
+
 /** Local durable state. GitHub labels are the visible queue; this records progress and cursors. */
 export class Store {
   private db: DatabaseSync;
@@ -108,6 +126,82 @@ export class Store {
     if (!columns.includes("not_before")) this.db.exec("ALTER TABLE jobs ADD COLUMN not_before TEXT");
     if (!columns.includes("revising")) this.db.exec("ALTER TABLE jobs ADD COLUMN revising INTEGER NOT NULL DEFAULT 0");
     if (!columns.includes("kind")) this.db.exec("ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'issue'");
+    // Shared state (leader.ts): every write to a shared cursor or triage mark is noted here, newest seq last,
+    // so the leader can send what changed. Job-scoped cursors (their key holds an issue id) stay on the Mac
+    // that has the job, as does the usage-limit pause and the sync's own bookmark.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS shared_outbox (tbl TEXT NOT NULL, key TEXT NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY (tbl, key));
+      CREATE TRIGGER IF NOT EXISTS shared_cursor_insert AFTER INSERT ON cursors WHEN ${SHARED_CURSOR.replaceAll("$key", "NEW.key")}
+        BEGIN INSERT INTO shared_outbox VALUES ('cursors', NEW.key, (SELECT coalesce(max(seq), 0) + 1 FROM shared_outbox)) ON CONFLICT (tbl, key) DO UPDATE SET seq = excluded.seq; END;
+      CREATE TRIGGER IF NOT EXISTS shared_cursor_update AFTER UPDATE ON cursors WHEN ${SHARED_CURSOR.replaceAll("$key", "NEW.key")}
+        BEGIN INSERT INTO shared_outbox VALUES ('cursors', NEW.key, (SELECT coalesce(max(seq), 0) + 1 FROM shared_outbox)) ON CONFLICT (tbl, key) DO UPDATE SET seq = excluded.seq; END;
+      CREATE TRIGGER IF NOT EXISTS shared_cursor_delete AFTER DELETE ON cursors WHEN ${SHARED_CURSOR.replaceAll("$key", "OLD.key")}
+        BEGIN INSERT INTO shared_outbox VALUES ('cursors', OLD.key, (SELECT coalesce(max(seq), 0) + 1 FROM shared_outbox)) ON CONFLICT (tbl, key) DO UPDATE SET seq = excluded.seq; END;
+      CREATE TRIGGER IF NOT EXISTS shared_seen_insert AFTER INSERT ON seen
+        BEGIN INSERT INTO shared_outbox VALUES ('seen', NEW.source || char(31) || NEW.item, (SELECT coalesce(max(seq), 0) + 1 FROM shared_outbox)) ON CONFLICT (tbl, key) DO UPDATE SET seq = excluded.seq; END;
+    `);
+  }
+
+  /** Shared rows written since they were last sent, oldest first, with the seq to acknowledge them by. */
+  sharedChanges(limit = 1000): { rows: SharedRow[]; seq: number } {
+    const outbox = this.db.prepare("SELECT tbl, key, seq FROM shared_outbox ORDER BY seq LIMIT ?").all(limit) as { tbl: SharedRow["table"]; key: string; seq: number }[];
+    return { rows: outbox.map(({ tbl, key }) => ({ table: tbl, key, value: this.sharedValue(tbl, key) })), seq: outbox.at(-1)?.seq ?? 0 };
+  }
+
+  /** Every shared row, for seeding the shared copy from this Mac. */
+  allShared(): SharedRow[] {
+    const cursors = (this.db.prepare(`SELECT key, value FROM cursors WHERE ${SHARED_CURSOR.replaceAll("$key", "key")} ORDER BY key`).all() as { key: string; value: string }[])
+      .map(row => ({ table: "cursors" as const, key: row.key, value: row.value }));
+    const seen = (this.db.prepare("SELECT source, item, at FROM seen ORDER BY source, item").all() as { source: string; item: string; at: string }[])
+      .map(row => ({ table: "seen" as const, key: `${row.source}\u001f${row.item}`, value: row.at }));
+    return [...cursors, ...seen];
+  }
+
+  /** Marks changes up to `seq` as sent; a row written again since keeps its newer seq and goes next time. */
+  sharedSent(rows: SharedRow[], seq: number): void {
+    const done = this.db.prepare("DELETE FROM shared_outbox WHERE tbl = ? AND key = ? AND seq <= ?");
+    for (const row of rows) done.run(row.table, row.key, seq);
+  }
+
+  clearSharedChanges(): void {
+    this.db.exec("DELETE FROM shared_outbox");
+  }
+
+  /**
+   * Takes rows from the shared copy: they replace this Mac's, and stop being changes to send. One transaction,
+   * so a crash half-way leaves the old state rather than a mix.
+   */
+  applyShared(rows: SharedRow[]): void {
+    const upsert = this.db.prepare("INSERT INTO cursors (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+    const remove = this.db.prepare("DELETE FROM cursors WHERE key = ?");
+    const seen = this.db.prepare("INSERT OR REPLACE INTO seen (source, item, at) VALUES (?, ?, ?)");
+    const unseen = this.db.prepare("DELETE FROM seen WHERE source = ? AND item = ?");
+    const sent = this.db.prepare("DELETE FROM shared_outbox WHERE tbl = ? AND key = ?");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const row of rows) {
+        if (row.table === "cursors") {
+          if (row.value === null) remove.run(row.key);
+          else upsert.run(row.key, row.value);
+        } else {
+          const [source, ...rest] = row.key.split("\u001f");
+          if (row.value === null) unseen.run(source, rest.join("\u001f"));
+          else seen.run(source, rest.join("\u001f"), row.value);
+        }
+        sent.run(row.table, row.key);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private sharedValue(table: SharedRow["table"], key: string): string | null {
+    if (table === "cursors") return this.cursor(key);
+    const [source, ...rest] = key.split("\u001f");
+    const row = this.db.prepare("SELECT at FROM seen WHERE source = ? AND item = ?").get(source, rest.join("\u001f")) as { at: string } | undefined;
+    return row?.at ?? null;
   }
 
   /** Puts a job back in the queue to retry after `delayMs` (transient failure). */

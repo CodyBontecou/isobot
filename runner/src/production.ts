@@ -96,6 +96,11 @@ export class ProductionRelease {
       .filter((r): r is { name: string; train: TrainConfig } => Boolean(r.train?.production && r.train.testflight));
   }
 
+  /** Whether a release is being submitted (a leader hands over only when none is). */
+  busy(): boolean {
+    return this.running.size > 0;
+  }
+
   /** One pass over every repo with a production release. Submissions run in the background; the promises are for tests. */
   async tick(): Promise<Promise<void>[]> {
     const started: Promise<void>[] = [];

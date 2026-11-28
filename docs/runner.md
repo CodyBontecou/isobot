@@ -311,12 +311,13 @@ This matters while moving to the Mac mini, or with a laptop and the mini both ru
 one runner it costs one extra comment read per claim and a comment edit every ~25 minutes per
 long job.
 
-**Only one runner may be the primary.** Leases cover builds, nothing else. Triage, the staff chat
+**Only one runner may lead.** Leases cover builds, nothing else. Triage, the staff chat
 and the board's agent dock, the 💻 handoff, the board feed, the release and weekly App Store trains,
 the content, ASO, crash and Play rollout trains, the hourly store reads and the PR sweep all keep their
 place in the runner's own `runner.sqlite` or poll Discord themselves, so a second runner doing them
 would post every digest and answer every chat message twice, and could release twice. Give every
-other runner `ISOBOT_RUNNER_ROLE=builder` in its `runner.env`:
+other runner `ISOBOT_RUNNER_ROLE=builder` in its `runner.env`, or run them all as `auto`
+([Sharing the lead](#leader)), so any Mac can be switched off:
 
 | | primary (default) | builder |
 | --- | --- | --- |
@@ -326,13 +327,65 @@ other runner `ISOBOT_RUNNER_ROLE=builder` in its `runner.env`:
 | 🧹 cleanup | closes the issue, strips labels, purges its leftovers | purges its own leftovers only |
 | Triage, staff chat, board and its dock, handoff, every train, store reads, PR sweep | ✅ | — |
 | Self-update | ✅ | ✅ |
-| Heartbeat to the watchdog | ✅ | leave `ISOBOT_HEARTBEAT_URL` unset: the watchdog watches one runner, and the primary's pings would hide a dead builder or the other way round |
+| Heartbeat to the watchdog | ✅ | leave `ISOBOT_HEARTBEAT_URL` unset: the watchdog watches one runner, and the primary's pings would hide a dead builder or the other way round (an `auto` runner sets it, and pings only while it leads) |
 
 A builder that dies mid-job leaves its issue on `isobot:building`; once its lease lapses (45 minutes), add
 `isobot:ready` again and whichever runner claims it builds it. `runner doctor` prints the role, and a builder announces itself as ``🟢 isobot runner `mini` started
 (builds only)``. To move the primary from one Mac to another, see
 [Moving the primary](#moving-the-primary): its `runner.sqlite` goes with it, and the old one becomes a
 builder (or stops) before the new one starts.
+
+<a id="leader"></a>
+### Sharing the lead (`auto`)
+
+With `ISOBOT_RUNNER_ROLE=auto` on every Mac, they all build, and one of them, the **leader**, also does
+everything in the primary column above. Who leads is a lease in the watchdog Worker (the same
+`ISOBOT_HEARTBEAT_URL`, which every auto runner needs). The leader renews it every 20 seconds; if its Mac
+sleeps, goes offline or is switched off, the lease runs out after 90 seconds and the next runner to ask takes
+over. Switch either Mac off and isobot carries on.
+
+- **The handover keeps its place.** The leader's duties keep their place in cursors and triage marks. Every
+  change goes to the watchdog as it is made, and a runner taking over first fetches what changed since it last
+  led. Cursors about one job (their key holds `owner/repo#n`: cards, leases, notes) and the usage-limit pause
+  stay on the Mac that has the job.
+- **No overlap.** A leader that can't renew stops leading 25 seconds before its lease could run out, timed on
+  its own clock, so it has stopped before anyone else can start. Every write carries the lease's epoch, and
+  the watchdog refuses writes from a runner that no longer holds it. A duty already running when the lease
+  is lost (a triage pass, a chat turn, a release under way) isn't stopped; what it writes after that stays on
+  its Mac until it leads again. Losing the lease takes over a minute without reaching Cloudflare, which mostly
+  means the Mac is asleep and the duty is stuck anyway. A release records which runner is shipping it, and a
+  new leader doesn't start that release again for 6 hours (longer than any ship takes), so an upload still
+  running on a Mac that lost the lead isn't repeated. After that, it counts as dead and the release starts over.
+- **The always-on Mac leads when it's up.** Give it `ISOBOT_LEADER_PREFERRED=1`. While another runner leads,
+  it asks for the lead, and the leader hands over between duties: no train, triage pass, store read or chat
+  turn running. Discord gets `↪️ laptop handed the lead to mini` and `👑 mini took over from laptop`.
+- **A paused runner hands the lead on.** `npm run runner -- pause` on the leader gives the lead to whoever
+  asks next, once it's between duties, and it doesn't take the lead while paused. So pausing one Mac to
+  drain it doesn't stop triage or the trains.
+- **Shutdown hands over at once.** Stopping a leading runner (`launchd/install.sh uninstall`, SIGTERM) sends
+  what's left and gives the lease up. A self-update restart keeps it, because it's back within the lease.
+- **Only the leader sends the heartbeat**, so the watchdog's alert means nobody leads.
+- **💻 only on the leader's posts.** The leader watches for 💻, and a job's 💻 opens the session on the Mac
+  that built it, so job cards and posts get one only from the runner that leads while it posts them.
+- **Release trains ship from the leader's jobs.** A train leaves for merged work in the leader's own
+  `runner.sqlite`. Work another runner merged ships with the next train (it builds `main`), but doesn't start
+  one and isn't in its notes. Builders have the same limit today.
+- **Machine-bound extras don't move.** The Vox inbox (`agents-cron`), ASO Tracker and the Device Cloud
+  preparer are LaunchAgents of their own; they stay on the Mac they're installed on.
+
+`npm run runner -- shared` prints who leads, the shared state's version, and when each runner last asked.
+
+**Switching to `auto`**, once, with the primary still running:
+
+1. Deploy the watchdog (`npm run watchdog:deploy`).
+2. On the primary: `npm run runner -- shared seed`. That loads its cursors and triage marks into the
+   watchdog's empty copy; it refuses if the copy isn't empty. An auto runner never leads an empty copy, so a
+   fresh Mac can't start triaging and releasing from scratch.
+3. On the primary, set `ISOBOT_RUNNER_ROLE=auto` and restart it (`runner/launchd/install.sh`). It takes the
+   lease and posts ``🟢 isobot runner `laptop` started (leads)``.
+4. Only then, on the other Macs: `ISOBOT_RUNNER_ROLE=auto`, `ISOBOT_HEARTBEAT_URL` set (the same URL),
+   `ISOBOT_LEADER_PREFERRED=1` on the always-on one, and restart. The preferred one takes the lead as soon as
+   the leader is idle.
 
 ### Moving the primary
 

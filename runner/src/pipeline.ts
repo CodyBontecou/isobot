@@ -69,7 +69,9 @@ export interface PipelineDeps {
   /** This runner's name in claim leases, so two runners (e.g. a laptop and the mini) never build one issue twice. */
   runnerId?: string;
   /** "builder" runners leave issue-wide work (🧹 cleanup's labels, comment and close) to the primary. */
-  role?: "primary" | "builder";
+  role?: "primary" | "builder" | "auto";
+  /** auto role: whether this runner leads right now (leader.ts). A runner that doesn't only cleans up after itself. */
+  leading?: () => boolean;
   /** Cloud builds (cloud.ts), for repos and content sites with `executor: "cloudflare"`. */
   cloud?: CloudExecutor;
 }
@@ -1259,8 +1261,8 @@ export class Pipeline {
       for (const issue of issues) {
         const id = storeId(owner, repo, issue.number);
         if (this.running.has(id)) continue;
-        if (this.deps.role === "builder") {
-          // The primary closes the issue and strips the labels; a builder only drops a job of its own and its leftovers.
+        if (this.deps.role === "builder" || (this.deps.role === "auto" && !this.deps.leading?.())) {
+          // The primary (or leader) closes the issue and strips the labels; a builder only drops a job of its own and its leftovers.
           const job = store.get(id);
           if (!job || this.cleanedHere.has(id)) continue;
           try {
