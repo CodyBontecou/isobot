@@ -8,6 +8,7 @@ import { AppAnalytics, failure } from "./analytics.js";
 import { AppleSales } from "./sales.js";
 import { GoogleAuth, PlayPublisher } from "./google.js";
 import { PlayAnalytics, ratingsText } from "./playAnalytics.js";
+import { ArtifactSync } from "./artifacts.js";
 import { CrashAudit } from "./crashes.js";
 import { PlayRollout, planText } from "./playRollout.js";
 import type { CheckReport } from "./policy.js";
@@ -85,6 +86,8 @@ interface Runtime {
   playRollout: PlayRollout | null;
   /** Every open PR in the configured repos, sorted into what needs the owner (prSweep.ts); on unless prSweep.enabled is false. */
   prSweep: PrSweep;
+  /** The board's Artifacts view, listed from claude.ai every few hours (artifacts.ts); off without config.artifacts. */
+  artifacts: ArtifactSync;
   /** Runner secrets and state, for settings that keep agents out of them. */
   secrets: string[];
   /** Messages carrying a 💻 (Herdr handoff), when it's on. */
@@ -300,7 +303,11 @@ function runtime(): Runtime {
     config: config.prSweep, landLabel: config.labels.land, github, store,
     repos: () => configuredRepos(config).filter(r => policyFor(config, `${r.owner}/${r.repo}`).autonomy !== "off").map(r => `${r.owner}/${r.repo}`),
   });
-  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, production, content, aso, analytics, sales, playAnalytics, crashes, playRollout, prSweep, secrets, handoff };
+  const artifacts = new ArtifactSync({
+    config: config.artifacts, bin: env.claudeBin, dir: path.join(env.home, "artifacts"), board: env.board,
+    cursor: key => store.cursor(key), setCursor: (key, value) => store.setCursor(key, value),
+  });
+  return { config, env, store, github, pipeline, sources, builder, notifier, checks, devices, repoFor, train, production, content, aso, analytics, sales, playAnalytics, crashes, playRollout, prSweep, artifacts, secrets, handoff };
 }
 
 /** ASO Tracker's CLI: one JSON call per tool; it starts the tracker's daemon itself when it isn't running. */
@@ -372,6 +379,8 @@ const ASO_POLL_MS = 5 * 60_000;
 const ANALYTICS_EVERY_MS = 5 * 60_000;
 /** How often the crash audit looks; it reads the stores at most every 6 hours itself. */
 const CRASHES_EVERY_MS = 30 * 60_000;
+/** How often the loop asks the artifact sync whether it's due (it lists every artifacts.everyHours itself). */
+const ARTIFACTS_RETRY_MS = 30 * 60_000;
 /** How often the PR sweep looks; it sweeps every prSweep.everyHours itself. */
 const PR_SWEEP_POLL_MS = 10 * 60_000;
 
@@ -420,6 +429,8 @@ async function loop(rt: Runtime): Promise<void> {
   let rolloutRunning = false;
   let lastPrPoll = 0;
   let prSweepRunning = false;
+  let artifactsRunning = false;
+  let lastArtifactsTry = 0;
   let cycleStartedAt: number | null = null;
   if (rt.env.heartbeatUrl) {
     const url = rt.env.heartbeatUrl;
@@ -479,6 +490,12 @@ async function loop(rt: Runtime): Promise<void> {
       items.push({ id: "pr-sweep", name: "PR sweep", cadence: `every ${rt.prSweep.everyMs() / 3_600_000} h`, lastAt: last,
         nextAt: last ? new Date(Date.parse(last) + rt.prSweep.everyMs()).toISOString() : null, running: prSweepRunning,
         detail: "every open PR: what to merge, what to land, release PRs a newer release replaced" });
+    }
+    if (rt.artifacts.enabled() && primary) {
+      const last = rt.artifacts.lastAt();
+      items.push({ id: "artifacts", name: "Artifacts", cadence: `every ${rt.artifacts.everyMs() / 3_600_000} h`, lastAt: last,
+        nextAt: artifactsRunning ? null : last ? new Date(Date.parse(last) + rt.artifacts.everyMs()).toISOString() : now.toISOString(), running: artifactsRunning,
+        detail: "claude.ai artifacts, filed by project, for the board's Artifacts view" });
     }
     const checkInHour = rt.config.chat?.checkInHour;
     if (chat && typeof checkInHour === "number") items.push({ id: "check-in", name: "Daily check-in", cadence: `daily at ${String(checkInHour).padStart(2, "0")}:00`,
@@ -583,6 +600,14 @@ async function loop(rt: Runtime): Promise<void> {
           void rt.crashes.tick().then(({ filed }) => { if (filed.length) console.log(`[crashes] opened ${filed.length} issue(s)`); })
             .catch(error => console.warn(`[crashes] failed: ${(error as Error).message}`))
             .finally(() => { crashesRunning = false; });
+        }
+        if (primary && !artifactsRunning && Date.now() - lastArtifactsTry > ARTIFACTS_RETRY_MS && rt.artifacts.enabled()) {
+          lastArtifactsTry = Date.now();
+          artifactsRunning = true;
+          // Lists at most every artifacts.everyHours itself; a failure is logged and tried again half an hour later.
+          void rt.artifacts.tick().then(result => { if (result) console.log(`[artifacts] pushed ${result.pushed}`); })
+            .catch(error => console.warn(`[artifacts] failed: ${(error as Error).message}`))
+            .finally(() => { artifactsRunning = false; });
         }
         if (primary && !rolloutRunning && Date.now() - lastRollout > CRASHES_EVERY_MS && rt.playRollout?.enabled()) {
           lastRollout = Date.now();
@@ -1123,6 +1148,17 @@ async function main(): Promise<void> {
       }
       const last = rt.prSweep.latest();
       console.log(last ? formatSweep(last) : "No sweep yet: run `prs preview` to see one without changing anything, or `prs sweep`.");
+      return;
+    }
+    case "artifacts": {
+      // `artifacts sync`: list claude.ai artifacts and push them to the board now.
+      if (!rt.artifacts.enabled()) {
+        console.error("The artifact sync is off: add an \"artifacts\" block to the runner config and set ISOBOT_BOARD_URL/TOKEN.");
+        process.exitCode = 2;
+        return;
+      }
+      if (process.argv[3] !== "sync") { console.error("Usage: artifacts sync"); process.exitCode = 2; return; }
+      console.log(JSON.stringify(await rt.artifacts.tick(new Date(), true)));
       return;
     }
     case "crashes": {

@@ -121,6 +121,24 @@
     ]
   },
   "selfUpdate": { "deploy": { "board": "npm --prefix board run deploy" } },
+  "artifacts": {
+    "everyHours": 6,
+    "projects": [
+      { "project": "Vox.md", "repo": "codybontecou/vox.md", "match": ["Vox.md", "Voxboard"] },
+      { "project": "Health.md", "repo": "codybontecou/health-md", "match": ["Health.md"] },
+      { "project": "Whereday", "repo": "codybontecou/whereday", "match": ["Whereday"] },
+      { "project": "GitSync.md", "repo": "codybontecou/GitSync.md", "match": ["GitSync"] },
+      { "project": "time.md", "repo": "codybontecou/time.md", "match": ["time.md", "screentime"] },
+      { "project": "Instarep.ly", "repo": "codybontecou/Instarep.ly", "match": ["Instarep"] },
+      { "project": "isobot", "repo": "codybontecou/isobot", "match": ["isobot"] },
+      { "project": "B-Line", "match": ["B-Line", "B Line", "Fleet Map"] },
+      { "project": "Thumble", "match": ["Thumble"] },
+      { "project": "Mappey", "match": ["Mappey"] },
+      { "project": "Mooney", "match": ["Mooney"] },
+      { "project": "Isolated Tech", "match": ["Isolated Tech"] },
+      { "project": "myself.md", "match": ["myself.md"] }
+    ]
+  },
   "defaults": {
     "autonomy": "merge",
     "checks": [],

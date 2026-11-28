@@ -146,23 +146,22 @@ written where its issues are opened, plus a case in `itemSource()` in `runner/sr
 
 ## Artifacts
 
-The board can't read claude.ai, so the list is pushed to it and replaced whole each time:
+The Artifacts view lists Claude's published artifacts (claude.ai designs, pages and docs) by project. The board can't read
+claude.ai, so the runner pushes the list (`runner/src/artifacts.ts`, on the primary, every `artifacts.everyHours`, default 6):
 
-```sh
-node board/scripts/push-artifacts.mjs artifacts.json   # ISOBOT_BOARD_URL / ISOBOT_BOARD_TOKEN from env or runner.env
-```
-
-```json
-{ "v": 1, "at": "2026-11-27T12:00:00Z", "artifacts": [
-  { "title": "Health.md — iOS", "url": "https://claude.ai/artifact/…", "project": "Health.md",
-    "repo": "codybontecou/health-md", "kind": "Design", "updatedAt": "2026-11-10", "pinned": false, "shared": false } ] }
-```
-
-- `POST /api/ingest/artifacts` takes it with the `INGEST_TOKEN`; `GET /api/artifacts` serves it to a session.
-- Links must be `https://claude.ai/artifact/…` or `https://claude.ai/code/artifact/…`; at most 2,000 entries. A bad
-  push is refused and the old list stays.
-- `project` is the group heading. `repo` is a runner repository (or null), so the sidebar filter applies.
-  To refresh it, ask Claude Code to list your artifacts, file them by project and run the script.
+- A Claude Code session (`haiku`, the runner's `CLAUDE_CODE_OAUTH_TOKEN`) gets only the Artifact tool, switched on in
+  `-p` mode by `CLAUDE_CODE_ARTIFACT=1`, and pages through `list` with scope `all`. A PreToolUse hook refuses every
+  other action, so a title in an artifact someone shared can't make it publish, open or delete anything.
+- The runner parses the tool's own results from the `stream-json` output, not the model's reply. Then it files each
+  artifact under the first `artifacts.projects` entry whose `match` words appear in the title (case-insensitive), or
+  under "Other". A project's `repo` makes the sidebar's repository filter apply.
+- It pushes the whole list to `POST /api/ingest/artifacts` (`INGEST_TOKEN`), which replaces the stored one. An empty
+  listing isn't pushed, and a failure is tried again half an hour later. `GET /api/artifacts` serves the list to a session.
+- `npm run runner -- artifacts sync` lists and pushes now. Schedule shows the job as **Artifacts**.
+- A hand-made list can be pushed with `node board/scripts/push-artifacts.mjs list.json` (ISOBOT_BOARD_URL/TOKEN from
+  env or runner.env). Its format is `{ "v": 1, "at", "artifacts": [{ "title", "url", "project", "repo", "kind",
+  "updatedAt", "pinned", "shared" }] }`. Links must be `https://claude.ai/artifact/…` or `…/code/artifact/…`, with at
+  most 2,000 entries. A bad push is refused and the old list stays.
 
 ## Setup
 
