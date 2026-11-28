@@ -65,6 +65,7 @@ doesn't propose your whole backlog.
 | `cloud-smoke <repo> [--checks]` | One real build in a Cloudflare build sandbox, never pushed ([cloud builds](cloud-builds.md)) |
 | `aso <repo> snapshot \| report \| research [--dry-run]` | Read an app's ASO Tracker board, post its weekly rank report now, or draft and measure a listing proposal ([ASO train](aso.md)) |
 | `aso <repo> pending \| approve \| reject \| apply` | Show, approve or dismiss an app's latest listing proposal, or write an approved one to App Store Connect now ([ASO train](aso.md#applying-a-proposal)) |
+| `pricing [<repo \| package>] [status \| snapshot \| decide [--dry-run] \| revert \| pause \| resume]` | Each app's prices, bounds and changes; read the stores now; run a decision now; undo the newest change; or stop and restart decisions ([pricing train](pricing.md)) |
 | `prs [preview \| sweep]` | The last [PR sweep](#pull-request-sweep); `preview` sweeps now and changes nothing, `sweep` sweeps now |
 | `release <repo#n>` | Run a merged job's `release.onMerge` again, e.g. one a restart interrupted. The running runner does it on its next pass |
 
@@ -754,6 +755,12 @@ TestFlight crash submissions every 6 hours, files each new crash group that affe
 
 With `"playRollout": {}`, the runner moves staged Google Play production rollouts forward on its own (20% for 2 days,
 50% for 5, then everyone) and halts one when the new version brings crashes. See [Play rollouts](play-rollout.md).
+
+## Pricing train
+
+With `"pricing": {}` and a repo's `pricing`, isobot sets the app's App Store and Google Play prices on its own within
+bounds, measures each change by value per first download against the period before it, and undoes one that clearly
+lost money. An owner's 🛑 on a change's post undoes it too. See [Pricing train](pricing.md).
 
 ## Pull request sweep
 

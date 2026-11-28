@@ -59,6 +59,8 @@ export interface RepoPolicy {
   content?: ContentConfig;
   /** App Store search tracking and listing proposals for the app, from the local ASO Tracker (aso.ts). */
   aso?: AsoAppConfig;
+  /** isobot sets this app's prices on the App Store and Google Play (pricing.ts). Needs the runner-wide `pricing`. */
+  pricing?: PricingAppConfig;
   /**
    * Only files matching these globs may change for an automatic merge. Set by the content train for its
    * own jobs (the site's directory); unset means anywhere.
@@ -149,6 +151,55 @@ export interface AsoPlayConfig {
   notes?: string;
   /** As for the App Store; default the App Store's autonomy. */
   autonomy?: "off" | "report" | "propose" | "apply";
+}
+
+export interface PricingAppConfig {
+  /**
+   * off: nothing; report: snapshots and outcomes only; propose: decisions are posted and applied on an owner's ✅;
+   * apply: isobot changes prices on its own (an owner's 🛑 undoes a change). Default propose.
+   */
+  autonomy?: "off" | "report" | "propose" | "apply";
+  /** App Store app id; default aso.appId. */
+  appId?: string;
+  /** Play package; default aso.play.packageName. */
+  packageName?: string;
+  /** false leaves the Play app's prices alone. */
+  play?: boolean;
+  /** Product ids or names never to change (upgrade products are always locked). */
+  lock?: string[];
+  /** Absolute US price limits per product id, inside the runner-wide floor/ceiling. */
+  bounds?: Record<string, { min?: number; max?: number }>;
+  /** Open an issue (isobot:ready + auto) to update hardcoded prices on the site and docs after each change. */
+  siteIssues?: boolean;
+  /** What to protect or aim for (read by the decision run). */
+  notes?: string;
+}
+
+/** Runner-wide settings for the pricing train (pricing.ts). */
+export interface PricingLimits {
+  /** Days a price is live before it's judged or changed again. Default 28. */
+  minDays?: number;
+  /** A change is judged by this many days at the latest, even with few downloads. Default 56. */
+  maxDays?: number;
+  /** Days between decision runs once a change may be made. Default 7. */
+  everyDays?: number;
+  /** First downloads after a change before it's judged (up to maxDays). Default 150. */
+  minDownloads?: number;
+  /** Largest relative move per change. Default 0.35. */
+  maxStep?: number;
+  /** Lowest and highest price, as multiples of the price isobot first saw. Default 0.5 and 2. */
+  floor?: number;
+  ceiling?: number;
+  /** A change that earns under this share per download (and clearly so) is undone on its own. Default 0.85. */
+  revertBelow?: number;
+  /** [from, to) local hours for decision runs. Default [9, 21]. */
+  hours?: [number, number];
+  /** Free trial length, to credit a conversion to the day its trial started. Default 7. */
+  trialDays?: number;
+  /** Store fee on proceeds. Default 0.15 (Small Business Program, and Play's subscription rate). */
+  fee?: number;
+  /** Paid periods a new subscriber is expected to pay for. Default week 8, month 5, year 1.5. */
+  expectedPeriods?: Partial<Record<"week" | "month" | "year", number>>;
 }
 
 /** Runner-wide settings for the ASO train (aso.ts). */
@@ -329,6 +380,8 @@ export interface RunnerConfig {
   crashes?: CrashLimits;
   /** The Play rollout train (playRollout.ts): staged production rollouts move forward on their own. Off without this block. */
   playRollout?: PlayRolloutLimits;
+  /** The pricing train (pricing.ts); per-app settings live in each repo's `pricing`. Off without this block. */
+  pricing?: PricingLimits;
   /** The pull request sweep (prSweep.ts): every open PR in the configured repos, sorted into what needs the owner. On by default. */
   prSweep?: PrSweepConfig;
   /** The board's Artifacts view, kept current from claude.ai (artifacts.ts). Off without this block. */
@@ -564,6 +617,20 @@ export function validateConfig(config: RunnerConfig): void {
       fail("content.hours must be [from, to) local hours with from < to");
     }
   }
+  if (config.pricing) {
+    const p = config.pricing;
+    const num = (v: unknown, lo: number, hi: number) => v === undefined || (typeof v === "number" && v >= lo && v <= hi);
+    if (!num(p.minDays, 7, 120) || !(p.minDays === undefined || Number.isInteger(p.minDays))) fail("pricing.minDays must be a whole number 7-120");
+    if (!num(p.maxDays, 7, 180) || (p.maxDays ?? 56) < (p.minDays ?? 28)) fail("pricing.maxDays must be 7-180 and at least minDays");
+    if (!num(p.everyDays, 1, 90)) fail("pricing.everyDays must be 1-90");
+    if (!num(p.minDownloads, 0, 100_000)) fail("pricing.minDownloads must be 0-100000");
+    if (!num(p.maxStep, 0.01, 1)) fail("pricing.maxStep must be 0.01-1");
+    if (!num(p.floor, 0.05, 1) || !num(p.ceiling, 1, 10)) fail("pricing.floor must be 0.05-1 and pricing.ceiling 1-10");
+    if (!num(p.revertBelow, 0, 1)) fail("pricing.revertBelow must be 0-1");
+    if (!num(p.trialDays, 0, 90) || !num(p.fee, 0, 0.5)) fail("pricing.trialDays must be 0-90 and pricing.fee 0-0.5");
+    if (p.hours !== undefined && !(Array.isArray(p.hours) && p.hours.length === 2 && p.hours[0] < p.hours[1] && p.hours[0] >= 0 && p.hours[1] <= 24)) fail("pricing.hours must be [from, to) local hours");
+    for (const [k, v] of Object.entries(p.expectedPeriods ?? {})) if (!["week", "month", "year"].includes(k) || !num(v, 0.1, 520)) fail(`pricing.expectedPeriods.${k} must be 0.1-520`);
+  }
   if (config.aso) {
     const a = config.aso;
     if (!a.cli?.trim()) fail("aso.cli must be the ASO Tracker CLI's path");
@@ -646,6 +713,17 @@ export function validateConfig(config: RunnerConfig): void {
         if (!/^[a-zA-Z][\w]*(\.[a-zA-Z][\w]*)+$/.test(a.play.packageName ?? "")) fail(`${name}: aso.play.packageName must be a Play package name like com.example.app`);
         if (a.play.language !== undefined && !/^[a-z]{2,3}(-[A-Za-z0-9]{2,4})?$/.test(a.play.language)) fail(`${name}: aso.play.language must be a Play language like en-US`);
         if (a.play.autonomy !== undefined && !["off", "report", "propose", "apply"].includes(a.play.autonomy)) fail(`${name}: unknown aso.play.autonomy "${a.play.autonomy}"`);
+      }
+    }
+    if (policy.pricing) {
+      const p = policy.pricing;
+      if (p.autonomy !== undefined && !["off", "report", "propose", "apply"].includes(p.autonomy)) fail(`${name}: unknown pricing.autonomy "${p.autonomy}"`);
+      if (!config.pricing) fail(`${name}: pricing needs the runner-wide pricing block`);
+      if (!(p.appId ?? policy.aso?.appId) && !(p.packageName ?? policy.aso?.play?.packageName)) fail(`${name}: pricing needs an App Store app id or a Play package (pricing.appId / aso.appId, pricing.packageName / aso.play.packageName)`);
+      if (p.appId !== undefined && !/^\d{6,12}$/.test(p.appId)) fail(`${name}: pricing.appId must be an App Store app id`);
+      if (p.lock !== undefined && !(Array.isArray(p.lock) && p.lock.every(x => typeof x === "string"))) fail(`${name}: pricing.lock must list product ids or names`);
+      for (const [id, b] of Object.entries(p.bounds ?? {})) {
+        if ((b.min !== undefined && !(b.min > 0)) || (b.max !== undefined && !(b.max > 0)) || (b.min !== undefined && b.max !== undefined && b.min > b.max)) fail(`${name}: pricing.bounds.${id} needs 0 < min <= max`);
       }
     }
     if (!(policy.minReviewConfidence > 0 && policy.minReviewConfidence <= 1)) fail(`${name}: minReviewConfidence must be in (0, 1]`);
